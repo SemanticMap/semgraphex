@@ -1,0 +1,47 @@
+Metadata-Version: 2.4
+Name: semgraphex
+Version: 0.1.0
+Summary: Graphon-based semantic concept extraction and search
+Author: SemanticMap
+License: MIT
+Keywords: graphon,graph,NLP,semantic search,concept extraction
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: spacy>=3.7.0
+Requires-Dist: nltk>=3.8.0
+Requires-Dist: gensim>=4.3.0
+Requires-Dist: scikit-learn>=1.3.0
+Requires-Dist: networkx>=3.1
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: scipy>=1.11.0
+Requires-Dist: faiss-cpu>=1.7.4
+Requires-Dist: annoy>=1.17.3
+Requires-Dist: joblib>=1.3.0
+
+# semgraphex
+
+Prototype implementation of a pipeline to extract concepts from a text corpus, build local co-occurrence graphs, approximate them with simple non-parametric graphon estimators, derive vector descriptors, and index them for similarity search.
+
+This is a research prototype: algorithms are intentionally simple & modular so they can be swapped for more advanced variants.
+
+## Pipeline Overview
+
+1. Preprocess corpus (tokenize, lemmatize, sentence-split, stopword removal)
+2. Extract candidate concepts (NER + statistical keyness + optional embedding clustering)
+3. For each concept: gather context windows and build weighted co-occurrence graph
+4. Estimate a graphon W (piecewise-constant block model smoothing) plus optional S(x) (degree-based signal)
+5. Derive descriptor vector (spectral + density + degree stats + sampled W blocks)
+6. Index descriptors in FAISS (fallback to Annoy) for approximate similarity search
+7. Query: run same pipeline for query text and retrieve nearest concepts.
+
+## Quick Start
+
+(After installing dependencies) see `examples/demo_basic.py` once created.
+
+## Disclaimer
+
+Graphon estimation here is a simplified approximation (histogram/block model smoothing). For rigorous estimation consider methods like Universal Singular Value Thresholding (USVT), neighborhood smoothing, or stochastic block model fitting.
