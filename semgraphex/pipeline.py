@@ -6,6 +6,7 @@ from .concepts import extract_ner_concepts, extract_statistical_terms, merge_con
 from .graph_builder import build_cooccurrence_graph
 from .graphon import estimate_graphon
 from .index import VectorIndex
+from .graphex import build_graphex_from_concepts, GraphexRepresentation
 
 @dataclass
 class ConceptSearchResult:
@@ -74,3 +75,29 @@ class ConceptGraphonIndexer:
         qv = self._build_query_vector(query_text)
         hits = self._index.search(qv, k=k)
         return [ConceptSearchResult(concept=h[0], score=h[1]) for h in hits]
+
+    # ---- Graphex construction ----
+    def build_graphex(
+        self,
+        dim: int = 2,
+        grid_size: int = 64,
+        similarity_threshold: float = 0.5,
+        smoothing_sigma: float = 1.0,
+    ) -> GraphexRepresentation:
+        """Construct a global graphex over all fitted concepts.
+
+        Returns a GraphexRepresentation capturing:
+          - latent coordinates (PCA) of concepts
+          - discretized W(x,y) over latent space
+          - hubness signal S(x)
+          - prominent edge list I
+        """
+        if not self._concept_vectors:
+            raise RuntimeError("Indexer not fitted or no concept vectors available")
+        return build_graphex_from_concepts(
+            self._concept_vectors,
+            dim=dim,
+            grid_size=grid_size,
+            similarity_threshold=similarity_threshold,
+            smoothing_sigma=smoothing_sigma,
+        )

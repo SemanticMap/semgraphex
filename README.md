@@ -14,6 +14,36 @@ This is a research prototype: algorithms are intentionally simple & modular so t
 6. Index descriptors in FAISS (fallback to Annoy) for approximate similarity search
 7. Query: run same pipeline for query text and retrieve nearest concepts.
 
+## Graphex (Global Concept Network)
+
+After fitting concept-level graphons you can aggregate them into a global concept network (graphex):
+
+1. Take all concept descriptor vectors produced during `fit`.
+2. Compute pairwise cosine similarities, threshold to form inter-concept edges.
+3. Embed concepts into a low-dimensional latent space with PCA (scaled to [0,1]^2).
+4. Estimate a discretized W(x,y) over the latent square by binning/smoothing edge weights.
+5. Compute S(x) as normalized weighted degree (hubness) of each concept.
+6. Collect prominent edges I (those above similarity threshold).
+
+Code:
+
+```python
+from semgraphex import ConceptGraphonIndexer
+indexer = ConceptGraphonIndexer().fit(corpus)
+grx = indexer.build_graphex(similarity_threshold=0.55)
+print(grx.top_hubs())
+```
+
+`GraphexRepresentation` provides:
+
+- `concepts`: list of concept labels
+- `coords`: latent coordinates (n,2) in [0,1]
+- `W_grid`: discretized kernel-smoothed estimate of W
+- `S`: hubness signal per concept
+- `I`: list of (concept_i, concept_j, weight) edges above threshold
+
+This forms a simple semantic map for downstream visualization or clustering.
+
 ## Quick Start
 
 (After installing dependencies) see `examples/demo_basic.py` once created.
