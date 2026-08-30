@@ -8,7 +8,7 @@
 - истории разработки из [project_history.md](project_history.md);
 - фактическом состоянии исходного кода, зависимостей и тестов;
 - решении считать текущий корпусный поиск устаревшим прототипом, перенести только полезные идеи и затем архивировать его;
-- требовании сделать CLI для ConceptNet/Haken основным продуктовым интерфейсом.
+- требовании сделать Google Colab notebooks приоритетной интерактивной средой исследования, сохранив CLI как обязательный воспроизводимый backend и publication-grade интерфейс.
 
 План намеренно ставит sparse ConceptNet, спектральную динамику, falsification и synthetic validation раньше graphon family modeling. Термины Haken-coarsening и Haken graphon estimator остаются рабочими названиями проверяемого исследовательского синтеза, а не установленными методами.
 
@@ -65,6 +65,14 @@
 
 Создать новый пакет `src/semmap_haken/` как единственное активное исследовательское ядро. Старый пакет `semgraphex/` сначала заморозить, затем переместить в `legacy/corpus_graphon_search/` после извлечения полезных контрактов. Не связывать новый pipeline с spaCy, FAISS, Annoy или корпусным API.
 
+Рабочий процесс должен быть **notebook-first, library-backed и CLI-reproducible**:
+
+1. Google Colab notebooks являются приоритетной точкой входа для загрузки данных, exploratory analysis, визуальной диагностики, запуска small experiments и демонстрации результатов.
+2. Notebook не содержит отдельной реализации научных алгоритмов: cells вызывают функции пакета `semmap_haken` или те же команды orchestration, что и CLI.
+3. CLI остаётся обязательным для полного воспроизведения runs, batch experiments, CI и публикационных результатов.
+4. Один YAML config, один dataset checksum и один artifact schema используются одинаково в Colab, локальном Jupyter и CLI.
+5. Любой результат, впервые полученный в notebook, до включения в научный отчёт должен повторяться headless-командой CLI с тем же resolved config.
+
 CLI должен иметь три стабильные команды:
 
 ```bash
@@ -73,7 +81,7 @@ python -m semmap_haken run --config configs/haken_linear_small.yaml
 python -m semmap_haken evaluate --run runs/<run_id>
 ```
 
-Дополнительные команды вводить только после стабилизации этих трёх: `synthetic`, `report`, `inspect`, `validate-run`.
+Дополнительные команды вводить только после стабилизации этих трёх: `download`, `synthetic`, `report`, `inspect`, `validate-run`. Команда `download` и соответствующий Python API являются приоритетными для Google Colab, но загрузка также может выполняться из notebook через общий data manager.
 
 ### 3.2. Поток данных и вычислений
 
@@ -99,9 +107,45 @@ flowchart TD
     Evaluate --> Graphons[Aligned block graphon branch]
     Evaluate --> Reports[Observed and interpretation report]
     Graphons --> Reports
+    Colab[Google Colab notebook] --> Download[ConceptNet download and Drive cache]
+    Download --> Dump
+    Colab --> Parse
+    Colab --> Operators
+    Colab --> Evaluate
+    Reports --> Drive[Google Drive run artifacts]
 ```
 
-### 3.3. Предлагаемая структура репозитория
+### 3.3. Notebook-first слой и границы ответственности
+
+```mermaid
+flowchart LR
+    Notebook[Colab notebook UI] --> API[semmap_haken Python API]
+    CLI[Reproducible CLI] --> API
+    API --> Artifacts[Versioned run artifacts]
+    Notebook --> Visuals[Interactive diagnostics]
+    Artifacts --> Drive[Google Drive cache and runs]
+    Artifacts --> Report[Publication report]
+```
+
+Notebook отвечает за:
+
+- установку/проверку окружения Colab;
+- подключение Google Drive по явному выбору пользователя;
+- загрузку либо обнаружение ConceptNet в cache;
+- выбор config/profile и отображение оценки ресурсов до запуска;
+- вызов стабильного Python API/CLI;
+- визуализацию spectrum, timescales, hierarchy, plateaus и baseline comparisons;
+- сохранение ссылок на `run_id`, manifest и artifacts.
+
+Notebook **не отвечает** за:
+
+- альтернативную реализацию parser, operators, coarsening или metrics;
+- хранение единственной копии научного результата только в output cells;
+- неявное изменение config/seed;
+- интерпретацию незавершённого или invalid run как evidence;
+- полную обработку medium/full dump в RAM.
+
+### 3.4. Предлагаемая структура репозитория
 
 ```text
 .
@@ -121,12 +165,24 @@ flowchart TD
 │   ├── raw/
 │   ├── interim/
 │   └── processed/
+├── notebooks/
+│   ├── 00_colab_setup_and_conceptnet.ipynb
+│   ├── 01_data_smoke_and_sparse_graph.ipynb
+│   ├── 02_linear_modes_and_dynamics.ipynb
+│   ├── 03_one_step_haken_coarsening.ipynb
+│   ├── 04_multiscale_plateaus.ipynb
+│   ├── 05_baselines_and_nulls.ipynb
+│   ├── 06_conceptnet_small_report.ipynb
+│   ├── 07_nonlinear_slaving.ipynb
+│   └── README.md
 ├── src/
 │   └── semmap_haken/
 │       ├── __init__.py
 │       ├── __main__.py
 │       ├── config.py
 │       ├── artifacts.py
+│       ├── data_manager.py
+│       ├── notebook.py
 │       ├── conceptnet.py
 │       ├── graph_build.py
 │       ├── operators.py
@@ -157,6 +213,8 @@ flowchart TD
 ├── reports/
 └── docs/
 ```
+
+Notebook numbering отражает milestone order. Каждый notebook должен быть коротким orchestration-документом, а не монолитным дубликатом pipeline. Общие setup, download, path resolution, rendering и resource-check helpers размещаются в `src/semmap_haken/notebook.py` и `src/semmap_haken/data_manager.py`.
 
 ---
 
@@ -234,6 +292,16 @@ flowchart TD
 - artifact paths и schema versions;
 - warnings, failure reason и resumability metadata.
 
+Дополнительные поля для notebook/Colab runs:
+
+- execution environment: Colab/local Jupyter/CLI;
+- Colab runtime class, detected RAM/disk и optional accelerator;
+- notebook path/version и executed cell workflow version;
+- Google Drive cache location без персональных идентификаторов;
+- download URL, expected/actual size, checksum и cache hit status;
+- source artifact location и final persisted run location;
+- признак CLI replay и checksum-equivalence notebook↔CLI.
+
 ---
 
 ## 5. Пошаговый план реализации
@@ -289,9 +357,74 @@ flowchart TD
 - активные imports и dependencies не зависят от legacy;
 - полезные metadata/dataclass patterns отражены в новых контрактах.
 
+### Шаг 0.4. Создать Colab-first foundation до научных notebooks
+
+Целевые файлы: `notebooks/00_colab_setup_and_conceptnet.ipynb`, `notebooks/README.md`, `src/semmap_haken/notebook.py`, `src/semmap_haken/data_manager.py`.
+
+Действия:
+
+1. Создать минимальный notebook setup: clone/pull выбранного commit, установка package с notebook extras, вывод commit/package versions.
+2. Реализовать runtime detection для Colab и локального Jupyter без привязки core package к `google.colab`.
+3. Сделать Google Drive mount опциональным и явным; notebook должен работать и с ephemeral `/content` storage.
+4. Ввести единый `workspace_root`, `data_root`, `cache_root`, `runs_root`, разрешаемый через config/environment, а не hard-coded paths.
+5. Добавить preflight: свободный disk/RAM, ожидаемый download size, оценка peak memory и предупреждение до запуска.
+6. Добавить режимы `demo`, `small` и `medium`; notebook по умолчанию запускает `demo`/`small`, но никогда автоматически не запускает medium/full processing.
+7. Обеспечить сохранение resolved config, environment snapshot и `run_id` независимо от интерфейса запуска.
+8. Подготовить notebook execution test через `nbclient` или `papermill` на tiny fixture без сетевого доступа.
+
+Критерии приёмки:
+
+- setup notebook выполняется сверху вниз в чистом Colab runtime;
+- повторный запуск не переустанавливает/не скачивает неизменившиеся artifacts без необходимости;
+- notebook использует package API, а не копию алгоритмического кода;
+- tiny notebook run и эквивалентный CLI run создают совместимые manifests и одинаковые checksums основных artifacts.
+
 ---
 
 ## Фаза 1. M0 — данные ConceptNet и sparse graph
+
+### Шаг 1.0. Реализовать надёжную загрузку ConceptNet в Google Colab
+
+Целевой модуль: `src/semmap_haken/data_manager.py`; приоритетный интерфейс: `notebooks/00_colab_setup_and_conceptnet.ipynb`.
+
+Действия:
+
+1. Хранить официальный URL ConceptNet 5.7 assertions и ожидаемый checksum в versioned dataset manifest/config, а не непосредственно в notebook cells.
+2. Поддержать три источника: официальный HTTP(S) download, существующий файл в Google Drive и явно переданный локальный/Colab path.
+3. Выполнять streaming download во временный `.part` файл с progress bar, timeout, retry/backoff и атомарным rename после проверки.
+4. По возможности поддержать resume через HTTP Range; если сервер не поддерживает resume, корректно перезапускать download.
+5. Проверять доступный disk до загрузки и checksum после загрузки; файл с неверным checksum не использовать.
+6. Кэшировать raw dump в Google Drive по схеме `datasets/conceptnet/<version>/<checksum>/`, не смешивая версии.
+7. Не распаковывать полный gzip dump без необходимости: parser должен читать gzip stream напрямую.
+8. После подготовки graph artifacts сохранять их в Drive cache; последующие notebooks должны предпочитать verified processed artifacts повторному parsing raw dump.
+9. Добавить manual upload fallback для случаев, когда официальный endpoint недоступен из Colab.
+10. Записывать license/source/version/checksum/cache-hit в `RunManifest` и показывать эти данные в notebook.
+
+Рекомендуемый Colab data flow:
+
+```mermaid
+flowchart TD
+    Start[Start clean Colab runtime] --> Mount{Use Google Drive cache}
+    Mount -->|yes| CheckDrive[Check versioned Drive cache]
+    Mount -->|no| CheckLocal[Check ephemeral local cache]
+    CheckDrive --> Valid{Checksum valid}
+    CheckLocal --> Valid
+    Valid -->|yes| Raw[Use cached gzip dump]
+    Valid -->|no| Download[Stream official download]
+    Download --> Verify[Verify size and checksum]
+    Verify --> Raw
+    Raw --> Parse[Stream filtered assertions]
+    Parse --> Prepared[Write sparse prepared artifact]
+    Prepared --> Persist[Persist artifact and manifest]
+```
+
+Критерии приёмки:
+
+- первый Colab run может загрузить и проверить ConceptNet без ручного редактирования paths;
+- повторный run использует verified Drive/ephemeral cache;
+- interrupted download не принимается за готовый dataset;
+- parser работает непосредственно с gzip и не требует удвоенного disk space;
+- notebook явно сообщает source, checksum, cache status, disk/RAM budget и итоговый artifact path.
 
 ### Шаг 1.1. Реализовать streaming parser assertions
 
@@ -354,6 +487,8 @@ flowchart TD
 - sparse adjacency round-trip побитно или численно стабилен;
 - повтор с тем же config/seed даёт те же mapping и checksums;
 - сформирован data quality report.
+- notebook `01_data_smoke_and_sparse_graph.ipynb` выполняет M0 сверху вниз в clean Colab runtime;
+- подготовленный sparse artifact сохраняется в Google Drive или экспортируется пользователем до завершения ephemeral session.
 
 ---
 
@@ -433,6 +568,7 @@ flowchart TD
 - trajectory solver проходит аналитические tests;
 - `r` diagnostics и uncertainty сформированы;
 - H1 пока получает только статус observed/inconclusive, но не объявляется доказанной.
+- notebook `02_linear_modes_and_dynamics.ipynb` визуализирует diagnostics, но все численные результаты получены package API и сохраняются как run artifacts.
 
 ---
 
@@ -498,6 +634,7 @@ flowchart TD
 - quotient и contraction mapping сериализуются;
 - dynamics пересчитана на coarse graph;
 - fine/coarse subspaces сравниваются после корректного lifting.
+- notebook `03_one_step_haken_coarsening.ipynb` воспроизводит one-step workflow на synthetic и ConceptNet small profile.
 
 ---
 
@@ -544,6 +681,7 @@ flowchart TD
 - hierarchy обратима до исходных node IDs;
 - на каждом уровне имеется полный metrics row;
 - final `k` не задан заранее.
+- notebook `04_multiscale_plateaus.ipynb` поддерживает resume из Drive checkpoints после перезапуска Colab runtime.
 
 ---
 
@@ -592,6 +730,7 @@ flowchart TD
 - intended plateau обнаруживается на held-out planted systems;
 - no-timescale/null systems не дают эквивалентный plateau сверх допустимого FDR;
 - thresholds и failure cases задокументированы до ConceptNet claims.
+- synthetic notebook выполняется headless на tiny profile и интерактивно в Colab на small profile.
 
 ---
 
@@ -695,6 +834,8 @@ flowchart TD
 - есть Haken hierarchy, baselines, nulls и semantic report;
 - каждый вывод оформлен как Observed / Interpretation / Alternative explanations / Status;
 - результат может честно иметь статус inconclusive или contradicts.
+- notebook `06_conceptnet_small_report.ipynb` загружает завершённый run по `run_id`, а не пересчитывает результаты неявно;
+- primary report подтверждён CLI replay с тем же config/checksums.
 
 ---
 
@@ -805,6 +946,9 @@ flowchart TD
 3. Проверить, что embeddings, partitions и trajectories имеют bounded storage strategy.
 4. Заменить agglomerative/all-pairs paths connectivity-constrained или approximate nearest-neighbor variants.
 5. Добавить sampled metrics там, где exact motif/graphon comparison слишком дорог.
+6. Ввести отдельные resource profiles `colab_standard`, `colab_high_ram` и `workstation`; профиль ограничивает node count, top-k modes, bootstrap runs, trajectory storage и concurrency.
+7. Не обещать выполнение 100k–200k pipeline в стандартном бесплатном Colab: medium запуск разрешать только после preflight и сохранять checkpoint после каждого expensive stage.
+8. Не считать GPU обязательным: основной SciPy sparse eigensolver CPU-oriented; accelerator использовать только для явно реализованных и проверенных optional branches.
 
 ### Шаг 10.2. Масштабировать eigensolver и coarsening
 
@@ -883,6 +1027,10 @@ flowchart TD
 - full CLI prepare/run/evaluate;
 - checkpoint/resume;
 - run manifest validation.
+- headless execution каждого notebook на tiny/offline fixture;
+- notebook↔CLI artifact equivalence для одного deterministic smoke config;
+- mocked interrupted/resumed ConceptNet download и checksum failure;
+- Drive-disabled Colab path и local Jupyter path.
 
 ### 6.4. Scientific regression tests
 
@@ -900,6 +1048,9 @@ flowchart TD
 - fast unit suite на каждый commit;
 - synthetic regression suite по расписанию;
 - medium benchmark вне обычного PR CI.
+- notebook lint/structure validation без сохранённых тяжёлых outputs;
+- scheduled headless notebook execution на tiny fixtures;
+- запрет secrets, personal Drive paths и raw ConceptNet dump в git.
 
 ---
 
@@ -928,7 +1079,10 @@ baselines.csv
 null_models.csv
 figures/
 report.md
+notebook_execution.json
 ```
+
+Google Colab может использовать ephemeral storage для активных вычислений, но завершённый run должен быть скопирован в persistent storage до завершения runtime. При Google Drive режиме рекомендуемая структура — `semmap_haken/{datasets,runs,reports}/`; cache keys и artifact paths формируются кодом, а не вручную в cells. Raw ConceptNet dump, generated runs и notebook outputs не коммитятся в git.
 
 Отчёт `report.md` для каждого эксперимента обязан разделять:
 
@@ -955,6 +1109,12 @@ report.md
 | Near-degenerate modes меняют basis | Нестабильные embeddings | Group eigenspaces, rotation-invariant metrics, Procrustes только для visualization |
 | Solver nonconvergence скрыт | Недостоверные metrics | Residual gates, invalid levels, fallback solver, report failures |
 | Старый prototype смешивается с новым evidence | Неверные claims | Legacy archive и dependency isolation |
+| Colab runtime отключается во время расчёта | Потеря многочасового run | Checkpoint после каждого scale/stage, atomic writes, Drive persistence и resume |
+| Полный dump повторно скачивается в каждом notebook | Потеря времени/трафика | Versioned Drive cache, checksum и общий data manager |
+| Drive I/O замедляет sparse computation | Долгие runs и partial writes | Копировать active artifacts на ephemeral SSD, затем атомарно синхронизировать checkpoints |
+| Notebook и CLI расходятся | Невоспроизводимые результаты | Thin notebooks, единый package API/config, headless tests и CLI replay gate |
+| Стандартный Colab не вмещает medium run | OOM/runtime reset | Resource profiles, preflight, bounded storage, small-first default и external compute fallback |
+| Notebook сохраняет персональные paths или credentials | Утечка данных | Не коммитить outputs/secrets, относительные/configurable paths, explicit Drive consent |
 
 ---
 
@@ -978,14 +1138,20 @@ report.md
 
 ## 10. Приоритет ближайших implementation iterations
 
+Google Colab readiness является сквозным приоритетом с первой итерации, а не поздней задачей документации. Каждая итерация завершается двумя способами запуска: интерактивный notebook path и эквивалентный CLI/headless path.
+
 ### Итерация 1 — foundation и M0
 
 1. Новый `src/semmap_haken` package и typed config.
 2. Artifact schemas и run manifest.
-3. ConceptNet streaming parser.
-4. Deterministic sparse graph builder.
-5. CLI `prepare`.
-6. Unit/integration tests и data report.
+3. Colab setup helpers, versioned paths и resource preflight.
+4. ConceptNet download manager с Google Drive cache, checksum, retry/resume и manual upload fallback.
+5. Notebook `00_colab_setup_and_conceptnet.ipynb`.
+6. ConceptNet streaming parser.
+7. Deterministic sparse graph builder.
+8. Notebook `01_data_smoke_and_sparse_graph.ipynb`.
+9. CLI `download` и `prepare`.
+10. Unit/integration/headless notebook tests и data report.
 
 ### Итерация 2 — M1
 
@@ -995,6 +1161,7 @@ report.md
 4. Multi-heuristic `r` selection.
 5. Linear perturbation dynamics.
 6. CLI `run` для single scale.
+7. Notebook `02_linear_modes_and_dynamics.ipynb` с сохранением artifacts в Drive.
 
 ### Итерация 3 — M2/M3
 
@@ -1003,6 +1170,7 @@ report.md
 3. Quotient и hierarchy artifacts.
 4. Lifting/restriction и cross-scale metrics.
 5. Multi-scale orchestration, checkpoint/resume.
+6. Notebooks `03_one_step_haken_coarsening.ipynb` и `04_multiscale_plateaus.ipynb`.
 
 ### Итерация 4 — M4
 
@@ -1010,6 +1178,7 @@ report.md
 2. Plateau detector.
 3. Held-out calibration и false-positive gates.
 4. CLI `evaluate` и standard report.
+5. Headless-tested synthetic/plateau notebook workflow.
 
 ### Итерация 5 — M5
 
@@ -1018,6 +1187,7 @@ report.md
 3. Primary ConceptNet small run.
 4. Ablations и post-hoc semantics.
 5. Scientific audit H1/H2/H4/H5/H6.
+6. Notebooks `05_baselines_and_nulls.ipynb` и `06_conceptnet_small_report.ipynb`.
 
 ### Итерация 6 и далее
 
@@ -1025,6 +1195,7 @@ report.md
 2. Graphon-compatible branch и O7.
 3. Medium scale M7.
 4. Relation-specific и multiplex extensions.
+5. Notebook `07_nonlinear_slaving.ipynb` и resource-profile-specific Colab workflows.
 
 ---
 
@@ -1042,6 +1213,9 @@ report.md
 8. Sparse-control branch отделена от graphon-compatible branch.
 9. Semantic labels не использованы при построении partition.
 10. Вывод сформулирован независимо от того, поддержаны гипотезы или опровергнуты.
+11. Все milestone notebooks выполняются сверху вниз на заявленном Colab profile или корректно останавливаются на resource preflight.
+12. ConceptNet загружается через versioned verified cache, а provenance/checksum попадают в manifest.
+13. Primary notebook results воспроизводятся CLI replay с тем же config и совместимыми artifact checksums.
 
 Strong success дополнительно требует nontrivial plateau, persistent slow subspace, преимущество Haken-coarsening над baselines, post-hoc semantic coherence после controls и out-of-sample slaving.
 
@@ -1049,4 +1223,4 @@ Strong success дополнительно требует nontrivial plateau, per
 
 ## 12. Итоговая рекомендация
 
-Не дорабатывать существующий corpus-search pipeline в направлении ConceptNet. Его плотные графонные сетки, NLP-зависимости и vector-search API не являются подходящей основой для sparse multi-scale dynamics. Новый `semmap_haken` следует строить sparse-first, contract-first и falsification-first. Первым научным решением должен быть ответ на вопрос о наличии воспроизводимого маломерного slow subspace; только после этого оправданы iterative coarsening, nonlinear slaving и graphon family modeling.
+Не дорабатывать существующий corpus-search pipeline в направлении ConceptNet. Его плотные графонные сетки, NLP-зависимости и vector-search API не являются подходящей основой для sparse multi-scale dynamics. Новый `semmap_haken` следует строить notebook-first для исследовательской работы, но library-backed, sparse-first, contract-first и falsification-first. Google Colab должен стать приоритетной интерактивной средой с надёжной загрузкой ConceptNet, versioned Google Drive cache, resource preflight и checkpoint/resume. CLI остаётся обязательным механизмом независимого воспроизведения и публикационных запусков. Первым научным решением должен быть ответ на вопрос о наличии воспроизводимого маломерного slow subspace; только после этого оправданы iterative coarsening, nonlinear slaving и graphon family modeling.

@@ -5,6 +5,8 @@ paths:
   runs_root: runs
 dataset:
   source: conceptnet-5.7
+  # Override this in a copied config for offline smoke tests/manual uploads.
+  path: null
   language: en
   relations: [RelatedTo, IsA]
   min_weight: 1.0

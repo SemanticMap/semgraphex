@@ -1,0 +1,3 @@
+/a/related-dog-pet	/r/RelatedTo	/c/en/dog/n/animal	/c/en/pet	{"weight": 2.0, "dataset": "/d/test", "sources": ["/s/test"], "license": "CC BY-SA 4.0"}
+/a/isa-dog-animal	/r/IsA	/c/en/dog	/c/en/animal	{"weight": 1.0, "dataset": "/d/test", "sources": ["/s/test"], "license": "CC BY-SA 4.0"}
+/a/related-perro-mascota	/r/RelatedTo	/c/es/perro	/c/es/mascota	{"weight": 3.0, "dataset": "/d/test", "sources": ["/s/test"], "license": "CC BY-SA 4.0"}

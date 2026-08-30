@@ -50,6 +50,7 @@ class DatasetConfig:
     min_weight: float
     max_nodes: int
     component: ComponentPolicy
+    path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
         min_weight=float(_require(dataset_raw, "min_weight", "dataset")),
         max_nodes=int(_require(dataset_raw, "max_nodes", "dataset")),
         component=component,
+        path=_resolve_path(dataset_raw["path"], source_path.parent.resolve()) if dataset_raw.get("path") else None,
     )
     if dataset.min_weight < 0 or dataset.max_nodes <= 0:
         raise ConfigurationError("dataset.min_weight must be non-negative and dataset.max_nodes must be positive")
@@ -144,7 +146,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
     )
     resolved = {
         "paths": {key: str(value) for key, value in asdict(paths).items()},
-        "dataset": {**asdict(dataset), "relations": list(dataset.relations)},
+        "dataset": {**{key: (str(value) if isinstance(value, Path) else value) for key, value in asdict(dataset).items()}, "relations": list(dataset.relations)},
         "graph": asdict(graph),
         "runtime": {
             "profile": runtime.profile,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import uuid
 from collections.abc import Callable, Sequence
 
 CommandHandler = Callable[[argparse.Namespace], int]
@@ -48,3 +50,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(error.code)
     handler = _HANDLERS.get(arguments.command, _not_implemented(arguments.command))
     return handler(arguments)
+
+
+def _data_handlers() -> None:
+    from .conceptnet import AssertionFilters, ParseReport, stream_assertions
+    from .config import load_config
+    from .data_manager import DatasetDescriptor, acquire_dataset
+    from .graph_build import build_sparse_graph, save_prepared_graph
+    from .manifest import RunManifest
+
+    def download(args: argparse.Namespace) -> int:
+        config = load_config(args.config)
+        descriptor = DatasetDescriptor(dataset_id=config.dataset.source)
+        result = acquire_dataset(descriptor, cache_root=config.paths.cache_root, manual_path=config.dataset.path)
+        print(json.dumps({"path": str(result.path), "sha256": result.sha256, "cache_hit": result.cache_hit}, sort_keys=True))
+        return 0
+
+    def prepare(args: argparse.Namespace) -> int:
+        config = load_config(args.config)
+        if config.dataset.path is None:
+            raise ValueError("dataset.path is required for offline prepare; run download or provide a fixture/manual path")
+        report = ParseReport()
+        records = stream_assertions(config.dataset.path, AssertionFilters(config.dataset.language, frozenset(config.dataset.relations), config.dataset.min_weight), report=report)
+        graph = build_sparse_graph(records, directed=config.graph.directed, weight_transform=config.graph.weight_transform, component=config.dataset.component, max_nodes=config.dataset.max_nodes)
+        run_id = f"prepare-{uuid.uuid4().hex[:12]}"
+        run_dir = config.paths.runs_root / run_id
+        paths = save_prepared_graph(graph, run_dir, metadata={"parser_report": report.to_dict(), "dataset_path": str(config.dataset.path)}, resolved_config=config.resolved)
+        manifest = RunManifest.create(run_id=run_id, resolved_config=config.resolved, execution_environment="cli")
+        manifest = manifest.__class__(**{**manifest.to_dict(), "stages": {"prepare": "completed"}, "artifacts": {name: {"path": str(path)} for name, path in paths.items()}})
+        manifest.write_json(run_dir / "manifest.json")
+        print(str(run_dir))
+        return 0
+
+    register_handler("download", download)
+    register_handler("prepare", prepare)
+
+
+_data_handlers()
