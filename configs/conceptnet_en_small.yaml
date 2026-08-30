@@ -1,0 +1,20 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: runs
+dataset:
+  source: conceptnet-5.7
+  language: en
+  relations: [RelatedTo, IsA, PartOf, HasA, UsedFor, HasProperty]
+  min_weight: 1.0
+  max_nodes: 10000
+  component: largest
+graph:
+  directed: false
+  weight_transform: log1p
+  operator: normalized_adjacency
+runtime:
+  profile: small
+  random_seed: 1729
+  resource_profile: resource_profiles/small.yaml

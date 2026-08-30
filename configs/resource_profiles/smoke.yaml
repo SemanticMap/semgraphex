@@ -1,0 +1,5 @@
+name: smoke
+expected_max_nodes: 1000
+recommended_ram_gib: 4
+recommended_disk_gib: 5
+notes: Offline fixture and configuration validation only; it does not download data.

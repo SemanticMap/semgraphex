@@ -1,53 +1,45 @@
-# semgraphex
+# semmap-haken
 
-Prototype implementation of a pipeline to extract concepts from a text corpus, build local co-occurrence graphs, approximate them with simple non-parametric graphon estimators, derive vector descriptors, and index them for similarity search.
+`semmap-haken` is the active, sparse-first research foundation for testing the Haken-coarsening ConceptNet hypotheses. The approved design is in [`docs/haken_coarsening_roadmap.md`](docs/haken_coarsening_roadmap.md). It is **notebook-first, library-backed, and CLI-reproducible**: notebooks will call package APIs, while the CLI is the replayable interface for every reportable run.
 
-This is a research prototype: algorithms are intentionally simple & modular so they can be swapped for more advanced variants.
+## Installation
 
-## Pipeline Overview
+Install the active core package with:
 
-1. Preprocess corpus (tokenize, lemmatize, sentence-split, stopword removal)
-2. Extract candidate concepts (NER + statistical keyness + optional embedding clustering)
-3. For each concept: gather context windows and build weighted co-occurrence graph
-4. Estimate a graphon W (piecewise-constant block model smoothing) plus optional S(x) (degree-based signal)
-5. Derive descriptor vector (spectral + density + degree stats + sampled W blocks)
-6. Index descriptors in FAISS (fallback to Annoy) for approximate similarity search
-7. Query: run same pipeline for query text and retrieve nearest concepts.
-
-## Graphex (Global Concept Network)
-
-After fitting concept-level graphons you can aggregate them into a global concept network (graphex):
-
-1. Take all concept descriptor vectors produced during `fit`.
-2. Compute pairwise cosine similarities, threshold to form inter-concept edges.
-3. Embed concepts into a low-dimensional latent space with PCA (scaled to [0,1]^2).
-4. Estimate a discretized W(x,y) over the latent square by binning/smoothing edge weights.
-5. Compute S(x) as normalized weighted degree (hubness) of each concept.
-6. Collect prominent edges I (those above similarity threshold).
-
-Code:
-
-```python
-from semgraphex import ConceptGraphonIndexer
-indexer = ConceptGraphonIndexer().fit(corpus)
-grx = indexer.build_graphex(similarity_threshold=0.55)
-print(grx.top_hubs())
+```bash
+python -m pip install -e .
 ```
 
-`GraphexRepresentation` provides:
+The legacy [`semgraphex/`](semgraphex/) package remains importable during migration. Its corpus-search dependencies are deliberately isolated in the `legacy` optional group:
 
-- `concepts`: list of concept labels
-- `coords`: latent coordinates (n,2) in [0,1]
-- `W_grid`: discretized kernel-smoothed estimate of W
-- `S`: hubness signal per concept
-- `I`: list of (concept_i, concept_j, weight) edges above threshold
+```bash
+python -m pip install -e '.[legacy]'
+```
 
-This forms a simple semantic map for downstream visualization or clustering.
+## Foundation contracts
 
-## Quick Start
+- [`src/semmap_haken/config.py`](src/semmap_haken/config.py) loads and validates a YAML file once, then exposes a resolved, serializable configuration shared by notebook and CLI callers.
+- [`src/semmap_haken/artifacts.py`](src/semmap_haken/artifacts.py) defines versioned metadata contracts for downloads and future sparse `GraphArtifact` payloads. Sparse payload I/O is intentionally deferred to Workstream 2.
+- [`src/semmap_haken/manifest.py`](src/semmap_haken/manifest.py) persists resolved config, provenance, checksums, stage states, and notebook/Colab metadata—including resource and Drive-cache fields.
 
-(After installing dependencies) see `examples/demo_basic.py` once created.
+Starter inputs are [`configs/conceptnet_en_smoke.yaml`](configs/conceptnet_en_smoke.yaml), [`configs/conceptnet_en_small.yaml`](configs/conceptnet_en_small.yaml), and the profiles under [`configs/resource_profiles/`](configs/resource_profiles/).
 
-## Disclaimer
+## CLI surface
 
-Graphon estimation here is a simplified approximation (histogram/block model smoothing). For rigorous estimation consider methods like Universal Singular Value Thresholding (USVT), neighborhood smoothing, or stochastic block model fitting.
+```bash
+python -m semmap_haken --help
+python -m semmap_haken download --help
+python -m semmap_haken prepare --help
+python -m semmap_haken run --help
+python -m semmap_haken evaluate --help
+```
+
+The command grammar is stable and handler registration is extensible. Commands return a clear “not yet implemented” result until their owning workstream supplies an implementation. This foundation does **not** download ConceptNet, parse assertions, build graphs, or make scientific claims.
+
+## Development verification
+
+```bash
+python -m pytest tests/test_semmap_haken_foundation.py tests/test_semmap_haken_cli.py
+```
+
+The historical prototype remains available only for compatibility and is not evidence for the Haken/ConceptNet research program.
