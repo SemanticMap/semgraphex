@@ -10,6 +10,12 @@ Install the active core package with:
 python -m pip install -e .
 ```
 
+For notebook validation and optional headless notebook execution, install the isolated extra rather than adding Jupyter packages to the research core:
+
+```bash
+python -m pip install -e '.[notebook]'
+```
+
 The legacy [`semgraphex/`](semgraphex/) package remains importable during migration. Its corpus-search dependencies are deliberately isolated in the `legacy` optional group:
 
 ```bash
@@ -25,6 +31,16 @@ python -m pip install -e '.[legacy]'
 - [`src/semmap_haken/manifest.py`](src/semmap_haken/manifest.py) persists resolved config, provenance, checksums, stage states, and notebook/Colab metadata—including resource and Drive-cache fields.
 
 Starter inputs are [`configs/conceptnet_en_smoke.yaml`](configs/conceptnet_en_smoke.yaml), [`configs/conceptnet_en_small.yaml`](configs/conceptnet_en_small.yaml), and the profiles under [`configs/resource_profiles/`](configs/resource_profiles/).
+
+## Colab-first quick start
+
+Use [`notebooks/00_colab_setup_and_conceptnet.ipynb`](notebooks/00_colab_setup_and_conceptnet.ipynb) in a clean Colab runtime, then run [`notebooks/01_data_smoke_and_sparse_graph.ipynb`](notebooks/01_data_smoke_and_sparse_graph.ipynb). The setup steps are documented in [`notebooks/README.md`](notebooks/README.md).
+
+Safety is deliberate: both notebooks default to the committed offline tiny fixture; `ALLOW_PRODUCTION_DOWNLOAD` is `False`; Drive use is disabled; and no headless test clones, installs packages, mounts Drive, or accesses the network. A production dump requires explicit opt-in or a manually supplied local path after the shared resource preflight reports available RAM/disk against the selected profile.
+
+Notebook execution is **active-local first**. The helpers in [`src/semmap_haken/notebook.py`](src/semmap_haken/notebook.py) resolve the same workspace/data/cache/runs roots as [`src/semmap_haken/config.py`](src/semmap_haken/config.py), capture an execution snapshot, and can atomically copy selected light metadata to a user-selected durable destination. They never automatically persist heavy sparse artifacts or assume a personal Drive path.
+
+The notebook↔CLI contract is strict: notebooks use package APIs and the public `prepare` workflow; they display source, checksum/cache status, preflight, `run_id`, and artifact paths. The resulting [`manifest.json`](src/semmap_haken/manifest.py) and resolved config are the provenance record, while [`semmap-haken prepare`](src/semmap_haken/cli.py) remains the reproducible replay interface.
 
 ## CLI surface
 
