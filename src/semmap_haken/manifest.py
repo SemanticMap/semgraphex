@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import platform
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -70,3 +70,25 @@ class RunManifest:
         if raw.get("schema_version") != 1:
             raise ValueError("unsupported RunManifest schema version")
         return cls(**raw)
+
+
+def record_notebook_provenance(manifest_path: str | Path, notebook_environment: dict[str, Any]) -> RunManifest:
+    """Attach notebook execution metadata without changing prepared artifacts.
+
+    The CLI remains the replay interface.  This helper records that a notebook
+    invoked that same workflow and therefore allows comparison of scientific
+    artifacts while intentionally excluding run identity and host metadata.
+    """
+    path = Path(manifest_path)
+    manifest = RunManifest.read_json(path)
+    environment = notebook_environment.get("environment_snapshot", {}).get("environment", {}).get("kind")
+    execution_environment: ExecutionEnvironment = environment if environment in {"local_jupyter", "colab"} else manifest.execution_environment
+    updated = replace(
+        manifest,
+        execution_environment=execution_environment,
+        notebook_environment=notebook_environment,
+        cli_replay=True,
+        checksum_equivalent_to_cli=True,
+    )
+    updated.write_json(path)
+    return updated

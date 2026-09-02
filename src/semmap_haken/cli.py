@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import uuid
 from collections.abc import Callable, Sequence
 
 CommandHandler = Callable[[argparse.Namespace], int]
 _HANDLERS: dict[str, CommandHandler] = {}
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def register_handler(command: str, handler: CommandHandler) -> None:
@@ -76,8 +85,19 @@ def _data_handlers() -> None:
         run_id = f"prepare-{uuid.uuid4().hex[:12]}"
         run_dir = config.paths.runs_root / run_id
         paths = save_prepared_graph(graph, run_dir, metadata={"parser_report": report.to_dict(), "dataset_path": str(config.dataset.path)}, resolved_config=config.resolved)
+        checksums = {path.name: _sha256(str(path)) for path in paths.values()}
+        artifacts = {
+            name: {"path": str(path), "sha256": checksums[path.name]}
+            for name, path in paths.items()
+        }
         manifest = RunManifest.create(run_id=run_id, resolved_config=config.resolved, execution_environment="cli")
-        manifest = manifest.__class__(**{**manifest.to_dict(), "stages": {"prepare": "completed"}, "artifacts": {name: {"path": str(path)} for name, path in paths.items()}})
+        manifest = manifest.__class__(**{
+            **manifest.to_dict(),
+            "checksums": checksums,
+            "stages": {"prepare": "completed"},
+            "artifacts": artifacts,
+            "cli_replay": True,
+        })
         manifest.write_json(run_dir / "manifest.json")
         print(str(run_dir))
         return 0
