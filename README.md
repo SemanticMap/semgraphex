@@ -28,6 +28,10 @@ python -m pip install -e '.[legacy]'
 - [`src/semmap_haken/data_manager.py`](src/semmap_haken/data_manager.py) acquires a versioned dump from a verified cache, explicit manual path, or HTTP URL. HTTP downloads stream through `*.part`, verify size/SHA-256, then atomically rename. Interrupted downloads restart rather than trust partial content; the core has no Colab import.
 - [`src/semmap_haken/conceptnet.py`](src/semmap_haken/conceptnet.py) streams plain or gzip five-field assertion TSV, preserves full URIs/direction/provenance, and reports filtering and invalid-record counters. ConceptNet `weight` is a heuristic confidence/informativeness weight, never a probability.
 - [`src/semmap_haken/graph_build.py`](src/semmap_haken/graph_build.py) constructs a SciPy CSR adjacency without dense NxN allocation and persists a round-trippable prepared artifact.
+
+Prepared artifacts are published atomically only after checksums and a `COMPLETED` marker are written. Each run persists exact raw-byte SHA-256/size, declared source/version/URL, verification status, selected-edge provenance in `selected_edges.jsonl`, and replay metadata. The default `graph.self_loop_policy` is `exclude`. Official ConceptNet runs require a real pinned `dataset.expected_sha256`; local inputs without one are explicitly `manual_unverified`.
+
+Use the tested (not hash-locked) constraints in [`requirements/constraints.txt`](requirements/constraints.txt): `python -m pip install -c requirements/constraints.txt -e '.[dev,notebook]'`, then run `python -m pytest -q` in a clean environment.
 - [`src/semmap_haken/manifest.py`](src/semmap_haken/manifest.py) persists resolved config, provenance, checksums, stage states, and notebook/Colab metadata—including resource and Drive-cache fields.
 
 Starter inputs are [`configs/conceptnet_en_smoke.yaml`](configs/conceptnet_en_smoke.yaml), [`configs/conceptnet_en_small.yaml`](configs/conceptnet_en_small.yaml), and the profiles under [`configs/resource_profiles/`](configs/resource_profiles/).

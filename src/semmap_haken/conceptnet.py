@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,11 +80,12 @@ def stream_assertions(path: str | Path, filters: AssertionFilters = AssertionFil
                 if len(fields) != 5:
                     raise AssertionParseError("expected exactly five TSV fields")
                 metadata = json.loads(fields[4])
-                if not isinstance(metadata, dict) or not isinstance(metadata.get("weight"), (int, float)):
-                    raise AssertionParseError("metadata requires numeric weight")
+                weight = metadata.get("weight") if isinstance(metadata, dict) else None
+                if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(float(weight)):
+                    raise AssertionParseError("invalid weight: requires a finite non-boolean number")
                 assertion = Assertion(fields[0], fields[1], fields[2], fields[3], float(metadata["weight"]), metadata.get("dataset"), metadata.get("sources"), metadata.get("license"))
             except (json.JSONDecodeError, AssertionParseError) as error:
-                actual_report.rejected["invalid"] += 1
+                actual_report.rejected["invalid_weight" if "weight" in str(error) else "invalid"] += 1
                 if invalid_mode == "fail_fast":
                     raise AssertionParseError(f"line {line_number}: {error}") from error
                 continue

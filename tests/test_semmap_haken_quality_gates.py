@@ -68,8 +68,8 @@ def _assert_manifest_integrity(run_dir: Path) -> RunManifest:
 
 def test_prepare_manifest_references_and_checksums_are_complete(tmp_path: Path) -> None:
     manifest = _assert_manifest_integrity(_run_prepare(_write_config(tmp_path)))
-    assert set(manifest.artifacts) == {"adjacency", "nodes", "metadata", "resolved_config"}
-    assert set(manifest.checksums) == {"adjacency.npz", "nodes.json", "graph_metadata.json", "resolved_config.json"}
+    assert set(manifest.artifacts) == {"adjacency", "nodes", "metadata", "resolved_config", "selected_edges"}
+    assert set(manifest.checksums) == {"adjacency.npz", "nodes.json", "graph_metadata.json", "resolved_config.json", "selected_edges.jsonl"}
     metadata_path = Path(manifest.artifacts["metadata"]["path"])
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     for filename, checksum in metadata["checksums"].items():

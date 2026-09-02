@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import platform
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +47,11 @@ class RunManifest:
     ) -> "RunManifest":
         from . import __version__
 
+        if git_commit is None:
+            try:
+                git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+            except (OSError, subprocess.CalledProcessError):
+                git_commit = "unknown"
         return cls(
             run_id=run_id,
             resolved_config=resolved_config,
@@ -52,7 +59,7 @@ class RunManifest:
             created_at=datetime.now(timezone.utc).isoformat(),
             git_commit=git_commit,
             package_version=__version__,
-            host_summary={"python": platform.python_version(), "platform": platform.platform()},
+            host_summary={"python": platform.python_version(), "platform": platform.platform(), "executable": sys.executable},
             notebook_environment=notebook_environment or {},
         )
 

@@ -34,6 +34,7 @@ class DownloadResult:
     size_bytes: int
     cache_hit: bool
     source: str
+    verification_status: str
     restarted_download: bool = False
 
 
@@ -80,6 +81,8 @@ def acquire_dataset(
     Existing cache/manual files are verified before use. Downloads deliberately restart
     from zero after interruption: no partial content is ever treated as a cache hit.
     """
+    if descriptor.expected_sha256 is None and manual_path is None:
+        raise DownloadError("official acquisition requires a pinned expected SHA-256; refusing unverified cache/download")
     destination = versioned_cache_path(cache_root, descriptor)
     for candidate, source in ((destination, "cache"), (Path(manual_path) if manual_path else None, "manual")):
         if candidate is not None and candidate.is_file():
@@ -91,7 +94,10 @@ def acquire_dataset(
                 else:
                     raise
             else:
-                return DownloadResult(candidate, digest, size, True, source)
+                status = "verified" if descriptor.expected_sha256 else "manual_unverified"
+                if source == "cache" and status != "verified":
+                    raise DownloadError("unverified official cache must not be reused")
+                return DownloadResult(candidate, digest, size, True, source, status)
 
     _preflight(destination, descriptor.expected_size_bytes)
     url = source_url or descriptor.source_url
@@ -106,7 +112,7 @@ def acquire_dataset(
                     output.write(chunk)
             digest, size = _verify(part, descriptor)
             os.replace(part, destination)
-            return DownloadResult(destination, digest, size, False, "http", restarted_download=attempt > 0)
+            return DownloadResult(destination, digest, size, False, "http", "verified", restarted_download=attempt > 0)
         except Exception as error:  # urllib errors differ by transport implementation.
             last_error = error
             part.unlink(missing_ok=True)

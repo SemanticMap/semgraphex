@@ -51,6 +51,9 @@ class DatasetConfig:
     max_nodes: int
     component: ComponentPolicy
     path: Path | None = None
+    version: str | None = None
+    source_url: str | None = None
+    expected_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,7 @@ class GraphConfig:
     directed: bool
     weight_transform: WeightTransform
     operator: OperatorName
+    self_loop_policy: Literal["exclude", "include"] = "exclude"
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,9 @@ def load_config(path: str | Path) -> ExperimentConfig:
         max_nodes=int(_require(dataset_raw, "max_nodes", "dataset")),
         component=component,
         path=_resolve_path(dataset_raw["path"], source_path.parent.resolve()) if dataset_raw.get("path") else None,
+        version=str(dataset_raw["version"]) if dataset_raw.get("version") else None,
+        source_url=str(dataset_raw["source_url"]) if dataset_raw.get("source_url") else None,
+        expected_sha256=str(dataset_raw["expected_sha256"]) if dataset_raw.get("expected_sha256") else None,
     )
     if dataset.min_weight < 0 or dataset.max_nodes <= 0:
         raise ConfigurationError("dataset.min_weight must be non-negative and dataset.max_nodes must be positive")
@@ -131,7 +138,10 @@ def load_config(path: str | Path) -> ExperimentConfig:
     directed = _require(graph_raw, "directed", "graph")
     if not isinstance(directed, bool):
         raise ConfigurationError("graph.directed must be a boolean")
-    graph = GraphConfig(directed=directed, weight_transform=weight_transform, operator=operator)
+    loop_policy = graph_raw.get("self_loop_policy", "exclude")
+    if loop_policy not in {"exclude", "include"}:
+        raise ConfigurationError("graph.self_loop_policy must be 'exclude' or 'include'")
+    graph = GraphConfig(directed=directed, weight_transform=weight_transform, operator=operator, self_loop_policy=loop_policy)
 
     runtime_raw = _require_mapping(raw.get("runtime", {}), "runtime")
     resource_profile_value = runtime_raw.get("resource_profile")

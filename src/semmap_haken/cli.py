@@ -64,12 +64,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _data_handlers() -> None:
     from .conceptnet import AssertionFilters, ParseReport, stream_assertions
     from .config import load_config
-    from .data_manager import DatasetDescriptor, acquire_dataset
+    from .data_manager import DatasetDescriptor, acquire_dataset, sha256_file
     from .graph_build import build_sparse_graph, save_prepared_graph
     from .manifest import RunManifest
+    import yaml
+
+    def validate_resource_profile(config: object) -> None:
+        profile_path = config.runtime.resource_profile
+        if profile_path is None:
+            return
+        profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+        if not isinstance(profile, dict) or profile.get("name") != config.runtime.profile:
+            raise ValueError("runtime.profile must match a valid resource profile name")
+        if int(profile.get("expected_max_nodes", -1)) != config.dataset.max_nodes:
+            raise ValueError("resource profile expected_max_nodes must equal dataset.max_nodes")
 
     def download(args: argparse.Namespace) -> int:
         config = load_config(args.config)
+        validate_resource_profile(config)
         descriptor = DatasetDescriptor(dataset_id=config.dataset.source)
         result = acquire_dataset(descriptor, cache_root=config.paths.cache_root, manual_path=config.dataset.path)
         print(json.dumps({"path": str(result.path), "sha256": result.sha256, "cache_hit": result.cache_hit}, sort_keys=True))
@@ -79,12 +91,16 @@ def _data_handlers() -> None:
         config = load_config(args.config)
         if config.dataset.path is None:
             raise ValueError("dataset.path is required for offline prepare; run download or provide a fixture/manual path")
+        if config.dataset.source == "conceptnet-5.7" and config.dataset.expected_sha256 is None:
+            raise ValueError("production ConceptNet prepare requires dataset.expected_sha256; a placeholder is not verification")
         report = ParseReport()
         records = stream_assertions(config.dataset.path, AssertionFilters(config.dataset.language, frozenset(config.dataset.relations), config.dataset.min_weight), report=report)
-        graph = build_sparse_graph(records, directed=config.graph.directed, weight_transform=config.graph.weight_transform, component=config.dataset.component, max_nodes=config.dataset.max_nodes)
+        graph = build_sparse_graph(records, directed=config.graph.directed, weight_transform=config.graph.weight_transform, component=config.dataset.component, max_nodes=config.dataset.max_nodes, self_loop_policy=config.graph.self_loop_policy)
         run_id = f"prepare-{uuid.uuid4().hex[:12]}"
         run_dir = config.paths.runs_root / run_id
-        paths = save_prepared_graph(graph, run_dir, metadata={"parser_report": report.to_dict(), "dataset_path": str(config.dataset.path)}, resolved_config=config.resolved)
+        raw_digest = sha256_file(config.dataset.path)
+        source_identity = {"path": str(config.dataset.path), "sha256": raw_digest, "size_bytes": config.dataset.path.stat().st_size, "dataset_name": config.dataset.source, "dataset_version": config.dataset.version, "source_url": config.dataset.source_url, "acquisition_status": "manual", "verification_status": "verified" if config.dataset.expected_sha256 == raw_digest else "manual_unverified"}
+        paths = save_prepared_graph(graph, run_dir, metadata={"parser_report": report.to_dict(), "source_identity": source_identity}, resolved_config=config.resolved)
         checksums = {path.name: _sha256(str(path)) for path in paths.values()}
         artifacts = {
             name: {"path": str(path), "sha256": checksums[path.name]}
@@ -97,8 +113,11 @@ def _data_handlers() -> None:
             "stages": {"prepare": "completed"},
             "artifacts": artifacts,
             "cli_replay": True,
+            "random_seeds": {"runtime": config.runtime.random_seed},
+            "resumability": {"source_identity": source_identity, "environment_constraints": "requirements/constraints.txt"},
         })
         manifest.write_json(run_dir / "manifest.json")
+        (run_dir / "COMPLETED").write_text("complete\n", encoding="utf-8")
         print(str(run_dir))
         return 0
 

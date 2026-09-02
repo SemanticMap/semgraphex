@@ -95,3 +95,18 @@ These are **not findings blocking M0 closure** when clearly retained as limitati
 **Do not close Iteration 1 before R1–R6 are remediated and their acceptance tests pass in a clean, locked environment.** R7–R9 should be scheduled before publication-grade M1 work; R7 and R8 are strongly recommended for the same remediation change because they affect the credibility of the replay contract.
 
 After remediation, re-run the complete quality-gate suite plus new adversarial fixtures for non-finite values, loops, source mutation, cache verification, selected-edge provenance, and interrupted artifact persistence. The M0 source-of-truth then becomes the updated manifest/provenance contract and passing clean-environment evidence—not this review document.
+
+## Workstream 5B remediation appendix
+
+This appendix records implementation evidence only; it does not alter the review verdict above.
+
+| Finding | Remediation | Acceptance coverage |
+| --- | --- | --- |
+| R1 | Exact input SHA-256, byte size, declared source identity, and verification status are persisted in metadata and manifest resumability. | `tests/test_semmap_haken_quality_gates.py`, `tests/test_semmap_haken_remediation.py` |
+| R2 | Deterministic post-selection `selected_edges.jsonl` preserves directed endpoints, relation, contribution, dataset/source/license fields; metadata references its checksum. | `tests/test_semmap_haken_remediation.py` |
+| R3 | Configurable `exclude`/`include` loop policy is enforced; reports expose simple-edge count, adjacency NNZ, and loop count. | `tests/test_semmap_haken_remediation.py` |
+| R4 | Parser rejects boolean and non-finite weights with an `invalid_weight` counter in skip mode. | `tests/test_semmap_haken_remediation.py` |
+| R5 | Unpinned official acquisition/cache reuse is rejected; verified status requires a matching expected digest. | `tests/test_semmap_haken_remediation.py` |
+| R6 | NumPy/SciPy bounds and documented tested constraints are in `pyproject.toml` and `requirements/constraints.txt`. | clean environment instructions in `README.md` |
+
+Artifact publication stages a sibling directory, validates files, writes `COMPLETED`, and atomically promotes it while retaining a previous valid directory until promotion succeeds. Loader validation rejects incomplete sets and checksum mismatches. Manifest creation records git revision, host executable, runtime seed, source identity, and the constraints reference; resource profiles are parsed and checked against runtime profile and `dataset.max_nodes`.
