@@ -3,3 +3,4 @@ datas/
 __pycache__/
 .venv/
 *.egg-info/
+runs
