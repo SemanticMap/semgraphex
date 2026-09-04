@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 from pathlib import Path
 
 import pytest
@@ -19,11 +18,34 @@ def test_stream_parser_preserves_sense_uri_and_filters() -> None:
     assert report.to_dict() == {"total_lines": 3, "accepted": 1, "rejected": {"language": 1, "relation": 1}}
 
 
-def test_plain_and_gzip_are_equivalent(tmp_path: Path) -> None:
+def test_stream_parser_limits_physical_rows_before_filtering() -> None:
+    report = ParseReport()
+
+    records = list(
+        stream_assertions(
+            FIXTURE,
+            AssertionFilters(language="en", relations=frozenset({"RelatedTo"}), min_weight=1.5),
+            max_rows=2,
+            report=report,
+        )
+    )
+
+    assert [record.start_uri for record in records] == ["/c/en/dog/n/animal"]
+    assert report.to_dict() == {
+        "total_lines": 2,
+        "accepted": 1,
+        "max_rows": 2,
+        "row_limit_reached": True,
+        "rejected": {"relation": 1},
+    }
+
+
+def test_stream_parser_rejects_compressed_input(tmp_path: Path) -> None:
     compressed = tmp_path / "tiny.tsv.gz"
-    with gzip.open(compressed, "wb") as output:
-        output.write(FIXTURE.read_bytes())
-    assert list(stream_assertions(FIXTURE, invalid_mode="skip_invalid")) == list(stream_assertions(compressed, invalid_mode="skip_invalid"))
+    compressed.write_bytes(FIXTURE.read_bytes())
+
+    with pytest.raises(ValueError, match="decompressed"):
+        list(stream_assertions(compressed))
 
 
 def test_invalid_records_fail_or_skip(tmp_path: Path) -> None:

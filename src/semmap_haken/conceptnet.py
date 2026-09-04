@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 import math
 from collections import Counter
@@ -45,9 +44,19 @@ class ParseReport:
     total_lines: int = 0
     accepted: int = 0
     rejected: Counter[str] = field(default_factory=Counter)
+    max_rows: int | None = None
+    row_limit_reached: bool = False
 
     def to_dict(self) -> dict[str, object]:
-        return {"total_lines": self.total_lines, "accepted": self.accepted, "rejected": dict(sorted(self.rejected.items()))}
+        result: dict[str, object] = {
+            "total_lines": self.total_lines,
+            "accepted": self.accepted,
+            "rejected": dict(sorted(self.rejected.items())),
+        }
+        if self.max_rows is not None:
+            result["max_rows"] = self.max_rows
+            result["row_limit_reached"] = self.row_limit_reached
+        return result
 
 
 def _language(uri: str) -> str | None:
@@ -65,15 +74,21 @@ def _source_texts(value: object) -> set[str]:
     return set()
 
 
-def stream_assertions(path: str | Path, filters: AssertionFilters = AssertionFilters(), *, invalid_mode: str = "fail_fast", report: ParseReport | None = None) -> Iterator[Assertion]:
-    """Yield filtered assertions without materializing the dump; weights remain heuristic weights."""
+def stream_assertions(path: str | Path, filters: AssertionFilters = AssertionFilters(), *, invalid_mode: str = "fail_fast", report: ParseReport | None = None, max_rows: int | None = None) -> Iterator[Assertion]:
+    """Yield filtered assertions from a decompressed local TSV without materializing it."""
     if invalid_mode not in {"fail_fast", "skip_invalid"}:
         raise ValueError("invalid_mode must be 'fail_fast' or 'skip_invalid'")
+    if max_rows is not None and (isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0):
+        raise ValueError("max_rows must be a positive integer or None")
     destination = Path(path)
     actual_report = report if report is not None else ParseReport()
-    opener = gzip.open if destination.suffix == ".gz" else open
-    with opener(destination, "rt", encoding="utf-8", newline="") as stream:
+    if destination.suffix.lower() in {".gz", ".bz2", ".xz", ".zip"}:
+        raise ValueError("stream_assertions requires an already-decompressed ConceptNet assertions file")
+    actual_report.max_rows = max_rows
+    with destination.open("rt", encoding="utf-8", newline="") as stream:
         for line_number, line in enumerate(stream, start=1):
+            if max_rows is not None and line_number > max_rows:
+                break
             actual_report.total_lines += 1
             try:
                 fields = line.rstrip("\n").split("\t")
@@ -102,3 +117,4 @@ def stream_assertions(path: str | Path, filters: AssertionFilters = AssertionFil
             else:
                 actual_report.accepted += 1
                 yield assertion
+        actual_report.row_limit_reached = max_rows is not None and actual_report.total_lines == max_rows

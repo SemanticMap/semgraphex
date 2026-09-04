@@ -7,10 +7,10 @@ dataset:
   source: conceptnet-5.7
   version: "5.7.0"
   source_url: https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
-  # Required for verified official runs; replace with the official pinned digest.
-  expected_sha256: null
-  # Override this in a copied config for offline smoke tests/manual uploads.
+  # Local already-decompressed ConceptNet assertions TSV/CSV file.
   path: null
+  # Reads the first N physical rows before filtering; null reads all rows.
+  max_rows: 1000
   language: en
   relations: [RelatedTo, IsA]
   min_weight: 1.0

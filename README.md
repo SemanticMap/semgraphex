@@ -29,7 +29,7 @@ python -m pip install -e '.[legacy]'
 - [`src/semmap_haken/conceptnet.py`](src/semmap_haken/conceptnet.py) streams plain or gzip five-field assertion TSV, preserves full URIs/direction/provenance, and reports filtering and invalid-record counters. ConceptNet `weight` is a heuristic confidence/informativeness weight, never a probability.
 - [`src/semmap_haken/graph_build.py`](src/semmap_haken/graph_build.py) constructs a SciPy CSR adjacency without dense NxN allocation and persists a round-trippable prepared artifact.
 
-Prepared artifacts are published atomically only after checksums and a `COMPLETED` marker are written. Each run persists exact raw-byte SHA-256/size, declared source/version/URL, verification status, selected-edge provenance in `selected_edges.jsonl`, and replay metadata. The default `graph.self_loop_policy` is `exclude`. Official ConceptNet runs require a real pinned `dataset.expected_sha256`; local inputs without one are explicitly `manual_unverified`.
+Prepared artifacts are published atomically only after artifact checksums and a `COMPLETED` marker are written. Each run persists its configured local input path, declared source/version/URL, input format, row limit, selected-edge provenance in `selected_edges.jsonl`, and replay metadata. The default `graph.self_loop_policy` is `exclude`. Input download, decompression, and source-file checksum verification are deliberately outside `prepare`.
 
 Use the tested (not hash-locked) constraints in [`requirements/constraints.txt`](requirements/constraints.txt): `python -m pip install -c requirements/constraints.txt -e '.[dev,notebook]'`, then run `python -m pytest -q` in a clean environment.
 - [`src/semmap_haken/manifest.py`](src/semmap_haken/manifest.py) persists resolved config, provenance, checksums, stage states, and notebook/Colab metadata—including resource and Drive-cache fields.
@@ -56,7 +56,7 @@ python -m semmap_haken run --help
 python -m semmap_haken evaluate --help
 ```
 
-`download` accepts a configured/manual source and writes the versioned cache below `data/cache/datasets/conceptnet/<version>/<checksum>/`. `prepare` requires `dataset.path` for a local/offline fixture or manual dump; it creates `runs/prepare-*/adjacency.npz`, `nodes.json`, `graph_metadata.json`, `resolved_config.json`, and `manifest.json`.
+`prepare` requires `dataset.path` to reference an already-downloaded, already-decompressed ConceptNet assertions TSV/CSV file, such as `../conceptnet-assertions-5.7.0.csv`. It does not download, decompress, or verify the source file. Set `dataset.max_rows: 1000` to parse only the first 1,000 physical rows before malformed-row handling and filtering; use `null` to parse the entire file. This prefix limit is deterministic but order-sensitive, not a semantic sample. Preparation creates `runs/prepare-*/adjacency.npz`, `nodes.json`, `graph_metadata.json`, `resolved_config.json`, and `manifest.json`.
 
 URI indices are lexicographic and therefore independent of input order. With `component: largest`, ties select the component whose lexicographically smallest URI is smallest; `max_nodes` then retains the first URI-sorted nodes and induces the corresponding sparse subgraph. This is reproducible but not a semantic sampling rule. Large dumps remain streamed, yet graph construction holds accepted edge aggregates and must be budgeted for available RAM/disk.
 

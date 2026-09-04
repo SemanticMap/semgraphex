@@ -12,14 +12,6 @@ CommandHandler = Callable[[argparse.Namespace], int]
 _HANDLERS: dict[str, CommandHandler] = {}
 
 
-def _sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def register_handler(command: str, handler: CommandHandler) -> None:
     """Register a workstream implementation without changing argument parsing."""
     _HANDLERS[command] = handler
@@ -64,7 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _data_handlers() -> None:
     from .conceptnet import AssertionFilters, ParseReport, stream_assertions
     from .config import load_config
-    from .data_manager import DatasetDescriptor, acquire_dataset, sha256_file
+    from .data_manager import DatasetDescriptor, acquire_dataset
     from .graph_build import build_sparse_graph, save_prepared_graph
     from .manifest import RunManifest
     import yaml
@@ -90,18 +82,28 @@ def _data_handlers() -> None:
     def prepare(args: argparse.Namespace) -> int:
         config = load_config(args.config)
         if config.dataset.path is None:
-            raise ValueError("dataset.path is required for offline prepare; run download or provide a fixture/manual path")
-        if config.dataset.source == "conceptnet-5.7" and config.dataset.expected_sha256 is None:
-            raise ValueError("production ConceptNet prepare requires dataset.expected_sha256; a placeholder is not verification")
+            raise ValueError("dataset.path is required for prepare and must reference a local decompressed assertions file")
         report = ParseReport()
-        records = stream_assertions(config.dataset.path, AssertionFilters(config.dataset.language, frozenset(config.dataset.relations), config.dataset.min_weight), report=report)
+        records = stream_assertions(
+            config.dataset.path,
+            AssertionFilters(config.dataset.language, frozenset(config.dataset.relations), config.dataset.min_weight),
+            report=report,
+            max_rows=config.dataset.max_rows,
+        )
         graph = build_sparse_graph(records, directed=config.graph.directed, weight_transform=config.graph.weight_transform, component=config.dataset.component, max_nodes=config.dataset.max_nodes, self_loop_policy=config.graph.self_loop_policy)
         run_id = f"prepare-{uuid.uuid4().hex[:12]}"
         run_dir = config.paths.runs_root / run_id
-        raw_digest = sha256_file(config.dataset.path)
-        source_identity = {"path": str(config.dataset.path), "sha256": raw_digest, "size_bytes": config.dataset.path.stat().st_size, "dataset_name": config.dataset.source, "dataset_version": config.dataset.version, "source_url": config.dataset.source_url, "acquisition_status": "manual", "verification_status": "verified" if config.dataset.expected_sha256 == raw_digest else "manual_unverified"}
+        source_identity = {
+            "path": str(config.dataset.path),
+            "dataset_name": config.dataset.source,
+            "dataset_version": config.dataset.version,
+            "source_url": config.dataset.source_url,
+            "input_format": "decompressed_conceptnet_assertions_tsv",
+            "compression": "none",
+            "max_rows": config.dataset.max_rows,
+        }
         paths = save_prepared_graph(graph, run_dir, metadata={"parser_report": report.to_dict(), "source_identity": source_identity}, resolved_config=config.resolved)
-        checksums = {path.name: _sha256(str(path)) for path in paths.values()}
+        checksums = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths.values()}
         artifacts = {
             name: {"path": str(path), "sha256": checksums[path.name]}
             for name, path in paths.items()

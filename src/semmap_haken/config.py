@@ -53,7 +53,7 @@ class DatasetConfig:
     path: Path | None = None
     version: str | None = None
     source_url: str | None = None
-    expected_sha256: str | None = None
+    max_rows: int | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +113,9 @@ def load_config(path: str | Path) -> ExperimentConfig:
     component = _require(dataset_raw, "component", "dataset")
     if component not in {"largest", "all"}:
         raise ConfigurationError("dataset.component must be 'largest' or 'all'")
+    max_rows = dataset_raw.get("max_rows")
+    if max_rows is not None and (isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0):
+        raise ConfigurationError("dataset.max_rows must be a positive integer or null")
     dataset = DatasetConfig(
         source=str(_require(dataset_raw, "source", "dataset")),
         language=str(_require(dataset_raw, "language", "dataset")),
@@ -123,7 +126,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
         path=_resolve_path(dataset_raw["path"], source_path.parent.resolve()) if dataset_raw.get("path") else None,
         version=str(dataset_raw["version"]) if dataset_raw.get("version") else None,
         source_url=str(dataset_raw["source_url"]) if dataset_raw.get("source_url") else None,
-        expected_sha256=str(dataset_raw["expected_sha256"]) if dataset_raw.get("expected_sha256") else None,
+        max_rows=max_rows,
     )
     if dataset.min_weight < 0 or dataset.max_nodes <= 0:
         raise ConfigurationError("dataset.min_weight must be non-negative and dataset.max_nodes must be positive")
