@@ -1,5 +1,7 @@
 # План развития исследования Haken-Coarsening Graphons for ConceptNet
 
+> **Execution cadence update:** the concise [rapid scientific delivery plan](rapid_scientific_delivery_plan.md) supersedes this document's review-heavy workstream cadence. This roadmap and [AGENTS.md](../AGENTS.md) remain the source of scientific requirements, falsification criteria, and reproducibility constraints.
+
 ## 1. Назначение документа
 
 Этот roadmap преобразует текущий прототип `semgraphex` в воспроизводимую исследовательскую систему для проверки гипотез H1–H6 из [постановки исследования](../AGENTS.md). План основан на:
