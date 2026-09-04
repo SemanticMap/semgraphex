@@ -1,0 +1,33 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+dataset:
+  source: conceptnet-5.7
+  language: en
+  relations: []
+  min_weight: 1.0
+  max_nodes: 1000
+  component: largest
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: log1p
+  operator: normalized_adjacency
+runtime:
+  profile: smoke
+  random_seed: 1729
+dynamics:
+  model: linear
+  alpha: 1.0
+  beta: auto_critical
+  auto_critical_margin: 0.05
+spectral:
+  # Set to the completed M0 prepared artifact directory before A2 `run` exists.
+  prepared_graph_dir: ../tmp/runs/prepare-smoke/graph
+  top_k: 16
+  max_r: 8
+  tolerance: 1.0e-10
+  maxiter: null
+  symmetry_tolerance: 1.0e-10

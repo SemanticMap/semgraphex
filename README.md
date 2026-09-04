@@ -36,6 +36,12 @@ Use the tested (not hash-locked) constraints in [`requirements/constraints.txt`]
 
 Starter inputs are [`configs/conceptnet_en_smoke.yaml`](configs/conceptnet_en_smoke.yaml), [`configs/conceptnet_en_small.yaml`](configs/conceptnet_en_small.yaml), and the profiles under [`configs/resource_profiles/`](configs/resource_profiles/).
 
+## A1 sparse spectral diagnostics
+
+[`src/semmap_haken/operators.py`](src/semmap_haken/operators.py) provides sparse undirected normalized adjacency \(S=D^{-1/2}AD^{-1/2}\), preserving zero-degree nodes as zero rows and never materializing an NxN dense array. [`src/semmap_haken/modes.py`](src/semmap_haken/modes.py) uses iterative `eigsh` to emit *slow-mode candidates*—not established order parameters—with residuals, growth/decay rates for \(J=-\alpha I+\beta S\), stable-mode relaxation times, IPR/participation and localization diagnostics, degree correlations, eigengaps, timescale gaps, and a compact JSON/NPZ artifact.
+
+For `beta: auto_critical`, A1 requires a connected, nonnegative undirected normalized-adjacency graph without isolates. It excludes the unique Perron/stationary \(\lambda=1\) mode from candidate selection, requests \(\beta=(\alpha-m)/\lambda_*\) for the leading eligible positive nontrivial \(\lambda_*\), then clips to \(\beta\le\alpha-m\) so the full Jacobian remains stable. The artifact persists requested/selected beta, target eigenvalue, margin, spectral abscissa, and the clipping caveat. The `r` diagnostic compares maximum eigengap and timescale-gap proposals; agreement is used, otherwise eigengap is the deterministic fallback. Bootstrap, trajectories, CLI `run`, and plots are deferred to A2. Use [`configs/haken_linear_smoke.yaml`](configs/haken_linear_smoke.yaml) or [`configs/haken_linear_small.yaml`](configs/haken_linear_small.yaml) after pointing `spectral.prepared_graph_dir` at a completed M0 artifact.
+
 ## Colab-first quick start
 
 Use [`notebooks/00_colab_setup_and_conceptnet.ipynb`](notebooks/00_colab_setup_and_conceptnet.ipynb) in a clean Colab runtime, then run [`notebooks/01_data_smoke_and_sparse_graph.ipynb`](notebooks/01_data_smoke_and_sparse_graph.ipynb). The setup steps are documented in [`notebooks/README.md`](notebooks/README.md).

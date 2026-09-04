@@ -72,6 +72,26 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class DynamicsConfig:
+    """A1 linear-Jacobian parameters; trajectory integration is deferred to A2."""
+
+    model: Literal["linear"]
+    alpha: float
+    beta: float | Literal["auto_critical"]
+    auto_critical_margin: float
+
+
+@dataclass(frozen=True)
+class SpectralConfig:
+    prepared_graph_dir: Path | None
+    top_k: int
+    max_r: int
+    tolerance: float
+    maxiter: int | None
+    symmetry_tolerance: float
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Fully validated config plus its JSON/YAML-safe resolved representation."""
 
@@ -80,6 +100,8 @@ class ExperimentConfig:
     dataset: DatasetConfig
     graph: GraphConfig
     runtime: RuntimeConfig
+    dynamics: DynamicsConfig
+    spectral: SpectralConfig
     resolved: dict[str, Any]
 
 
@@ -157,6 +179,33 @@ def load_config(path: str | Path) -> ExperimentConfig:
             else None
         ),
     )
+    dynamics_raw = _require_mapping(raw.get("dynamics", {}), "dynamics")
+    beta_value = dynamics_raw.get("beta", "auto_critical")
+    if beta_value != "auto_critical" and (isinstance(beta_value, bool) or not isinstance(beta_value, (int, float))):
+        raise ConfigurationError("dynamics.beta must be a number or 'auto_critical'")
+    dynamics = DynamicsConfig(
+        model=dynamics_raw.get("model", "linear"),
+        alpha=float(dynamics_raw.get("alpha", 1.0)),
+        beta=beta_value if beta_value == "auto_critical" else float(beta_value),
+        auto_critical_margin=float(dynamics_raw.get("auto_critical_margin", 0.05)),
+    )
+    if dynamics.model != "linear" or dynamics.alpha <= 0 or not 0 < dynamics.auto_critical_margin < dynamics.alpha:
+        raise ConfigurationError("A1 requires linear dynamics with alpha > margin > 0")
+    spectral_raw = _require_mapping(raw.get("spectral", {}), "spectral")
+    top_k, max_r = int(spectral_raw.get("top_k", 64)), int(spectral_raw.get("max_r", 32))
+    maxiter = spectral_raw.get("maxiter")
+    if top_k < 2 or max_r < 1 or (maxiter is not None and (isinstance(maxiter, bool) or not isinstance(maxiter, int) or maxiter <= 0)):
+        raise ConfigurationError("spectral.top_k >= 2, max_r >= 1, and maxiter must be positive or null")
+    spectral = SpectralConfig(
+        prepared_graph_dir=_resolve_path(spectral_raw["prepared_graph_dir"], source_path.parent.resolve()) if spectral_raw.get("prepared_graph_dir") else None,
+        top_k=top_k,
+        max_r=max_r,
+        tolerance=float(spectral_raw.get("tolerance", 1e-10)),
+        maxiter=maxiter,
+        symmetry_tolerance=float(spectral_raw.get("symmetry_tolerance", 1e-10)),
+    )
+    if spectral.tolerance <= 0 or spectral.symmetry_tolerance < 0:
+        raise ConfigurationError("spectral tolerances must be positive (symmetry may be zero)")
     resolved = {
         "paths": {key: str(value) for key, value in asdict(paths).items()},
         "dataset": {**{key: (str(value) if isinstance(value, Path) else value) for key, value in asdict(dataset).items()}, "relations": list(dataset.relations)},
@@ -166,5 +215,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
             "random_seed": runtime.random_seed,
             "resource_profile": str(runtime.resource_profile) if runtime.resource_profile else None,
         },
+        "dynamics": asdict(dynamics),
+        "spectral": {**asdict(spectral), "prepared_graph_dir": str(spectral.prepared_graph_dir) if spectral.prepared_graph_dir else None},
     }
-    return ExperimentConfig(source_path, paths, dataset, graph, runtime, resolved)
+    return ExperimentConfig(source_path, paths, dataset, graph, runtime, dynamics, spectral, resolved)
