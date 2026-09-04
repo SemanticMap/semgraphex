@@ -11,6 +11,7 @@ In scope:
 - Parser row-limit behavior and counters.
 - Local-path, input-format, and row-limit provenance in prepared-graph metadata and the run manifest.
 - The smoke and small YAML examples, README guidance, and focused tests.
+- Repository-local temporary configuration and run-output paths under `./tmp/`.
 
 Out of scope:
 
@@ -135,7 +136,8 @@ The actual implementation should use stable field names selected during coding, 
 5. Update [`README.md`](../README.md:25).
    - Remove download, decompression, and checksum-verification instructions from the `prepare` workflow.
    - Document `max_rows` semantics, including its order-sensitive/non-semantic nature.
-   - Provide a concise configuration snippet for `../conceptnet-assertions-5.7.0.csv` and a bounded local preparation command.
+    - Provide a concise configuration snippet for `../conceptnet-assertions-5.7.0.csv` and a bounded local preparation command.
+    - Use the repository-local `./tmp/` directory for temporary test configuration and output rather than the operating-system `/tmp` directory.
 
 6. Add focused tests under [`tests/`](../tests/).
    - Keep fixture data uncompressed; add only minimal generated compressed paths in tests to prove rejection.
@@ -172,3 +174,21 @@ Run the focused test modules for configuration, ConceptNet parsing, CLI preparat
 ## Definition of done
 
 The change is complete when [`prepare()`](../src/semmap_haken/cli.py:90) accepts only an existing decompressed local assertions file, does not download, decompress, calculate, or validate input hashes, positive `dataset.max_rows` deterministically bounds physical input rows, and config/metadata/manifest/README/tests all reflect the same contract. Implementation results must be documented and fully test-covered before merge.
+
+## Temporary workspace convention
+
+Use the repository-local [`tmp/`](../tmp/) directory for ad-hoc YAML files and smoke-run artifacts. The starter configurations set `paths.runs_root: tmp/runs`; this resolves to `./tmp/runs` from the repository root. This directory is intentionally ignored by Git and replaces use of the operating-system `/tmp` directory for project-generated temporary data.
+
+## Validation record
+
+The local all-relations smoke configuration was written to the ignored [`tmp/conceptnet_1000_all_relations.yaml`](../tmp/conceptnet_1000_all_relations.yaml) path and executed against the user-provided decompressed ConceptNet file. It declares `dataset.max_rows: 1000`, `dataset.language: ""`, and `dataset.relations: []`.
+
+The resulting prepared artifact was created beneath [`tmp/runs/`](../tmp/runs/) with this observed metadata:
+
+- 1,000 physical rows examined and accepted;
+- no language, relation, or weight rejections;
+- `row_limit_reached: true`;
+- after largest-connected-component selection, 18 nodes and 17 edges;
+- selected-edge relation histogram: `Antonym: 17`.
+
+The last two values describe the retained largest connected component rather than all 1,000 accepted assertions. The bounded prefix remains order-sensitive and is not a semantic sample.

@@ -2,7 +2,8 @@ paths:
   workspace_root: ..
   data_root: data
   cache_root: data/cache
-  runs_root: runs
+  # Ephemeral smoke-run artifacts remain inside the repository workspace.
+  runs_root: tmp/runs
 dataset:
   source: conceptnet-5.7
   version: "5.7.0"
@@ -11,8 +12,9 @@ dataset:
   path: null
   # Reads the first N physical rows before filtering; null reads all rows.
   max_rows: 1000
-  language: en
-  relations: [RelatedTo, IsA]
+  # Empty language and relations disable their corresponding filters.
+  language: ""
+  relations: []
   min_weight: 1.0
   max_nodes: 1000
   component: largest

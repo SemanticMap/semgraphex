@@ -2,7 +2,8 @@ paths:
   workspace_root: ..
   data_root: data
   cache_root: data/cache
-  runs_root: runs
+  # Ephemeral local-run artifacts remain inside the repository workspace.
+  runs_root: tmp/runs
 dataset:
   source: conceptnet-5.7
   version: "5.7.0"
@@ -11,8 +12,9 @@ dataset:
   path: ../conceptnet-assertions-5.7.0.csv
   # Reads all input rows. Use a finite value only for deterministic smoke/debug runs.
   max_rows: null
-  language: en
-  relations: [RelatedTo, IsA, PartOf, HasA, UsedFor, HasProperty]
+  # Empty language and relations disable their corresponding filters.
+  language: ""
+  relations: []
   min_weight: 1.0
   max_nodes: 10000
   component: largest

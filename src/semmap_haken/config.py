@@ -108,8 +108,8 @@ def load_config(path: str | Path) -> ExperimentConfig:
 
     dataset_raw = _require_mapping(_require(raw, "dataset", "config"), "dataset")
     relations = _require(dataset_raw, "relations", "dataset")
-    if not isinstance(relations, list) or not relations or not all(isinstance(item, str) for item in relations):
-        raise ConfigurationError("dataset.relations must be a non-empty list of strings")
+    if not isinstance(relations, list) or not all(isinstance(item, str) for item in relations):
+        raise ConfigurationError("dataset.relations must be a list of strings")
     component = _require(dataset_raw, "component", "dataset")
     if component not in {"largest", "all"}:
         raise ConfigurationError("dataset.component must be 'largest' or 'all'")
