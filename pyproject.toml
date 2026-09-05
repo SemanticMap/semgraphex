@@ -39,6 +39,7 @@ notebook = [
     "nbformat>=5.9",
     "nbclient>=0.8",
     "ipykernel>=6.29",
+    "matplotlib>=3.7,<3.9",
 ]
 
 [project.scripts]

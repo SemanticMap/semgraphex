@@ -73,12 +73,21 @@ class RuntimeConfig:
 
 @dataclass(frozen=True)
 class DynamicsConfig:
-    """A1 linear-Jacobian parameters; trajectory integration is deferred to A2."""
+    """Linear-Jacobian and A2 trajectory experiment parameters."""
 
     model: Literal["linear"]
     alpha: float
     beta: float | Literal["auto_critical"]
     auto_critical_margin: float
+    time_start: float
+    time_stop: float
+    time_steps: int
+    perturbations_per_kind: int
+    perturbation_amplitude: float
+    perturbation_seed: int
+    random_sparse_fraction: float
+    storage_policy: Literal["all", "summaries", "none"]
+    max_storage_mb: int
 
 
 @dataclass(frozen=True)
@@ -188,9 +197,20 @@ def load_config(path: str | Path) -> ExperimentConfig:
         alpha=float(dynamics_raw.get("alpha", 1.0)),
         beta=beta_value if beta_value == "auto_critical" else float(beta_value),
         auto_critical_margin=float(dynamics_raw.get("auto_critical_margin", 0.05)),
+        time_start=float(dynamics_raw.get("time_start", 0.0)),
+        time_stop=float(dynamics_raw.get("time_stop", 10.0)),
+        time_steps=int(dynamics_raw.get("time_steps", 101)),
+        perturbations_per_kind=int(dynamics_raw.get("perturbations_per_kind", 1)),
+        perturbation_amplitude=float(dynamics_raw.get("perturbation_amplitude", 1.0)),
+        perturbation_seed=int(dynamics_raw.get("perturbation_seed", runtime.random_seed)),
+        random_sparse_fraction=float(dynamics_raw.get("random_sparse_fraction", 0.05)),
+        storage_policy=dynamics_raw.get("storage_policy", "summaries"),
+        max_storage_mb=int(dynamics_raw.get("max_storage_mb", 256)),
     )
     if dynamics.model != "linear" or dynamics.alpha <= 0 or not 0 < dynamics.auto_critical_margin < dynamics.alpha:
-        raise ConfigurationError("A1 requires linear dynamics with alpha > margin > 0")
+        raise ConfigurationError("M1 requires linear dynamics with alpha > margin > 0")
+    if dynamics.time_start != 0.0 or dynamics.time_stop <= dynamics.time_start or dynamics.time_steps < 2 or dynamics.perturbations_per_kind < 1 or dynamics.perturbation_amplitude <= 0 or not 0 < dynamics.random_sparse_fraction <= 1 or dynamics.storage_policy not in {"all", "summaries", "none"} or dynamics.max_storage_mb < 1:
+        raise ConfigurationError("invalid M1 dynamics time grid, perturbation, or storage configuration")
     spectral_raw = _require_mapping(raw.get("spectral", {}), "spectral")
     top_k, max_r = int(spectral_raw.get("top_k", 64)), int(spectral_raw.get("max_r", 32))
     maxiter = spectral_raw.get("maxiter")

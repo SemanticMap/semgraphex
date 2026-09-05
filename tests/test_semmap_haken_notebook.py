@@ -81,7 +81,7 @@ def test_execution_metadata_captures_notebook_and_persistence_state(tmp_path: Pa
     assert "prepare-demo" in serialized
 
 
-@pytest.mark.parametrize("name", ["00_colab_setup_and_conceptnet.ipynb", "01_data_smoke_and_sparse_graph.ipynb"])
+@pytest.mark.parametrize("name", ["00_colab_setup_and_conceptnet.ipynb", "01_data_smoke_and_sparse_graph.ipynb", "02_linear_modes_and_dynamics.ipynb"])
 def test_notebook_is_thin_and_offline_safe_by_default(name: str) -> None:
     notebook = Path("notebooks") / name
     document = json.loads(notebook.read_text(encoding="utf-8"))
@@ -93,7 +93,7 @@ def test_notebook_is_thin_and_offline_safe_by_default(name: str) -> None:
     assert "build_sparse_graph(" not in source
 
 
-@pytest.mark.parametrize("name", ["00_colab_setup_and_conceptnet.ipynb", "01_data_smoke_and_sparse_graph.ipynb"])
+@pytest.mark.parametrize("name", ["00_colab_setup_and_conceptnet.ipynb", "01_data_smoke_and_sparse_graph.ipynb", "02_linear_modes_and_dynamics.ipynb"])
 def test_notebook_executes_offline_when_optional_tools_are_installed(name: str) -> None:
     nbformat = pytest.importorskip("nbformat")
     from nbclient import NotebookClient

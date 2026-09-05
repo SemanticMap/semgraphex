@@ -23,6 +23,15 @@ dynamics:
   alpha: 1.0
   beta: auto_critical
   auto_critical_margin: 0.05
+  time_start: 0.0
+  time_stop: 10.0
+  time_steps: 101
+  perturbations_per_kind: 2
+  perturbation_amplitude: 1.0
+  perturbation_seed: 1729
+  random_sparse_fraction: 0.01
+  storage_policy: summaries
+  max_storage_mb: 256
 spectral:
   prepared_graph_dir: ../tmp/runs/prepare-small/graph
   top_k: 64

@@ -20,7 +20,7 @@ def test_cli_root_and_subcommand_help(capsys) -> None:
     assert "--config" in capsys.readouterr().out
 
 
-def test_unimplemented_command_has_clear_error(capsys) -> None:
-    assert main(["run", "--config", "configs/conceptnet_en_smoke.yaml"]) == 2
+def test_evaluate_remains_explicitly_deferred(capsys) -> None:
+    assert main(["evaluate", "--run", "runs/missing"]) == 2
     captured = capsys.readouterr()
     assert "not yet implemented" in captured.err

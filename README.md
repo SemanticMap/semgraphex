@@ -40,11 +40,24 @@ Starter inputs are [`configs/conceptnet_en_smoke.yaml`](configs/conceptnet_en_sm
 
 [`src/semmap_haken/operators.py`](src/semmap_haken/operators.py) provides sparse undirected normalized adjacency \(S=D^{-1/2}AD^{-1/2}\), preserving zero-degree nodes as zero rows and never materializing an NxN dense array. [`src/semmap_haken/modes.py`](src/semmap_haken/modes.py) uses iterative `eigsh` to emit *slow-mode candidates*—not established order parameters—with residuals, growth/decay rates for \(J=-\alpha I+\beta S\), stable-mode relaxation times, IPR/participation and localization diagnostics, degree correlations, eigengaps, timescale gaps, and a compact JSON/NPZ artifact.
 
-For `beta: auto_critical`, A1 requires a connected, nonnegative undirected normalized-adjacency graph without isolates. It excludes the unique Perron/stationary \(\lambda=1\) mode from candidate selection, requests \(\beta=(\alpha-m)/\lambda_*\) for the leading eligible positive nontrivial \(\lambda_*\), then clips to \(\beta\le\alpha-m\) so the full Jacobian remains stable. The artifact persists requested/selected beta, target eigenvalue, margin, spectral abscissa, and the clipping caveat. The `r` diagnostic compares maximum eigengap and timescale-gap proposals; agreement is used, otherwise eigengap is the deterministic fallback. Bootstrap, trajectories, CLI `run`, and plots are deferred to A2. Use [`configs/haken_linear_smoke.yaml`](configs/haken_linear_smoke.yaml) or [`configs/haken_linear_small.yaml`](configs/haken_linear_small.yaml) after pointing `spectral.prepared_graph_dir` at a completed M0 artifact.
+For `beta: auto_critical`, A1 requires a connected, nonnegative undirected normalized-adjacency graph without isolates. It excludes the unique Perron/stationary \(\lambda=1\) mode from candidate selection, requests \(\beta=(\alpha-m)/\lambda_*\) for the leading eligible positive nontrivial \(\lambda_*\), then clips to \(\beta\le\alpha-m\) so the full Jacobian remains stable. The artifact persists requested/selected beta, target eigenvalue, margin, spectral abscissa, and the clipping caveat. The `r` diagnostic compares maximum eigengap and timescale-gap proposals; agreement is used, otherwise eigengap is the deterministic fallback.
+
+## M1 linear dynamics workflow
+
+[`src/semmap_haken/dynamics.py`](src/semmap_haken/dynamics.py) evolves \(\dot{x}=(-\alpha I+\beta S)x\) with sparse [`expm_multiply()`](src/semmap_haken/dynamics.py:160), never a dense matrix exponential. It produces seeded single-node, Gaussian, random-sparse, and hub-targeted perturbations. For each trajectory it projects onto the selected nontrivial A1 eigenvectors and records relative RMSE \(\|x-\hat{x}\|_F/\|x\|_F\) and max-amplitude NRMSE. These outputs are **slow-mode candidate diagnostics, not proof of order parameters**.
+
+Prepare a graph, set `spectral.prepared_graph_dir` in [`configs/haken_linear_smoke.yaml`](configs/haken_linear_smoke.yaml) or [`configs/haken_linear_small.yaml`](configs/haken_linear_small.yaml), then run:
+
+```bash
+python -m semmap_haken prepare --config configs/conceptnet_en_smoke.yaml
+python -m semmap_haken run --config configs/haken_linear_smoke.yaml
+```
+
+The `run` directory contains atomic spectral and dynamics NPZ/JSON/CSV artifacts, checksums and manifest references, plus spectrum, relaxation-time, eigengap, and reconstruction PNG plots through the optional `notebook` extra. The storage policy is configurable: `all` writes trajectories (smoke), while `summaries` writes initial states, modal amplitudes, and metrics only (small profile). Local-neighborhood and relation-group perturbations remain deferred because the prepared artifact has no inexpensive semantic-group index.
 
 ## Colab-first quick start
 
-Use [`notebooks/00_colab_setup_and_conceptnet.ipynb`](notebooks/00_colab_setup_and_conceptnet.ipynb) in a clean Colab runtime, then run [`notebooks/01_data_smoke_and_sparse_graph.ipynb`](notebooks/01_data_smoke_and_sparse_graph.ipynb). The setup steps are documented in [`notebooks/README.md`](notebooks/README.md).
+Use [`notebooks/00_colab_setup_and_conceptnet.ipynb`](notebooks/00_colab_setup_and_conceptnet.ipynb) in a clean Colab runtime, then run [`notebooks/01_data_smoke_and_sparse_graph.ipynb`](notebooks/01_data_smoke_and_sparse_graph.ipynb) and [`notebooks/02_linear_modes_and_dynamics.ipynb`](notebooks/02_linear_modes_and_dynamics.ipynb). The new notebook preflights resources, uses the offline fixture by default, delegates to the package CLI, and displays beta selection, `r` candidates, and trajectory reconstruction error.
 
 Safety is deliberate: both notebooks default to the committed offline tiny fixture; `ALLOW_PRODUCTION_DOWNLOAD` is `False`; Drive use is disabled; and no headless test clones, installs packages, mounts Drive, or accesses the network. A production dump requires explicit opt-in or a manually supplied local path after the shared resource preflight reports available RAM/disk against the selected profile.
 
