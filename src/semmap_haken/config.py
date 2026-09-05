@@ -72,6 +72,22 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionConfig:
+    """Typed execution controls; backend choice does not change M1 semantics."""
+
+    backend: Literal["auto", "cuda", "cpu"] = "auto"
+    device: int = 0
+    dtype: Literal["float64", "float32"] = "float64"
+    workers: int | Literal["auto"] = "auto"
+    reserved_cpu_cores: int = 1
+    threads_per_worker: int = 1
+    gpu_memory_fraction: float = 0.8
+    batch_size: int | Literal["auto"] = "auto"
+    deterministic: bool = True
+    allow_auto_fallback: bool = True
+
+
+@dataclass(frozen=True)
 class DynamicsConfig:
     """Linear-Jacobian and A2 trajectory experiment parameters."""
 
@@ -109,6 +125,7 @@ class ExperimentConfig:
     dataset: DatasetConfig
     graph: GraphConfig
     runtime: RuntimeConfig
+    execution: ExecutionConfig
     dynamics: DynamicsConfig
     spectral: SpectralConfig
     resolved: dict[str, Any]
@@ -188,6 +205,32 @@ def load_config(path: str | Path) -> ExperimentConfig:
             else None
         ),
     )
+    execution_raw = _require_mapping(raw.get("execution", {}), "execution")
+    backend = execution_raw.get("backend", "auto")
+    dtype = execution_raw.get("dtype", "float64")
+    workers = execution_raw.get("workers", "auto")
+    batch_size = execution_raw.get("batch_size", "auto")
+    if backend not in {"auto", "cuda", "cpu"}:
+        raise ConfigurationError("execution.backend must be auto, cuda, or cpu")
+    if dtype not in {"float64", "float32"}:
+        raise ConfigurationError("execution.dtype must be float64 or float32")
+    if workers != "auto" and (isinstance(workers, bool) or not isinstance(workers, int) or workers < 1):
+        raise ConfigurationError("execution.workers must be auto or a positive integer")
+    if batch_size != "auto" and (isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1):
+        raise ConfigurationError("execution.batch_size must be auto or a positive integer")
+    device = execution_raw.get("device", 0)
+    reserved = execution_raw.get("reserved_cpu_cores", 1)
+    threads = execution_raw.get("threads_per_worker", 1)
+    fraction = execution_raw.get("gpu_memory_fraction", 0.8)
+    deterministic = execution_raw.get("deterministic", True)
+    fallback = execution_raw.get("allow_auto_fallback", True)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (device, reserved)) or isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
+        raise ConfigurationError("execution device/core/thread values are invalid")
+    if not isinstance(fraction, (int, float)) or isinstance(fraction, bool) or not 0 < float(fraction) <= 1:
+        raise ConfigurationError("execution.gpu_memory_fraction must be in (0, 1]")
+    if not isinstance(deterministic, bool) or not isinstance(fallback, bool):
+        raise ConfigurationError("execution deterministic and allow_auto_fallback must be booleans")
+    execution = ExecutionConfig(backend=backend, device=device, dtype=dtype, workers=workers, reserved_cpu_cores=reserved, threads_per_worker=threads, gpu_memory_fraction=float(fraction), batch_size=batch_size, deterministic=deterministic, allow_auto_fallback=fallback)
     dynamics_raw = _require_mapping(raw.get("dynamics", {}), "dynamics")
     beta_value = dynamics_raw.get("beta", "auto_critical")
     if beta_value != "auto_critical" and (isinstance(beta_value, bool) or not isinstance(beta_value, (int, float))):
@@ -235,7 +278,8 @@ def load_config(path: str | Path) -> ExperimentConfig:
             "random_seed": runtime.random_seed,
             "resource_profile": str(runtime.resource_profile) if runtime.resource_profile else None,
         },
+        "execution": asdict(execution),
         "dynamics": asdict(dynamics),
         "spectral": {**asdict(spectral), "prepared_graph_dir": str(spectral.prepared_graph_dir) if spectral.prepared_graph_dir else None},
     }
-    return ExperimentConfig(source_path, paths, dataset, graph, runtime, dynamics, spectral, resolved)
+    return ExperimentConfig(source_path, paths, dataset, graph, runtime, execution, dynamics, spectral, resolved)

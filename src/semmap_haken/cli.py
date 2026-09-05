@@ -124,30 +124,39 @@ def _data_handlers() -> None:
         return 0
 
     def run(args: argparse.Namespace) -> int:
+        from .compute import ComputeContext
         from .dynamics import build_perturbations, run_linear_dynamics, save_dynamics_result, save_m1_plots
         from .graph_build import load_prepared_graph
         from .modes import analyze_normalized_adjacency, save_mode_result
         from .operators import normalized_adjacency
 
         config = load_config(args.config)
+        compute = ComputeContext.create(
+            backend=config.execution.backend, device=config.execution.device, dtype=config.execution.dtype,
+            workers=config.execution.workers, reserved_cpu_cores=config.execution.reserved_cpu_cores,
+            threads_per_worker=config.execution.threads_per_worker,
+            gpu_memory_fraction=config.execution.gpu_memory_fraction, batch_size=config.execution.batch_size,
+            deterministic=config.execution.deterministic, allow_auto_fallback=config.execution.allow_auto_fallback,
+        )
+        print(json.dumps({"execution": compute.telemetry()["execution"], "fallback_reason": compute.fallback_reason}, sort_keys=True))
         if config.spectral.prepared_graph_dir is None:
             raise ValueError("spectral.prepared_graph_dir is required for run")
         graph = load_prepared_graph(config.spectral.prepared_graph_dir)
         operator, degrees = normalized_adjacency(graph.adjacency, symmetry_tolerance=config.spectral.symmetry_tolerance)
-        modes = analyze_normalized_adjacency(operator, degrees=degrees, alpha=config.dynamics.alpha, beta=config.dynamics.beta, margin=config.dynamics.auto_critical_margin, top_k=config.spectral.top_k, max_r=config.spectral.max_r, tolerance=config.spectral.tolerance, maxiter=config.spectral.maxiter)
+        modes = analyze_normalized_adjacency(operator, degrees=degrees, alpha=config.dynamics.alpha, beta=config.dynamics.beta, margin=config.dynamics.auto_critical_margin, top_k=config.spectral.top_k, max_r=config.spectral.max_r, tolerance=config.spectral.tolerance, maxiter=config.spectral.maxiter, compute=compute)
         batch = build_perturbations(node_count=operator.shape[0], degrees=degrees, seed=config.dynamics.perturbation_seed, amplitude=config.dynamics.perturbation_amplitude, per_kind=config.dynamics.perturbations_per_kind, sparse_fraction=config.dynamics.random_sparse_fraction)
         run_id = f"run-{uuid.uuid4().hex[:12]}"
         run_dir = config.paths.runs_root / run_id
         run_dir.mkdir(parents=True)
         input_checksums = {"prepared_adjacency": hashlib.sha256((config.spectral.prepared_graph_dir / "adjacency.npz").read_bytes()).hexdigest()}
         spectral_paths = save_mode_result(modes, run_dir / "spectral", resolved_config=config.resolved, input_checksums=input_checksums)
-        dynamics = run_linear_dynamics(operator, modes, initial_states=batch.initial_states, labels=batch.labels, time_grid=__import__("numpy").linspace(config.dynamics.time_start, config.dynamics.time_stop, config.dynamics.time_steps), storage_policy=config.dynamics.storage_policy, max_storage_bytes=config.dynamics.max_storage_mb * 1024 * 1024)
+        dynamics = run_linear_dynamics(operator, modes, initial_states=batch.initial_states, labels=batch.labels, time_grid=__import__("numpy").linspace(config.dynamics.time_start, config.dynamics.time_stop, config.dynamics.time_steps), storage_policy=config.dynamics.storage_policy, max_storage_bytes=config.dynamics.max_storage_mb * 1024 * 1024, compute=compute)
         dynamics_paths = save_dynamics_result(dynamics, run_dir / "dynamics", resolved_config=config.resolved, input_artifacts={"prepared_graph": str(config.spectral.prepared_graph_dir), "spectral_numeric": hashlib.sha256(spectral_paths["numeric"].read_bytes()).hexdigest()})
         plot_paths = save_m1_plots(run_dir / "plots", modes, dynamics)
         all_paths = {**{f"spectral_{key}": value for key, value in spectral_paths.items()}, **{f"dynamics_{key}": value for key, value in dynamics_paths.items()}, **{f"plot_{key}": value for key, value in plot_paths.items()}}
         checksums = {str(path.relative_to(run_dir)): hashlib.sha256(path.read_bytes()).hexdigest() for path in all_paths.values()}
         manifest = RunManifest.create(run_id=run_id, resolved_config=config.resolved, execution_environment="cli")
-        manifest = manifest.__class__(**{**manifest.to_dict(), "checksums": checksums, "stages": {"spectral": "completed", "dynamics": "completed"}, "artifacts": {name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for name, path in all_paths.items()}, "random_seeds": {"runtime": config.runtime.random_seed, "perturbations": config.dynamics.perturbation_seed}, "cli_replay": True, "resumability": {"prepared_graph_dir": str(config.spectral.prepared_graph_dir), "environment_constraints": "requirements/constraints.txt"}})
+        manifest = manifest.__class__(**{**manifest.to_dict(), "checksums": checksums, "stages": {"spectral": "completed", "dynamics": "completed"}, "artifacts": {name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for name, path in all_paths.items()}, "random_seeds": {"runtime": config.runtime.random_seed, "perturbations": config.dynamics.perturbation_seed}, "cli_replay": True, "execution_telemetry": compute.telemetry(), "resumability": {"prepared_graph_dir": str(config.spectral.prepared_graph_dir), "environment_constraints": "requirements/constraints.txt"}})
         manifest.write_json(run_dir / "manifest.json")
         (run_dir / "COMPLETED").write_text("complete\n", encoding="utf-8")
         print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "spectral": str(run_dir / "spectral"), "dynamics": str(run_dir / "dynamics")}, sort_keys=True))

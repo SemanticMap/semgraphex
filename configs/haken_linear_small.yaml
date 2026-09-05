@@ -18,6 +18,17 @@ graph:
 runtime:
   profile: small
   random_seed: 1729
+execution:
+  backend: auto
+  device: 0
+  dtype: float64
+  workers: auto
+  reserved_cpu_cores: 1
+  threads_per_worker: 1
+  gpu_memory_fraction: 0.80
+  batch_size: auto
+  deterministic: true
+  allow_auto_fallback: true
 dynamics:
   model: linear
   alpha: 1.0

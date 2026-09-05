@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -18,6 +19,8 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import ArpackNoConvergence, eigsh
+
+from .compute import ComputeContext
 
 
 class SpectralConfigurationError(ValueError):
@@ -100,21 +103,33 @@ def select_auto_critical_beta(eigenvalues: np.ndarray, *, alpha: float, margin: 
     return BetaSelection(alpha, margin, target, requested, beta, spectral_abscissa, -alpha + beta * target, clipped, caveats)
 
 
-def _largest_eigenpairs(operator: sparse.csr_matrix, top_k: int, tolerance: float, maxiter: int | None) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+def _largest_eigenpairs(operator: sparse.csr_matrix, top_k: int, tolerance: float, maxiter: int | None, compute: ComputeContext | None = None) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     n = operator.shape[0]
     if n < 3:
         raise SpectralConfigurationError("iterative eigsh diagnostics require a graph with at least three nodes")
     k = min(top_k, n - 1)
     if k < 2:
         raise SpectralConfigurationError("top_k must allow a trivial and an eligible nontrivial mode")
+    started = time.perf_counter()
+    backend = compute.backend if compute else "cpu"
     try:
-        values, vectors = eigsh(operator, k=k, which="LA", tol=tolerance, maxiter=maxiter)
-    except ArpackNoConvergence as error:
-        raise SpectralConfigurationError(f"eigsh did not converge: {error}") from error
+        if backend == "cuda":
+            import cupy as cp
+            from cupyx.scipy import sparse as cupyx_sparse
+            from cupyx.scipy.sparse.linalg import eigsh as cupy_eigsh
+
+            with cp.cuda.Device(compute.device):
+                values_device, vectors_device = cupy_eigsh(cupyx_sparse.csr_matrix(operator.astype(compute.dtype, copy=False)), k=k, which="LA", tol=tolerance, maxiter=maxiter)
+                values, vectors = cp.asnumpy(values_device), cp.asnumpy(vectors_device)
+        else:
+            values, vectors = eigsh(operator.astype(compute.dtype if compute else np.float64, copy=False), k=k, which="LA", tol=tolerance, maxiter=maxiter)
+    except (ArpackNoConvergence, Exception) as error:
+        prefix = "CUDA eigsh" if backend == "cuda" else "eigsh"
+        raise SpectralConfigurationError(f"{prefix} did not converge: {error}") from error
     order = np.argsort(values)[::-1]
     values, vectors = values[order], vectors[:, order]
     residuals = np.linalg.norm(operator @ vectors - vectors * values, axis=0)
-    return values, vectors, {"method": "eigsh", "which": "LA", "requested_k": top_k, "computed_k": k, "tolerance": tolerance, "maxiter": maxiter, "converged": bool(np.all(np.isfinite(residuals))), "residual_norms": residuals.tolist()}
+    return values, vectors, {"method": "cupyx.scipy.sparse.linalg.eigsh" if backend == "cuda" else "scipy.sparse.linalg.eigsh", "backend": backend, "which": "LA", "requested_k": top_k, "computed_k": k, "tolerance": tolerance, "maxiter": maxiter, "converged": bool(np.all(np.isfinite(residuals))), "elapsed_seconds": time.perf_counter() - started, "residual_norms": residuals.tolist(), "execution": compute.telemetry() if compute else None}
 
 
 def _gap_choice(values: np.ndarray) -> int | None:
@@ -154,6 +169,7 @@ def analyze_normalized_adjacency(
     max_r: int = 32,
     tolerance: float = 1e-10,
     maxiter: int | None = None,
+    compute: ComputeContext | None = None,
 ) -> ModeResult:
     """Compute sparse normalized-adjacency diagnostics for slow-mode candidates."""
     matrix = operator.tocsr()
@@ -167,7 +183,7 @@ def analyze_normalized_adjacency(
         component_count, _ = connected_components(matrix, directed=False, return_labels=True)
         if component_count != 1:
             raise SpectralConfigurationError("auto_critical requires a connected graph without zero-degree nodes")
-    values, vectors, solver = _largest_eigenpairs(matrix, top_k, tolerance, maxiter)
+    values, vectors, solver = _largest_eigenpairs(matrix, top_k, tolerance, maxiter, compute)
     beta_selection = select_auto_critical_beta(values, alpha=alpha, margin=margin) if beta == "auto_critical" else BetaSelection(alpha, margin, float("nan"), float(beta), float(beta), float(-alpha + float(beta)), float("nan"), False, ())
     rates = -alpha + beta_selection.beta * values
     times = np.where(rates < 0, -1.0 / rates, np.inf)

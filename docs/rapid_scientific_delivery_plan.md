@@ -17,6 +17,70 @@ flowchart LR
 
 ## Delivery policy
 
+### GPU-first and multicore-fallback execution
+
+Google Colab NVIDIA GPU is the preferred backend for sparse spectral analysis, batched dynamics, embedding distances, and later bootstrap/baseline workloads. Multicore CPU is the mandatory fallback and must use all safely available physical cores for independent trajectories, replicates, baselines, nulls, parameter sweeps, and other parallel hard-math tasks.
+
+The execution backend changes performance, not scientific semantics: CPU and GPU consume the same sparse artifacts and emit the same versioned result schemas. Backend choice, hardware, dtype, batching, tolerances, and fallback reason are persisted in every run.
+
+```mermaid
+flowchart TD
+  C[Execution config] --> H[Hardware detection]
+  H --> G[CuPy CUDA backend]
+  H --> P[Multicore SciPy backend]
+  G --> K[Shared scientific kernels]
+  P --> K
+  K --> W[Within run batching]
+  W --> S[Across run scheduler]
+  S --> A[Artifacts and telemetry]
+```
+
+**Numerical backend.** Add `src/semmap_haken/compute.py` with a `ComputeContext` containing requested and selected backend, device, dtype, worker count, thread limits, memory budget, deterministic seed policy, capability flags, and fallback reason. Adapters expose sparse CSR construction/transfer, sparse matrix products, symmetric partial eigensolve, batched linear evolution, reductions, and host conversion at artifact boundaries.
+
+**Backend selection.** `auto` selects CUDA only when CuPy loads, a CUDA device is visible, required sparse primitives are supported, and VRAM preflight succeeds; otherwise it selects multicore CPU and records why. `cuda` is strict and fails rather than silently falling back. `cpu` is strict and never imports CuPy.
+
+**Within-run parallelism.** CUDA keeps the CSR operator resident, stacks perturbations as multiple right-hand sides, and processes VRAM-bounded batches. Use CuPy memory pools, pinned transfer buffers, and CUDA streams only where profiling shows useful overlap. CPU uses vectorized multi-RHS sparse kernels first, then process-level chunking for independent perturbations/replicates; BLAS/OpenMP threads are capped per worker to prevent oversubscription.
+
+**Across-run parallelism.** From Increment C, seeds, bootstrap samples, baselines, null models, relation variants, and parameter sweeps run concurrently. One GPU-heavy task per device is the default; CPU-only work may run concurrently within reserved-core and RAM limits. Levels of one coarsening chain remain sequential, while independent methods and seeds at a level run in parallel.
+
+**Configuration contract:**
+
+```yaml
+execution:
+  backend: auto
+  device: 0
+  dtype: float64
+  workers: auto
+  reserved_cpu_cores: 1
+  threads_per_worker: 1
+  gpu_memory_fraction: 0.80
+  batch_size: auto
+  deterministic: true
+  allow_auto_fallback: true
+```
+
+**Memory and scheduling rules:**
+
+- Never copy the sparse graph into every CPU worker; use read-only inherited memory where safe or shared/memory-mapped CSR buffers under spawn runtimes.
+- Never submit one tiny CUDA job per trajectory; batch perturbations and reduce on device.
+- Avoid nested parallelism. The outer scheduler owns processes; each worker gets explicit BLAS/OpenMP limits.
+- Estimate CSR, eigenvector, trajectory, reconstruction, and serialization memory before dispatch. Reduce batch size before fallback/failure.
+- Synchronize CUDA only for timing and artifact boundaries; reuse memory pools and free cached blocks before unrelated large stages.
+- Derive seeds from run seed plus stable task identity, never worker completion order. Merge result shards in stable task-ID order.
+
+**Telemetry.** Record logical/physical CPU counts, selected workers/threads, GPU model/compute capability/VRAM, CuPy/CUDA versions, dtype, batch size, peak RAM/VRAM, transfer time, solver/kernel time, wall time, throughput, and fallback reason.
+
+**Scientific parity.** CPU float64 is the tiny analytic reference. CUDA float64 must agree on eigenvalues, residuals, invariant subspaces, growth/stability decisions, and aggregate trajectory errors within configured tolerances. Raw eigenvectors may differ by sign or rotation. CUDA float32 remains a performance ablation until `r` and downstream decisions are shown stable.
+
+**Acceleration acceptance:**
+
+1. Serial CPU, multicore CPU, and CUDA outputs agree within declared scientific tolerances.
+2. Multicore execution shows useful speedup for at least eight independent tasks without breaking the RAM budget.
+3. CUDA shows end-to-end speedup on a representative small graph including transfers; `auto` may keep tiny graphs on CPU.
+4. No backend materializes dense node-by-node matrices.
+5. Automatic batching survives constrained Colab VRAM and records the chosen size.
+6. Forced-CUDA failure, automatic fallback, worker failure, and interrupted shard merge produce explicit failed/resumable states.
+
 ### Lean quality and review cadence
 
 - Each implementation subtask adds focused tests for its new public contract, numerical invariants, determinism, and sparse behavior.
@@ -48,6 +112,8 @@ Each increment has at most two implementation subtasks, a single commit boundary
 **Tests and smoke:** unit tests for normalization, eigensolver ordering/sign-invariant subspace output, beta stability rule, `r` consensus, and known-mode analytic trajectory; one notebook-to-CLI smoke on a tiny synthetic graph plus prepared fixture.
 
 **Commit boundary:** `feat: add linear spectral dynamics baseline`.
+
+**Acceleration amendment:** finish the current CPU functional A2 workflow first, then add one focused acceleration-foundation commit before Increment B. It introduces `ComputeContext`, CuPy sparse `eigsh` parity where supported, GPU-resident batched dynamics, multicore CPU trajectory chunking, execution telemetry, and Colab benchmark output without changing M1 formulas or result schemas.
 
 ### Increment B — M2 one-step Haken coarsening
 
@@ -116,6 +182,7 @@ Use two sequential Code-specialist calls with a single integration point. Do not
 1. **Code specialist 1 — spectral core:** implement A1 only: sparse normalized operator, iterative spectrum diagnostics, deterministic stable auto-critical beta rule, three-signal `r` selection, YAML validation, and focused unit tests. Return the public data contracts and a config runnable by the next call.
 2. **Code specialist 2 — runnable experiment:** build on A1 without redesigning it; implement A2: linear trajectory solver, artifact writers and plots, `run` CLI integration, notebook 02, synthetic and prepared-graph demonstrations, and the increment-end notebook-to-CLI smoke.
 3. **Conditional Test Engineer:** call only if the end smoke fails, numerical behavior is flaky, or notebook/CLI scientific arrays differ. The fix target is the concrete failing contract, followed by rerunning the single increment smoke.
+4. **Code specialist 3 — acceleration foundation:** add optional CUDA dependencies, `ComputeContext`, strict `auto|cuda|cpu` selection, CuPy spectral/dynamics adapters, multicore fallback, telemetry, CPU/CUDA parity tests, and a benchmark section in notebook 02. CUDA absence skips accelerator tests and never fails CPU CI.
 
 Increment A is complete only when the shared run produces the promised evidence artifacts from both inputs, all new focused tests pass, and the one integration smoke passes. Its output is an M1 baseline, not evidence that ConceptNet has Haken order parameters.
 

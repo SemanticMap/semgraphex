@@ -55,6 +55,19 @@ python -m semmap_haken run --config configs/haken_linear_smoke.yaml
 
 The `run` directory contains atomic spectral and dynamics NPZ/JSON/CSV artifacts, checksums and manifest references, plus spectrum, relaxation-time, eigengap, and reconstruction PNG plots through the optional `notebook` extra. The storage policy is configurable: `all` writes trajectories (smoke), while `summaries` writes initial states, modal amplitudes, and metrics only (small profile). Local-neighborhood and relation-group perturbations remain deferred because the prepared artifact has no inexpensive semantic-group index.
 
+## Acceleration foundation
+
+[`src/semmap_haken/compute.py`](src/semmap_haken/compute.py) resolves the typed `execution` section in the linear configs. `cpu` is strict and never imports CuPy; `cuda` is strict and fails when CuPy or the selected NVIDIA device is unavailable; `auto` prefers a usable CUDA device and records an explicit CPU fallback reason otherwise. The selected backend, CPU/GPU inventory, dtype, workers, batch size, solver method, timing, and fallback information are persisted in spectral diagnostics, dynamics summaries, and the run manifest.
+
+The base installation remains CPU-only. In a CUDA 12 Colab runtime, install the optional extra only after confirming the runtime's CUDA compatibility:
+
+```bash
+pip install -e '.[cuda,notebook]'
+python -m semmap_haken run --config configs/haken_linear_smoke.yaml
+```
+
+CPU propagation remains SciPy `expm_multiply` and supports deterministic, stable-index process chunks. CUDA uses lazy CuPy CSR eigensolving and an explicitly labelled sparse RK4 propagation fallback because CuPy does not provide an equivalent sparse `expm_multiply`; it is an accuracy-controlled approximation, not an exact CPU-equivalent propagator. CUDA float64 parity must be measured before interpreting CUDA results; float32 is an ablation. No performance claim is made without a recorded benchmark.
+
 ## Colab-first quick start
 
 Use [`notebooks/00_colab_setup_and_conceptnet.ipynb`](notebooks/00_colab_setup_and_conceptnet.ipynb) in a clean Colab runtime, then run [`notebooks/01_data_smoke_and_sparse_graph.ipynb`](notebooks/01_data_smoke_and_sparse_graph.ipynb) and [`notebooks/02_linear_modes_and_dynamics.ipynb`](notebooks/02_linear_modes_and_dynamics.ipynb). The new notebook preflights resources, uses the offline fixture by default, delegates to the package CLI, and displays beta selection, `r` candidates, and trajectory reconstruction error.

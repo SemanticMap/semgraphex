@@ -9,10 +9,12 @@ In a fresh Colab runtime, clone the public repository and install the optional n
 ```bash
 git clone <repository-url> semmap-haken
 %cd semmap-haken
-pip install -e '.[notebook]'
+    pip install -e '.[notebook]'
 ```
 
 Open [`00_colab_setup_and_conceptnet.ipynb`](00_colab_setup_and_conceptnet.ipynb) first, then [`01_data_smoke_and_sparse_graph.ipynb`](01_data_smoke_and_sparse_graph.ipynb).
+
+For an NVIDIA CUDA 12 runtime, optionally install `pip install -e '.[cuda,notebook]'`. Notebook 02 displays the selected backend and fallback reason; CUDA remains strict when explicitly requested and is only an acceleration experiment until its recorded parity checks pass.
 
 ## Safe defaults and persistence
 

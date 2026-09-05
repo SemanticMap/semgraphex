@@ -31,6 +31,7 @@ class RunManifest:
     warnings: list[str] = field(default_factory=list)
     failure_reason: str | None = None
     resumability: dict[str, Any] = field(default_factory=dict)
+    execution_telemetry: dict[str, Any] = field(default_factory=dict)
     cli_replay: bool | None = None
     checksum_equivalent_to_cli: bool | None = None
     schema_version: int = 1
