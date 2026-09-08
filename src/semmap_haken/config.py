@@ -117,6 +117,23 @@ class SpectralConfig:
 
 
 @dataclass(frozen=True)
+class CoarseningConfig:
+    """One-step, topology-only M2 contraction controls."""
+
+    enabled: bool = False
+    methods: tuple[Literal["connectivity_matching", "unconstrained_matching"], ...] = (
+        "connectivity_matching",
+        "unconstrained_matching",
+    )
+    target_reduction: float = 0.5
+    embedding_weighting: Literal["none", "relaxation_time"] = "none"
+    seed: int = 0
+    tie_breaking: Literal["distance_then_node_index"] = "distance_then_node_index"
+    aggregation: Literal["sum", "mean_density"] = "sum"
+    distance_threshold: float | None = None
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Fully validated config plus its JSON/YAML-safe resolved representation."""
 
@@ -128,6 +145,7 @@ class ExperimentConfig:
     execution: ExecutionConfig
     dynamics: DynamicsConfig
     spectral: SpectralConfig
+    coarsening: CoarseningConfig
     resolved: dict[str, Any]
 
 
@@ -269,6 +287,35 @@ def load_config(path: str | Path) -> ExperimentConfig:
     )
     if spectral.tolerance <= 0 or spectral.symmetry_tolerance < 0:
         raise ConfigurationError("spectral tolerances must be positive (symmetry may be zero)")
+    coarsening_raw = _require_mapping(raw.get("coarsening", {}), "coarsening")
+    enabled = coarsening_raw.get("enabled", False)
+    methods_raw = coarsening_raw.get("methods", ["connectivity_matching", "unconstrained_matching"])
+    if not isinstance(enabled, bool):
+        raise ConfigurationError("coarsening.enabled must be a boolean")
+    expected_methods = ["connectivity_matching", "unconstrained_matching"]
+    if methods_raw != expected_methods:
+        raise ConfigurationError("coarsening.methods must contain exactly connectivity_matching and unconstrained_matching in that order")
+    reduction = coarsening_raw.get("target_reduction", 0.5)
+    threshold = coarsening_raw.get("distance_threshold")
+    if isinstance(reduction, bool) or not isinstance(reduction, (int, float)) or not 0 < float(reduction) <= 0.5:
+        raise ConfigurationError("coarsening.target_reduction must be in (0, 0.5]")
+    if threshold is not None and (isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or float(threshold) < 0):
+        raise ConfigurationError("coarsening.distance_threshold must be non-negative or null")
+    weighting = coarsening_raw.get("embedding_weighting", "none")
+    aggregation = coarsening_raw.get("aggregation", "sum")
+    tie_breaking = coarsening_raw.get("tie_breaking", "distance_then_node_index")
+    if weighting not in {"none", "relaxation_time"}:
+        raise ConfigurationError("coarsening.embedding_weighting must be none or relaxation_time")
+    if aggregation not in {"sum", "mean_density"}:
+        raise ConfigurationError("coarsening.aggregation must be sum or mean_density")
+    if tie_breaking != "distance_then_node_index":
+        raise ConfigurationError("coarsening.tie_breaking must be distance_then_node_index")
+    coarsening = CoarseningConfig(
+        enabled=enabled, methods=tuple(methods_raw), target_reduction=float(reduction),
+        embedding_weighting=weighting, seed=int(coarsening_raw.get("seed", runtime.random_seed)),
+        tie_breaking=tie_breaking, aggregation=aggregation,
+        distance_threshold=float(threshold) if threshold is not None else None,
+    )
     resolved = {
         "paths": {key: str(value) for key, value in asdict(paths).items()},
         "dataset": {**{key: (str(value) if isinstance(value, Path) else value) for key, value in asdict(dataset).items()}, "relations": list(dataset.relations)},
@@ -281,5 +328,6 @@ def load_config(path: str | Path) -> ExperimentConfig:
         "execution": asdict(execution),
         "dynamics": asdict(dynamics),
         "spectral": {**asdict(spectral), "prepared_graph_dir": str(spectral.prepared_graph_dir) if spectral.prepared_graph_dir else None},
+        "coarsening": {**asdict(coarsening), "methods": list(coarsening.methods)},
     }
-    return ExperimentConfig(source_path, paths, dataset, graph, runtime, execution, dynamics, spectral, resolved)
+    return ExperimentConfig(source_path, paths, dataset, graph, runtime, execution, dynamics, spectral, coarsening, resolved)

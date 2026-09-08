@@ -55,6 +55,23 @@ python -m semmap_haken run --config configs/haken_linear_smoke.yaml
 
 The `run` directory contains atomic spectral and dynamics NPZ/JSON/CSV artifacts, checksums and manifest references, plus spectrum, relaxation-time, eigengap, and reconstruction PNG plots through the optional `notebook` extra. The storage policy is configurable: `all` writes trajectories (smoke), while `summaries` writes initial states, modal amplitudes, and metrics only (small profile). Local-neighborhood and relation-group perturbations remain deferred because the prepared artifact has no inexpensive semantic-group index.
 
+## M2 one-step Haken coarsening
+
+[`src/semmap_haken/haken_embedding.py`](src/semmap_haken/haken_embedding.py) builds the topology-only coordinate matrix \(Z=\Phi[:,1:1+r]\), excluding the Perron mode and consuming only M1 numerical spectral arrays. [`src/semmap_haken/coarsen.py`](src/semmap_haken/coarsen.py) then runs the first-evidence pair sequentially at one matched requested reduction: deterministic adjacency-constrained greedy matching and bounded-nearest-neighbour unconstrained matching. Both order candidates by `(Haken distance, fine index)`; neither receives ConceptNet labels, relation names, text, or semantic metadata, and neither constructs a dense fine pair-distance matrix.
+
+[`src/semmap_haken/quotient.py`](src/semmap_haken/quotient.py) forms the sparse quotient using the membership indicator \(P\): sum aggregation is \(A'=P^TAP\), retaining intra-cluster weight on the diagonal and conserving total adjacency weight. `mean_density` divides each quotient block by \(|C_a||C_b|\). The result preserves original full ConceptNet URIs, supernode sizes/masses, and reversible parent-child membership. [`src/semmap_haken/metrics.py`](src/semmap_haken/metrics.py) uses block-mean restriction \(R(x)_c=|C_c|^{-1}\sum_{i\in C_c}x_i\) and broadcast lifting \(L(y)_i=y_{c(i)}\); these are adjoint under the uniform fine and mass-weighted coarse inner products. It compares lifted coarse and fine *subspaces* using principal angles/projection distance, never raw eigenvectors, pairs sorted nontrivial eigenvalues with explicit truncation, and reports \(\lVert X-LY\rVert_F/\lVert X\rVert_F\) against the same full-system perturbations. This is distinct from M1 rank-\(r\) reconstruction error.
+
+Prepare a graph, replace `spectral.prepared_graph_dir` in [`configs/haken_one_step_smoke.yaml`](configs/haken_one_step_smoke.yaml) or [`configs/haken_one_step_small.yaml`](configs/haken_one_step_small.yaml) with the emitted `prepare-*` directory, then run:
+
+```bash
+python -m semmap_haken prepare --config configs/conceptnet_en_smoke.yaml
+python -m semmap_haken run --config configs/haken_one_step_smoke.yaml
+```
+
+Enabled M2 runs force the trusted CPU float64 reference context before M1 modes and trajectories are computed; the request and any override are visible in telemetry. Each method is atomically persisted under `run-*/coarsening/{connectivity_matching,unconstrained_matching}/` as `quotient.npz`, `mapping.json`, `embedding_metadata.json`, and `metrics.json`. The metric payload is schema-versioned and records resolved config, input checksums, execution semantics, artifact checksums, compression/shortfall, coarse diagnostics, subspace/eigenvalue errors, per-perturbation trajectory errors, runtime, and caveats.
+
+M2 is evidence plumbing only: candidate coordinates are not proven order parameters; one-step distortion is not a plateau result; neither baselines, null models, nonlinear slaving, nor multiscale hierarchy are implemented here. [`notebooks/03_one_step_haken_coarsening.ipynb`](notebooks/03_one_step_haken_coarsening.ipynb) is an offline-first thin CLI-backed display of the same artifact contract.
+
 ## Acceleration foundation
 
 [`src/semmap_haken/compute.py`](src/semmap_haken/compute.py) resolves the typed `execution` section in the linear configs. `cpu` is strict and never imports CuPy; `cuda` is strict and fails when CuPy or the selected NVIDIA device is unavailable; `auto` prefers a usable CUDA device and records an explicit CPU fallback reason otherwise. The selected backend, CPU/GPU inventory, dtype, workers, batch size, solver method, timing, and fallback information are persisted in spectral diagnostics, dynamics summaries, and the run manifest.

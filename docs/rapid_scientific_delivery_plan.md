@@ -2,7 +2,7 @@
 
 ## Decision and scope
 
-This document supersedes the **execution cadence** of the detailed [Haken coarsening roadmap](haken_coarsening_roadmap.md), not the scientific requirements, falsification criteria, or reproducibility obligations in [AGENTS.md](../AGENTS.md). M0 is complete at `b6bf091` after the listed M0 implementation commits, with 37 active tests reported passing. The next objective is a sequence of runnable scientific increments, each producing evidence rather than process artifacts.
+This document supersedes the **execution cadence** of the detailed [Haken coarsening roadmap](haken_coarsening_roadmap.md), not the scientific requirements, falsification criteria, or reproducibility obligations in [AGENTS.md](../AGENTS.md). M0 is complete at `b6bf091`; M1 and its initial acceleration foundation are present at HEAD `1fab45b`. The next objective is M2 and the subsequent runnable scientific increments, each producing evidence rather than process artifacts.
 
 The active architecture remains notebook-first, library-backed, and CLI-reproducible: thin Colab notebooks call public [semmap_haken](../src/semmap_haken/) library functions or the same CLI paths, while YAML, checksum, seed, manifest, and artifact schema make every scientific result replayable. Sparse matrices and iterative solvers are mandatory; no dense N-by-N materialization is permitted for prepared ConceptNet graphs.
 
@@ -17,69 +17,40 @@ flowchart LR
 
 ## Delivery policy
 
-### GPU-first and multicore-fallback execution
+### CPU-reference delivery with retained acceleration architecture
 
-Google Colab NVIDIA GPU is the preferred backend for sparse spectral analysis, batched dynamics, embedding distances, and later bootstrap/baseline workloads. Multicore CPU is the mandatory fallback and must use all safely available physical cores for independent trajectories, replicates, baselines, nulls, parameter sweeps, and other parallel hard-math tasks.
+Further parallelism and acceleration hardening, acceptance benchmarking, and promotion of CUDA results are **deferred, not cancelled**. M2–M5 proceed by default on the scientifically trusted strict CPU float64 reference path. This is a delivery sequencing choice, not removal of the backend-neutral [`ComputeContext`](../src/semmap_haken/compute.py:37), CUDA adapters, execution telemetry, batching seams, or future within-run and across-run scheduling hooks introduced at `1fab45b`.
 
-The execution backend changes performance, not scientific semantics: CPU and GPU consume the same sparse artifacts and emit the same versioned result schemas. Backend choice, hardware, dtype, batching, tolerances, and fallback reason are persisted in every run.
+The execution backend may change performance, never scientific semantics. Every new scientific module must accept or pass through the shared execution context, avoid direct backend assumptions in its public contract, operate on sparse data, derive randomness from stable seeded task identities, merge batchable work deterministically, and preserve versioned artifact schemas. Levels in one coarsening chain remain sequential; independent merges, perturbations, seeds, baselines, nulls, and parameter variants must remain expressible as stable batches so parallel execution can resume without redesign.
 
-```mermaid
-flowchart TD
-  C[Execution config] --> H[Hardware detection]
-  H --> G[CuPy CUDA backend]
-  H --> P[Multicore SciPy backend]
-  G --> K[Shared scientific kernels]
-  P --> K
-  K --> W[Within run batching]
-  W --> S[Across run scheduler]
-  S --> A[Artifacts and telemetry]
-```
-
-**Numerical backend.** Add `src/semmap_haken/compute.py` with a `ComputeContext` containing requested and selected backend, device, dtype, worker count, thread limits, memory budget, deterministic seed policy, capability flags, and fallback reason. Adapters expose sparse CSR construction/transfer, sparse matrix products, symmetric partial eigensolve, batched linear evolution, reductions, and host conversion at artifact boundaries.
-
-**Backend selection.** `auto` selects CUDA only when CuPy loads, a CUDA device is visible, required sparse primitives are supported, and VRAM preflight succeeds; otherwise it selects multicore CPU and records why. `cuda` is strict and fails rather than silently falling back. `cpu` is strict and never imports CuPy.
-
-**Within-run parallelism.** CUDA keeps the CSR operator resident, stacks perturbations as multiple right-hand sides, and processes VRAM-bounded batches. Use CuPy memory pools, pinned transfer buffers, and CUDA streams only where profiling shows useful overlap. CPU uses vectorized multi-RHS sparse kernels first, then process-level chunking for independent perturbations/replicates; BLAS/OpenMP threads are capped per worker to prevent oversubscription.
-
-**Across-run parallelism.** From Increment C, seeds, bootstrap samples, baselines, null models, relation variants, and parameter sweeps run concurrently. One GPU-heavy task per device is the default; CPU-only work may run concurrently within reserved-core and RAM limits. Levels of one coarsening chain remain sequential, while independent methods and seeds at a level run in parallel.
+For M2–M5 delivery, the reference configuration is:
 
 **Configuration contract:**
 
 ```yaml
 execution:
-  backend: auto
-  device: 0
+  backend: cpu
   dtype: float64
-  workers: auto
-  reserved_cpu_cores: 1
+  workers: 1
   threads_per_worker: 1
-  gpu_memory_fraction: 0.80
   batch_size: auto
   deterministic: true
-  allow_auto_fallback: true
 ```
 
-**Memory and scheduling rules:**
+CPU-reference artifacts still record the selected backend, dtype, worker/batch settings, deterministic policy, wall time, memory information available from the current telemetry contract, and any fallback reason. New schemas must allow additive acceleration telemetry later without changing scientific field meanings.
 
-- Never copy the sparse graph into every CPU worker; use read-only inherited memory where safe or shared/memory-mapped CSR buffers under spawn runtimes.
-- Never submit one tiny CUDA job per trajectory; batch perturbations and reduce on device.
-- Avoid nested parallelism. The outer scheduler owns processes; each worker gets explicit BLAS/OpenMP limits.
-- Estimate CSR, eigenvector, trajectory, reconstruction, and serialization memory before dispatch. Reduce batch size before fallback/failure.
-- Synchronize CUDA only for timing and artifact boundaries; reuse memory pools and free cached blocks before unrelated large stages.
-- Derive seeds from run seed plus stable task identity, never worker completion order. Merge result shards in stable task-ID order.
+### Deferred acceleration re-entry gate
 
-**Telemetry.** Record logical/physical CPU counts, selected workers/threads, GPU model/compute capability/VRAM, CuPy/CUDA versions, dtype, batch size, peak RAM/VRAM, transfer time, solver/kernel time, wall time, throughput, and fallback reason.
+Acceleration hardening may re-enter after M2 or M3 when it has clear delivery value, and must re-enter before medium-scale runs. Before claiming multicore/CUDA speedup or using CUDA-derived outputs as scientific evidence, close the blocker classes in the concise gate below; the detailed requirements and evidence checklist remain in the [M1 acceleration audit](m1_acceleration_improvement_plan.md#6-acceleration-acceptance-review-gate-to-increment-b).
 
-**Scientific parity.** CPU float64 is the tiny analytic reference. CUDA float64 must agree on eigenvalues, residuals, invariant subspaces, growth/stability decisions, and aggregate trajectory errors within configured tolerances. Raw eigenvectors may differ by sign or rotation. CUDA float32 remains a performance ablation until `r` and downstream decisions are shown stable.
+1. Restore and verify a green, locked CPU float64 reference environment.
+2. Complete deterministic solver seeding, narrow capability/error handling, and the backend-adapter seam.
+3. Make multicore chunking reachable without sparse-graph copies and persist explicit failed/resumable shard states.
+4. Add VRAM-bounded CUDA batching, resident sparse operators, and deterministic out-of-memory reduction/failure behavior.
+5. Validate CUDA eigenvalue, residual, invariant-subspace, growth/stability, and trajectory-error parity against the CPU reference; fixed-step RK4 or reduced modal evolution must remain explicitly distinct from reference full-system propagation.
+6. Complete memory/timing telemetry and representative end-to-end acceptance benchmarks, including transfers and honest negative results.
 
-**Acceleration acceptance:**
-
-1. Serial CPU, multicore CPU, and CUDA outputs agree within declared scientific tolerances.
-2. Multicore execution shows useful speedup for at least eight independent tasks without breaking the RAM budget.
-3. CUDA shows end-to-end speedup on a representative small graph including transfers; `auto` may keep tiny graphs on CPU.
-4. No backend materializes dense node-by-node matrices.
-5. Automatic batching survives constrained Colab VRAM and records the chosen size.
-6. Forced-CUDA failure, automatic fallback, worker failure, and interrupted shard merge produce explicit failed/resumable states.
+Until this gate passes, the retained CUDA and parallel paths are experimental infrastructure: they must not support speedup claims or CUDA-derived scientific conclusions.
 
 ### Lean quality and review cadence
 
@@ -113,7 +84,7 @@ Each increment has at most two implementation subtasks, a single commit boundary
 
 **Commit boundary:** `feat: add linear spectral dynamics baseline`.
 
-**Acceleration amendment:** finish the current CPU functional A2 workflow first, then add one focused acceleration-foundation commit before Increment B. It introduces `ComputeContext`, CuPy sparse `eigsh` parity where supported, GPU-resident batched dynamics, multicore CPU trajectory chunking, execution telemetry, and Colab benchmark output without changing M1 formulas or result schemas.
+**Acceleration status:** the initial backend-neutral foundation landed at `1fab45b`, while the [M1 acceleration audit](m1_acceleration_improvement_plan.md) records unresolved hardening and acceptance work. That work is deferred under the policy above and is not a prerequisite for CPU-reference M2 delivery; the current parallel/CUDA paths are not yet accepted as speedup evidence or scientific evidence.
 
 ### Increment B — M2 one-step Haken coarsening
 
@@ -124,9 +95,13 @@ Each increment has at most two implementation subtasks, a single commit boundary
 | B1 — embedding and merges | Add a Haken embedding from the selected slow subspace; implement one scalable connectivity-constrained merge and one simple unconstrained comparator. Likely files: [haken_embedding.py](../src/semmap_haken/haken_embedding.py), [coarsen.py](../src/semmap_haken/coarsen.py), [config.py](../src/semmap_haken/config.py), and [tests](../tests/). | No label/relation text enters the partition. Each node belongs to one cluster; connected mode merges only adjacent nodes; target reduction is achieved or the shortfall is recorded; seed and tie-breaking are deterministic. |
 | B2 — quotient, lifting, distortion | Build the quotient and reversible node-to-supernode mapping, then calculate lifted fine/coarse slow-subspace and trajectory distortion. Likely files: [quotient.py](../src/semmap_haken/quotient.py), [metrics.py](../src/semmap_haken/metrics.py), [cli.py](../src/semmap_haken/cli.py), and [03_one_step_haken_coarsening.ipynb](../notebooks/03_one_step_haken_coarsening.ipynb). | Quotient weights, membership mapping, masses, and provenance are persisted; lifted comparison is sign/rotation invariant; run emits compression, slow-subspace distance, slow-eigenvalue error, and trajectory error for both merges. |
 
+**Execution contract:** B1 and B2 use CPU float64 by default but accept/pass through [`ComputeContext`](../src/semmap_haken/compute.py:37). Their public contracts remain backend-neutral, sparse, deterministic, batchable by stable task identity, and additive to the M1 artifact schema.
+
 **Deliverable:** [03_one_step_haken_coarsening.ipynb](../notebooks/03_one_step_haken_coarsening.ipynb) and the same `run` CLI with a coarsening config.
 
-**Tests and smoke:** hand-checkable quotient fixture, partition/mapping conservation, deterministic merge test, and synthetic plus prepared-graph one-step smoke.
+**Tests and smoke:** focused tests cover embedding shape and selected-mode provenance, no-label partition input, exact partition coverage, adjacency constraints, deterministic ties, target-reduction shortfall, hand-checkable sparse quotient weights, mass/mapping conservation and reversibility, sign/rotation-invariant lifting, distortion metrics, execution-context pass-through, and artifact-schema stability. End with one synthetic plus prepared-graph one-step notebook-to-CLI smoke using the CPU float64 reference path.
+
+**Documentation:** public contracts and the notebook must state the embedding/weighting rule, merge and tie-break rule, shortfall behavior, quotient aggregation and self-loop policy, lift/projection convention, distortion formulas, provenance fields, and CPU-reference execution status. They must not describe slow modes as established ConceptNet order parameters or imply acceleration acceptance.
 
 **Commit boundary:** `feat: add one-step haken coarsening`.
 
@@ -175,16 +150,14 @@ Each increment has at most two implementation subtasks, a single commit boundary
 
 **Commit boundary:** `feat: add conceptnet small evidence bundle`.
 
-## Immediate execution — Increment A
+## Immediate execution — Increment B
 
-Use two sequential Code-specialist calls with a single integration point. Do not schedule normal review work.
+Use two sequential Code-specialist calls with one M2 commit boundary after B2. B1 hands its tested public contracts directly to B2 without an intermediate commit. Do not schedule a routine review workstream.
 
-1. **Code specialist 1 — spectral core:** implement A1 only: sparse normalized operator, iterative spectrum diagnostics, deterministic stable auto-critical beta rule, three-signal `r` selection, YAML validation, and focused unit tests. Return the public data contracts and a config runnable by the next call.
-2. **Code specialist 2 — runnable experiment:** build on A1 without redesigning it; implement A2: linear trajectory solver, artifact writers and plots, `run` CLI integration, notebook 02, synthetic and prepared-graph demonstrations, and the increment-end notebook-to-CLI smoke.
-3. **Conditional Test Engineer:** call only if the end smoke fails, numerical behavior is flaky, or notebook/CLI scientific arrays differ. The fix target is the concrete failing contract, followed by rerunning the single increment smoke.
-4. **Code specialist 3 — acceleration foundation:** add optional CUDA dependencies, `ComputeContext`, strict `auto|cuda|cpu` selection, CuPy spectral/dynamics adapters, multicore fallback, telemetry, CPU/CUDA parity tests, and a benchmark section in notebook 02. CUDA absence skips accelerator tests and never fails CPU CI.
+1. **B1 — embedding and merges:** add a Haken embedding from the selected slow subspace; implement one scalable connectivity-constrained merge and one simple unconstrained comparator. Verify no semantic label/relation input, exact node coverage, connected-mode adjacency, deterministic seed/tie behavior, and achieved target reduction or an explicit shortfall. Pass the execution context through and return sparse, backend-neutral contracts plus focused tests for B2.
+2. **B2 — quotient, lifting, distortion:** build the quotient and reversible node-to-supernode mapping on B1 without redesigning its contracts; calculate lifted fine/coarse slow-subspace and trajectory distortion; persist quotient weights, masses, provenance, compression and distortion metrics; add [03_one_step_haken_coarsening.ipynb](../notebooks/03_one_step_haken_coarsening.ipynb), the CLI route, required contract documentation, and the single CPU-reference notebook-to-CLI smoke.
 
-Increment A is complete only when the shared run produces the promised evidence artifacts from both inputs, all new focused tests pass, and the one integration smoke passes. Its output is an M1 baseline, not evidence that ConceptNet has Haken order parameters.
+Increment B is complete only when the focused M2 tests and integration smoke pass and the artifacts satisfy the execution, provenance, reversibility, and schema requirements above. Then create the single `feat: add one-step haken coarsening` commit, including this plan update; do not commit the plan separately.
 
 ## Milestone claim boundary
 

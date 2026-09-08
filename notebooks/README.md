@@ -12,9 +12,11 @@ git clone <repository-url> semmap-haken
     pip install -e '.[notebook]'
 ```
 
-Open [`00_colab_setup_and_conceptnet.ipynb`](00_colab_setup_and_conceptnet.ipynb) first, then [`01_data_smoke_and_sparse_graph.ipynb`](01_data_smoke_and_sparse_graph.ipynb).
+Open [`00_colab_setup_and_conceptnet.ipynb`](00_colab_setup_and_conceptnet.ipynb) first, then [`01_data_smoke_and_sparse_graph.ipynb`](01_data_smoke_and_sparse_graph.ipynb), [`02_linear_modes_and_dynamics.ipynb`](02_linear_modes_and_dynamics.ipynb), and [`03_one_step_haken_coarsening.ipynb`](03_one_step_haken_coarsening.ipynb).
 
-For an NVIDIA CUDA 12 runtime, optionally install `pip install -e '.[cuda,notebook]'`. Notebook 02 displays the selected backend and fallback reason; CUDA remains strict when explicitly requested and is only an acceleration experiment until its recorded parity checks pass.
+Notebook 03 is an offline-first, library/CLI-backed M2 demonstration. It creates a local 12-node ring only to satisfy the iterative spectral smoke contract, then runs the same `prepare` → `run` path as [`configs/haken_one_step_smoke.yaml`](../configs/haken_one_step_smoke.yaml). It displays only persisted partition, compression, subspace/eigenvalue, and lifted-trajectory distortion summaries, separating observed outputs from interpretation caveats. It is not a ConceptNet result.
+
+For an NVIDIA CUDA 12 runtime, optionally install `pip install -e '.[cuda,notebook]'`. Notebook 02 displays the selected backend and fallback reason; CUDA remains strict when explicitly requested and is only an acceleration experiment until its recorded parity checks pass. M2 enabled configurations always force CPU float64 reference execution before calculating their M1/M2 evidence.
 
 ## Safe defaults and persistence
 

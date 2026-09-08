@@ -131,14 +131,30 @@ def _data_handlers() -> None:
         from .operators import normalized_adjacency
 
         config = load_config(args.config)
-        compute = ComputeContext.create(
-            backend=config.execution.backend, device=config.execution.device, dtype=config.execution.dtype,
-            workers=config.execution.workers, reserved_cpu_cores=config.execution.reserved_cpu_cores,
-            threads_per_worker=config.execution.threads_per_worker,
-            gpu_memory_fraction=config.execution.gpu_memory_fraction, batch_size=config.execution.batch_size,
-            deterministic=config.execution.deterministic, allow_auto_fallback=config.execution.allow_auto_fallback,
+        # M2 compares both its embedding source and trajectory reference across
+        # scales.  Therefore an enabled one-step run overrides the requested
+        # execution settings before *any* M1 evidence is calculated, rather than
+        # merely relabelling a potentially accelerated/float32 computation.
+        m2_cpu_reference_override = config.coarsening.enabled and (
+            config.execution.backend != "cpu" or config.execution.dtype != "float64"
         )
-        print(json.dumps({"execution": compute.telemetry()["execution"], "fallback_reason": compute.fallback_reason}, sort_keys=True))
+        if config.coarsening.enabled:
+            compute = ComputeContext.create(
+                backend="cpu", device=0, dtype="float64", workers=config.execution.workers,
+                reserved_cpu_cores=config.execution.reserved_cpu_cores,
+                threads_per_worker=config.execution.threads_per_worker,
+                gpu_memory_fraction=config.execution.gpu_memory_fraction, batch_size=config.execution.batch_size,
+                deterministic=True, allow_auto_fallback=True,
+            )
+        else:
+            compute = ComputeContext.create(
+                backend=config.execution.backend, device=config.execution.device, dtype=config.execution.dtype,
+                workers=config.execution.workers, reserved_cpu_cores=config.execution.reserved_cpu_cores,
+                threads_per_worker=config.execution.threads_per_worker,
+                gpu_memory_fraction=config.execution.gpu_memory_fraction, batch_size=config.execution.batch_size,
+                deterministic=config.execution.deterministic, allow_auto_fallback=config.execution.allow_auto_fallback,
+            )
+        print(json.dumps({"execution": compute.telemetry()["execution"], "fallback_reason": compute.fallback_reason, "m2_cpu_reference_override": m2_cpu_reference_override}, sort_keys=True))
         if config.spectral.prepared_graph_dir is None:
             raise ValueError("spectral.prepared_graph_dir is required for run")
         graph = load_prepared_graph(config.spectral.prepared_graph_dir)
@@ -150,16 +166,59 @@ def _data_handlers() -> None:
         run_dir.mkdir(parents=True)
         input_checksums = {"prepared_adjacency": hashlib.sha256((config.spectral.prepared_graph_dir / "adjacency.npz").read_bytes()).hexdigest()}
         spectral_paths = save_mode_result(modes, run_dir / "spectral", resolved_config=config.resolved, input_checksums=input_checksums)
-        dynamics = run_linear_dynamics(operator, modes, initial_states=batch.initial_states, labels=batch.labels, time_grid=__import__("numpy").linspace(config.dynamics.time_start, config.dynamics.time_stop, config.dynamics.time_steps), storage_policy=config.dynamics.storage_policy, max_storage_bytes=config.dynamics.max_storage_mb * 1024 * 1024, compute=compute)
+        time_grid = __import__("numpy").linspace(config.dynamics.time_start, config.dynamics.time_stop, config.dynamics.time_steps)
+        dynamics = run_linear_dynamics(operator, modes, initial_states=batch.initial_states, labels=batch.labels, time_grid=time_grid, storage_policy=config.dynamics.storage_policy, max_storage_bytes=config.dynamics.max_storage_mb * 1024 * 1024, compute=compute)
         dynamics_paths = save_dynamics_result(dynamics, run_dir / "dynamics", resolved_config=config.resolved, input_artifacts={"prepared_graph": str(config.spectral.prepared_graph_dir), "spectral_numeric": hashlib.sha256(spectral_paths["numeric"].read_bytes()).hexdigest()})
         plot_paths = save_m1_plots(run_dir / "plots", modes, dynamics)
         all_paths = {**{f"spectral_{key}": value for key, value in spectral_paths.items()}, **{f"dynamics_{key}": value for key, value in dynamics_paths.items()}, **{f"plot_{key}": value for key, value in plot_paths.items()}}
+        stages = {"spectral": "completed", "dynamics": "completed"}
+        coarsening_summary: dict[str, object] | None = None
+        if config.coarsening.enabled:
+            # M2 evidence runs on the trusted strict CPU float64 reference path per the delivery plan.
+            from .coarsen import build_partition
+            from .haken_embedding import build_haken_embedding
+            from .metrics import evaluate_one_step, save_m2_result
+            from .quotient import build_quotient
+
+            embedding = build_haken_embedding(modes, weighting=config.coarsening.embedding_weighting)
+            fine_trajectories = dynamics.trajectories
+            if fine_trajectories is None:
+                # Recompute the same perturbations with full storage only for the distortion comparison.
+                fine_reference = run_linear_dynamics(operator, modes, initial_states=batch.initial_states, labels=batch.labels, time_grid=time_grid, storage_policy="all", max_storage_bytes=config.dynamics.max_storage_mb * 1024 * 1024, compute=compute)
+                fine_trajectories = fine_reference.trajectories
+            beta_value = float(modes.beta_selection.beta)
+            method_results: dict[str, object] = {}
+            for method in config.coarsening.methods:
+                partition = build_partition(
+                    graph.adjacency, embedding.coordinates, method=method,
+                    target_reduction=config.coarsening.target_reduction, seed=config.coarsening.seed,
+                    distance_threshold=config.coarsening.distance_threshold,
+                )
+                quotient = build_quotient(graph.adjacency, partition.fine_to_coarse, aggregation=config.coarsening.aggregation, node_ids=graph.node_ids, level=0, parent_run_id=run_id)
+                result = evaluate_one_step(
+                    graph.adjacency, modes, partition, quotient,
+                    fine_trajectories=fine_trajectories, trajectory_labels=batch.labels, time_grid=time_grid,
+                    alpha=float(modes.beta_selection.alpha), beta=beta_value, max_r=config.spectral.max_r,
+                    symmetry_tolerance=config.spectral.symmetry_tolerance,
+                )
+                method_dir = run_dir / "coarsening" / method
+                m2_paths = save_m2_result(
+                    result, partition, quotient, embedding, method_dir,
+                    resolved_config=config.resolved,
+                    input_checksums={"prepared_adjacency": input_checksums["prepared_adjacency"], "spectral_numeric": hashlib.sha256(spectral_paths["numeric"].read_bytes()).hexdigest(), "dynamics_numeric": hashlib.sha256(dynamics_paths["numeric"].read_bytes()).hexdigest()},
+                    execution_telemetry={"execution": {**compute.telemetry()["execution"], "cpu_reference_enforced": True, "dtype": "float64", "backend": "cpu"}},
+                )
+                for key, path in m2_paths.items():
+                    all_paths[f"coarsening_{method}_{key}"] = path
+                method_results[method] = result.to_dict()
+            stages["coarsening"] = "completed"
+            coarsening_summary = {"methods": list(config.coarsening.methods), "results": method_results}
         checksums = {str(path.relative_to(run_dir)): hashlib.sha256(path.read_bytes()).hexdigest() for path in all_paths.values()}
         manifest = RunManifest.create(run_id=run_id, resolved_config=config.resolved, execution_environment="cli")
-        manifest = manifest.__class__(**{**manifest.to_dict(), "checksums": checksums, "stages": {"spectral": "completed", "dynamics": "completed"}, "artifacts": {name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for name, path in all_paths.items()}, "random_seeds": {"runtime": config.runtime.random_seed, "perturbations": config.dynamics.perturbation_seed}, "cli_replay": True, "execution_telemetry": compute.telemetry(), "resumability": {"prepared_graph_dir": str(config.spectral.prepared_graph_dir), "environment_constraints": "requirements/constraints.txt"}})
+        manifest = manifest.__class__(**{**manifest.to_dict(), "checksums": checksums, "stages": stages, "artifacts": {name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for name, path in all_paths.items()}, "random_seeds": {"runtime": config.runtime.random_seed, "perturbations": config.dynamics.perturbation_seed, "coarsening": config.coarsening.seed}, "cli_replay": True, "execution_telemetry": compute.telemetry(), "resumability": {"prepared_graph_dir": str(config.spectral.prepared_graph_dir), "environment_constraints": "requirements/constraints.txt"}})
         manifest.write_json(run_dir / "manifest.json")
         (run_dir / "COMPLETED").write_text("complete\n", encoding="utf-8")
-        print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "spectral": str(run_dir / "spectral"), "dynamics": str(run_dir / "dynamics")}, sort_keys=True))
+        print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "spectral": str(run_dir / "spectral"), "dynamics": str(run_dir / "dynamics"), "coarsening": coarsening_summary}, sort_keys=True))
         return 0
 
     register_handler("download", download)
