@@ -1,0 +1,79 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+dataset:
+  source: synthetic-controls
+  language: ""
+  relations: []
+  min_weight: 0.0
+  max_nodes: 256
+  component: all
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: raw
+  operator: normalized_adjacency
+runtime:
+  profile: smoke
+  random_seed: 1729
+execution:
+  backend: cpu
+  device: 0
+  dtype: float64
+  workers: 1
+  reserved_cpu_cores: 1
+  threads_per_worker: 1
+  batch_size: auto
+  deterministic: true
+  allow_auto_fallback: true
+dynamics:
+  model: linear
+  alpha: 1.0
+  beta: auto_critical
+  auto_critical_margin: 0.05
+  time_start: 0.0
+  time_stop: 5.0
+  time_steps: 31
+  perturbations_per_kind: 1
+  perturbation_amplitude: 1.0
+  perturbation_seed: 1729
+  random_sparse_fraction: 0.10
+  storage_policy: all
+  max_storage_mb: 64
+spectral:
+  prepared_graph_dir: null
+  top_k: 16
+  max_r: 8
+  tolerance: 1.0e-10
+  maxiter: null
+  symmetry_tolerance: 1.0e-10
+coarsening:
+  enabled: true
+  methods: [connectivity_matching, unconstrained_matching]
+  target_reduction: 0.5
+  embedding_weighting: none
+  seed: 1729
+  tie_breaking: distance_then_node_index
+  aggregation: sum
+  distance_threshold: null
+hierarchy:
+  enabled: true
+  method: connectivity_matching
+  max_levels: 4
+  min_nodes: 8
+plateau:
+  enabled: true
+  min_consecutive: 2
+  r_tolerance: 0
+  max_subspace_distance: 0.45
+  max_trajectory_error: 0.60
+  max_eigenvalue_error: 0.30
+  min_achieved_reduction: 0.10
+synthetic:
+  macro_blocks: 4
+  nodes_per_block: 16
+  internal_weight: 1.0
+  bridge_weight: 0.05
+  seed: 1729
