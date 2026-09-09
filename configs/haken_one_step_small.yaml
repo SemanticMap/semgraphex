@@ -5,6 +5,9 @@ paths:
   runs_root: tmp/runs
 dataset:
   source: conceptnet-5.7
+  version: "5.7.0"
+  source_url: https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
+  max_rows: null
   language: en
   relations: [RelatedTo, IsA, PartOf, HasA, UsedFor, HasProperty]
   min_weight: 1.0
@@ -19,7 +22,6 @@ runtime:
   profile: small
   random_seed: 1729
 execution:
-  # M2 evidence runs on the trusted strict CPU float64 reference path.
   backend: cpu
   device: 0
   dtype: float64
@@ -44,8 +46,8 @@ dynamics:
   storage_policy: summaries
   max_storage_mb: 256
 spectral:
-  # Set to the completed M0 prepare-* artifact directory before running M2.
-  prepared_graph_dir: ../tmp/runs/prepare-small/graph
+  # Prefer CLI --prepared-graph pointing to the completed prepare run directory.
+  prepared_graph_dir: null
   top_k: 64
   max_r: 32
   tolerance: 1.0e-10

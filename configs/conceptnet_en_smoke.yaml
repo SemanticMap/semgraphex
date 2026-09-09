@@ -2,19 +2,15 @@ paths:
   workspace_root: ..
   data_root: data
   cache_root: data/cache
-  # Ephemeral smoke-run artifacts remain inside the repository workspace.
   runs_root: tmp/runs
 dataset:
   source: conceptnet-5.7
   version: "5.7.0"
   source_url: https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
-  # Local already-decompressed ConceptNet assertions TSV/CSV file.
   path: null
-  # Reads the first N physical rows before filtering; null reads all rows.
   max_rows: 1000
-  # Empty language and relations disable their corresponding filters.
-  language: ""
-  relations: []
+  language: en
+  relations: [RelatedTo, IsA, PartOf, HasA, UsedFor, HasProperty]
   min_weight: 1.0
   max_nodes: 1000
   component: largest
