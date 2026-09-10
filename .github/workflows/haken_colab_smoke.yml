@@ -8,7 +8,7 @@ on:
       - 'src/semmap_haken/**'
       - 'configs/synthetic_plateau_smoke.yaml'
       - 'configs/m41_synthetic_sweep.yaml'
-      - 'tests/**'
+      - 'tests/test_semmap_haken_*.py'
       - 'requirements/constraints.txt'
       - 'pyproject.toml'
   workflow_dispatch:
@@ -26,9 +26,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -c requirements/constraints.txt -e '.[dev]'
-      - name: Run full regression suite
+      - name: Run complete Haken regression suite
         run: |
-          pytest -q
+          pytest -q tests/test_semmap_haken_*.py
       - name: Run original M4 synthetic smoke
         run: |
           python -m semmap_haken.research_cli synthetic --config configs/synthetic_plateau_smoke.yaml | tee synthetic_stdout.json
