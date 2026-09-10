@@ -56,7 +56,7 @@ spectral:
   symmetry_tolerance: 1.0e-10
 coarsening:
   enabled: true
-  methods: [connectivity_matching]
+  methods: [connectivity_matching, unconstrained_matching]
   target_reduction: 0.50
   embedding_weighting: none
   seed: 1729
