@@ -39,19 +39,22 @@ jobs:
 
       - name: Download official ConceptNet 5.7 dump
         run: |
+          set -o pipefail
           curl -L --fail --retry 4 --retry-delay 5 \
             --output data/cache/conceptnet-assertions-5.7.0.csv.gz \
             https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
           sha256sum data/cache/conceptnet-assertions-5.7.0.csv.gz | tee tmp/m5_evidence/conceptnet_dump_sha256.txt
           ls -lh data/cache/conceptnet-assertions-5.7.0.csv.gz | tee tmp/m5_evidence/conceptnet_dump_size.txt
 
-      - name: Extract deterministic real English 100k-node subgraph
+      - name: Extract deterministic connected real English 100k-node subgraph
         run: |
+          set -o pipefail
           /usr/bin/time -v python scripts/extract_conceptnet_100k.py \
             --input data/cache/conceptnet-assertions-5.7.0.csv.gz \
             --output data/conceptnet_en_100k.tsv \
             --metadata tmp/m5_evidence/extraction.json \
             --target-nodes 100000 \
+            --candidate-multiplier 3.0 \
             --min-weight 1.0 \
             --relations RelatedTo IsA PartOf HasA UsedFor HasProperty \
             2> tmp/m5_evidence/extraction_time.txt | tee tmp/m5_evidence/extraction_stdout.json
@@ -60,6 +63,7 @@ jobs:
 
       - name: Prepare sparse 100k graph
         run: |
+          set -o pipefail
           PREPARED_DIR=$(semmap-haken prepare --config configs/conceptnet_en_100k.yaml)
           echo "$PREPARED_DIR" | tee tmp/m5_evidence/prepared_dir.txt
           echo "PREPARED_DIR=$PREPARED_DIR" >> "$GITHUB_ENV"
@@ -78,6 +82,7 @@ jobs:
 
       - name: Run real multiscale Haken coarsening at 35 percent per step
         run: |
+          set -o pipefail
           /usr/bin/time -v python -m semmap_haken.research_cli multiscale \
             --config configs/haken_multiscale_conceptnet_100k_r035.yaml \
             --prepared-graph "$PREPARED_DIR" \
@@ -85,6 +90,7 @@ jobs:
 
       - name: Run real multiscale Haken coarsening at 50 percent per step
         run: |
+          set -o pipefail
           /usr/bin/time -v python -m semmap_haken.research_cli multiscale \
             --config configs/haken_multiscale_conceptnet_100k_r050.yaml \
             --prepared-graph "$PREPARED_DIR" \
