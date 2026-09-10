@@ -67,22 +67,28 @@ def _orthonormalize(basis: np.ndarray) -> np.ndarray:
 
 
 def slow_subspace_comparison(fine_basis: np.ndarray, coarse_basis: np.ndarray) -> SubspaceComparison:
-    """Compare subspaces via principal angles and projection-matrix distance.
+    """Compare subspaces using principal angles without forming N-by-N projectors.
 
     Both inputs are orthonormalized first, so sign flips and rotations inside
-    either subspace cannot change the result.
+    either subspace cannot change the result.  For equal compared rank ``r``,
+    the historical projector metric
+
+    ``||Q_f Q_f^T - Q_c Q_c^T||_F / sqrt(2)``
+
+    is exactly ``sqrt(sum_i sin(theta_i)^2)``, where ``theta_i`` are the
+    principal angles.  Computing the latter only requires the small
+    ``r-by-r`` matrix ``Q_f^T Q_c`` and therefore scales as O(N r^2) memory
+    rather than O(N^2).
     """
     fine_q = _orthonormalize(fine_basis)
     coarse_q = _orthonormalize(coarse_basis)
     rank = min(fine_q.shape[1], coarse_q.shape[1])
     fine_q, coarse_q = fine_q[:, :rank], coarse_q[:, :rank]
-    # Principal angles: clipped singular values of Q_f^T Q_c (sorted descending).
-    products = np.clip(fine_q.T @ coarse_q, -1.0, 1.0)
-    _, singular, _ = svd(products)
-    angles = np.arccos(np.clip(singular, 0.0, 1.0))
-    projection_fine = fine_q @ fine_q.T
-    projection_coarse = coarse_q @ coarse_q.T
-    distance = float(np.linalg.norm(projection_fine - projection_coarse, ord="fro") / np.sqrt(2))
+    products = fine_q.T @ coarse_q
+    _, singular, _ = svd(products, full_matrices=False)
+    singular = np.clip(singular, 0.0, 1.0)
+    angles = np.arccos(singular)
+    distance = float(np.sqrt(np.sum(np.maximum(0.0, 1.0 - singular * singular))))
     return SubspaceComparison(angles, distance, rank)
 
 
