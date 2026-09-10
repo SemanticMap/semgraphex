@@ -8,6 +8,7 @@ on:
       - '.github/workflows/haken_conceptnet_100k.yml'
       - 'src/semmap_haken/metrics.py'
       - 'tests/test_semmap_haken_scalable_subspace.py'
+      - 'tests/test_semmap_haken_quotient_metrics.py'
 
 jobs:
   conceptnet-100k:
