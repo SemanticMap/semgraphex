@@ -7,6 +7,8 @@ on:
       - '.github/workflows/haken_colab_smoke.yml'
       - 'src/semmap_haken/**'
       - 'configs/synthetic_plateau_smoke.yaml'
+      - 'configs/m41_synthetic_sweep.yaml'
+      - 'tests/test_semmap_haken_m41.py'
       - 'requirements/constraints.txt'
       - 'pyproject.toml'
   workflow_dispatch:
@@ -14,30 +16,37 @@ on:
 jobs:
   synthetic-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install package
+      - name: Install package and test tools
         run: |
           python -m pip install --upgrade pip
-          pip install -c requirements/constraints.txt -e .
-      - name: Run M4 synthetic falsification smoke
+          pip install -c requirements/constraints.txt -e '.[dev]'
+      - name: Test M4.1 metrics
+        run: |
+          pytest -q tests/test_semmap_haken_m41.py
+      - name: Run original M4 synthetic smoke
         run: |
           python -m semmap_haken.research_cli synthetic --config configs/synthetic_plateau_smoke.yaml | tee synthetic_stdout.json
-      - name: Show produced evidence
+      - name: Run M4.1 sensitivity/specificity sweep
+        run: |
+          python -m semmap_haken.m41_cli sweep --config configs/m41_synthetic_sweep.yaml --output tmp/runs/m41-sweep | tee m41_stdout.json
+      - name: Show M4.1 report
         if: always()
         run: |
-          find tmp/runs -maxdepth 4 -type f -print 2>/dev/null || true
-          cat synthetic_stdout.json 2>/dev/null || true
+          cat tmp/runs/m41-sweep/m41_report.md 2>/dev/null || true
+          cat m41_stdout.json 2>/dev/null || true
       - name: Upload synthetic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: haken-synthetic-smoke
+          name: haken-m41-evidence
           path: |
             tmp/runs/
             synthetic_stdout.json
+            m41_stdout.json
           if-no-files-found: warn
