@@ -113,8 +113,9 @@ def test_subspace_metric_is_invariant_to_sign_and_rotation() -> None:
     rotation, _ = np.linalg.qr(rng.normal(size=(4, 4)))
     reference = slow_subspace_comparison(basis, basis)
     flipped = slow_subspace_comparison(basis, signs @ rotation)
-    assert np.isclose(reference.projection_distance, flipped.projection_distance, atol=1e-12)
-    # Rotation/reflection only adds floating-point rounding (~1e-8) to the angles.
+    # Principal-angle/SVD arithmetic around singular value 1 carries about 1e-8
+    # absolute rounding in the derived distance; this is numerical zero here.
+    assert np.isclose(reference.projection_distance, flipped.projection_distance, atol=1e-7)
     assert np.allclose(reference.principal_angles, flipped.principal_angles, atol=1e-7)
 
 
