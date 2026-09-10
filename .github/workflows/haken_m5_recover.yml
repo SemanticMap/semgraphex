@@ -1,0 +1,122 @@
+name: Haken M5 recover prepared 100k
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [haken]
+    paths:
+      - '.github/workflows/haken_m5_recover.yml'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download M5 attempt-2 evidence
+        run: |
+          mkdir -p recovered
+          gh run download 34521017908 \
+            --repo SemanticMap/semgraphex \
+            --name haken-conceptnet-100k-m5-evidence \
+            --dir recovered
+          find recovered -maxdepth 2 -type f -printf '%P\n' | sort
+
+      - name: Show exact r035 failure
+        run: |
+          echo '===== r035_time.txt ====='
+          cat recovered/r035_time.txt || true
+          echo '===== r035_stdout.json ====='
+          cat recovered/r035_stdout.json || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned research environment
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c requirements/constraints.txt -e '.[dev]'
+          pytest -q tests/test_semmap_haken_*.py
+
+      - name: Reconstruct prepared graph contract from evidence
+        run: |
+          mkdir -p recovered/prepared
+          cp recovered/adjacency.npz recovered/prepared/adjacency.npz
+          cp recovered/nodes.json recovered/prepared/nodes.json
+          cp recovered/prepared_graph_metadata.json recovered/prepared/graph_metadata.json
+          cp recovered/prepare_manifest.json recovered/prepared/manifest.json
+          python - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('recovered/prepare_manifest.json')
+          manifest=json.loads(p.read_text())
+          pathlib.Path('recovered/prepared/resolved_config.json').write_text(
+              json.dumps(manifest['resolved_config'], indent=2, sort_keys=True)+'\n'
+          )
+          pathlib.Path('recovered/prepared/COMPLETED').write_text('complete\n')
+          meta=json.loads(pathlib.Path('recovered/prepared/graph_metadata.json').read_text())
+          assert meta['data_report']['node_count'] == 100000
+          print(json.dumps(meta['data_report'], indent=2, sort_keys=True))
+          PY
+
+      - name: Run recovered r035
+        run: |
+          set -o pipefail
+          /usr/bin/time -v python -m semmap_haken.research_cli multiscale \
+            --config configs/haken_multiscale_conceptnet_100k_r035.yaml \
+            --prepared-graph recovered/prepared \
+            2>&1 | tee recovered/recovered_r035.log
+
+      - name: Run recovered r050
+        run: |
+          set -o pipefail
+          /usr/bin/time -v python -m semmap_haken.research_cli multiscale \
+            --config configs/haken_multiscale_conceptnet_100k_r050.yaml \
+            --prepared-graph recovered/prepared \
+            2>&1 | tee recovered/recovered_r050.log
+
+      - name: Collect recovered hierarchy summaries
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, pathlib, shutil
+          root=pathlib.Path('recovered')
+          out={}
+          for tag in ('r035','r050'):
+              log=root/f'recovered_{tag}.log'
+              if not log.exists():
+                  out[tag]={'status':'not_run'}
+                  continue
+              payload=None
+              for line in log.read_text(errors='replace').splitlines():
+                  if line.startswith('{') and '"run_dir"' in line:
+                      try: payload=json.loads(line)
+                      except json.JSONDecodeError: pass
+              if not payload:
+                  out[tag]={'status':'failed'}
+                  continue
+              run_dir=pathlib.Path(payload['run_dir'])
+              h=json.loads((run_dir/'hierarchy'/'hierarchy.json').read_text())
+              p=json.loads((run_dir/'plateau.json').read_text())
+              out[tag]={'payload':payload,'levels':h['levels'],'transitions':h['transitions'],'plateau':p,'elapsed_seconds':h['elapsed_seconds']}
+              shutil.copy2(run_dir/'hierarchy'/'hierarchy.json',root/f'{tag}_hierarchy.json')
+              shutil.copy2(run_dir/'plateau.json',root/f'{tag}_plateau.json')
+              shutil.copy2(run_dir/'manifest.json',root/f'{tag}_manifest.json')
+          (root/'recovered_summary.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - name: Upload recovered M5 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haken-m5-recovered-100k
+          path: recovered/
+          if-no-files-found: error
