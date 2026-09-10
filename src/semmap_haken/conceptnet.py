@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import json
+import lzma
 import math
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, TextIO
 
 
 class AssertionParseError(ValueError):
@@ -74,18 +77,35 @@ def _source_texts(value: object) -> set[str]:
     return set()
 
 
+def _open_text(path: Path) -> TextIO:
+    """Open plain or single-stream compressed ConceptNet assertions as text.
+
+    gzip/bzip2/xz are decompressed incrementally, so the full corpus is never
+    expanded in memory. ZIP is intentionally rejected because an archive can
+    contain multiple members and therefore needs a separate explicit contract.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8", newline="")
+    if suffix == ".bz2":
+        return bz2.open(path, "rt", encoding="utf-8", newline="")
+    if suffix == ".xz":
+        return lzma.open(path, "rt", encoding="utf-8", newline="")
+    if suffix == ".zip":
+        raise ValueError("ZIP ConceptNet input is ambiguous; extract one assertions member or use .gz/.bz2/.xz")
+    return path.open("rt", encoding="utf-8", newline="")
+
+
 def stream_assertions(path: str | Path, filters: AssertionFilters = AssertionFilters(), *, invalid_mode: str = "fail_fast", report: ParseReport | None = None, max_rows: int | None = None) -> Iterator[Assertion]:
-    """Yield filtered assertions from a decompressed local TSV without materializing it."""
+    """Yield filtered assertions from a local plain/gzip/bzip2/xz TSV stream."""
     if invalid_mode not in {"fail_fast", "skip_invalid"}:
         raise ValueError("invalid_mode must be 'fail_fast' or 'skip_invalid'")
     if max_rows is not None and (isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0):
         raise ValueError("max_rows must be a positive integer or None")
     destination = Path(path)
     actual_report = report if report is not None else ParseReport()
-    if destination.suffix.lower() in {".gz", ".bz2", ".xz", ".zip"}:
-        raise ValueError("stream_assertions requires an already-decompressed ConceptNet assertions file")
     actual_report.max_rows = max_rows
-    with destination.open("rt", encoding="utf-8", newline="") as stream:
+    with _open_text(destination) as stream:
         for line_number, line in enumerate(stream, start=1):
             if max_rows is not None and line_number > max_rows:
                 break
