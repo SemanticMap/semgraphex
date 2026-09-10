@@ -1,0 +1,5 @@
+name: conceptnet_100k
+expected_max_nodes: 100000
+recommended_ram_gib: 8
+recommended_disk_gib: 12
+notes: Real ConceptNet 5.7 English 100k-node experiment; sparse-only graph and CPU float64 reference execution.
