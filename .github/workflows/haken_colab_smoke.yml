@@ -35,10 +35,14 @@ jobs:
       - name: Run M4.1 sensitivity/specificity sweep
         run: |
           python -m semmap_haken.m41_cli sweep --config configs/m41_synthetic_sweep.yaml --output tmp/runs/m41-sweep | tee m41_stdout.json
-      - name: Show M4.1 report
+      - name: Diagnose M4.1 failures without retuning
+        run: |
+          python -m semmap_haken.m41_diagnose tmp/runs/m41-sweep/m41_sweep.json tmp/runs/m41-sweep/m41_diagnostics.json | tee m41_diagnostic_stdout.json
+      - name: Show M4.1 reports
         if: always()
         run: |
           cat tmp/runs/m41-sweep/m41_report.md 2>/dev/null || true
+          cat tmp/runs/m41-sweep/m41_diagnostics.md 2>/dev/null || true
           cat m41_stdout.json 2>/dev/null || true
       - name: Upload synthetic evidence
         if: always()
@@ -49,4 +53,5 @@ jobs:
             tmp/runs/
             synthetic_stdout.json
             m41_stdout.json
+            m41_diagnostic_stdout.json
           if-no-files-found: warn
