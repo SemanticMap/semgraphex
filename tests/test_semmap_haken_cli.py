@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from semmap_haken import __version__
 from semmap_haken.cli import main
 
@@ -20,7 +22,7 @@ def test_cli_root_and_subcommand_help(capsys) -> None:
     assert "--config" in capsys.readouterr().out
 
 
-def test_evaluate_remains_explicitly_deferred(capsys) -> None:
-    assert main(["evaluate", "--run", "runs/missing"]) == 2
-    captured = capsys.readouterr()
-    assert "not yet implemented" in captured.err
+def test_evaluate_rejects_incomplete_run() -> None:
+    """Evaluate is now an active M2 evidence gate, not a deferred command."""
+    with pytest.raises(ValueError, match="run is not complete"):
+        main(["evaluate", "--run", "runs/missing"])
