@@ -40,12 +40,13 @@ def test_stream_parser_limits_physical_rows_before_filtering() -> None:
     }
 
 
-def test_stream_parser_rejects_compressed_input(tmp_path: Path) -> None:
-    compressed = tmp_path / "tiny.tsv.gz"
-    compressed.write_bytes(FIXTURE.read_bytes())
+def test_stream_parser_rejects_ambiguous_zip_archive(tmp_path: Path) -> None:
+    """Single-stream gzip/bzip2/xz are supported; multi-member ZIP is not."""
+    archive = tmp_path / "tiny.tsv.zip"
+    archive.write_bytes(FIXTURE.read_bytes())
 
-    with pytest.raises(ValueError, match="decompressed"):
-        list(stream_assertions(compressed))
+    with pytest.raises(ValueError, match="ZIP ConceptNet input is ambiguous"):
+        list(stream_assertions(archive))
 
 
 def test_invalid_records_fail_or_skip(tmp_path: Path) -> None:
