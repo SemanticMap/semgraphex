@@ -84,7 +84,7 @@ def _data_handlers() -> None:
         config = load_config(args.config)
         validate_resource_profile(config)
         if config.dataset.path is None:
-            raise ValueError("dataset.path is required for prepare and must reference a local decompressed assertions file")
+            raise ValueError("dataset.path is required for prepare and must reference a local ConceptNet assertions file")
         file_identity = input_file_identity(config.dataset.path)
         report = ParseReport()
         records = stream_assertions(
@@ -103,13 +103,15 @@ def _data_handlers() -> None:
         )
         run_id = f"prepare-{uuid.uuid4().hex[:12]}"
         run_dir = config.paths.runs_root / run_id
+        suffix = config.dataset.path.suffix.lower()
+        compression = {".gz": "gzip", ".bz2": "bzip2", ".xz": "xz"}.get(suffix, "none")
         source_identity = {
             "path": str(config.dataset.path),
             "dataset_name": config.dataset.source,
             "dataset_version": config.dataset.version,
             "source_url": config.dataset.source_url,
-            "input_format": "decompressed_conceptnet_assertions_tsv",
-            "compression": "none",
+            "input_format": "conceptnet_assertions_tsv",
+            "compression": compression,
             "max_rows": config.dataset.max_rows,
             **file_identity,
         }
@@ -132,7 +134,10 @@ def _data_handlers() -> None:
         })
         manifest.write_json(run_dir / "manifest.json")
         (run_dir / "COMPLETED").write_text("complete\n", encoding="utf-8")
-        print(json.dumps({"run_dir": str(run_dir), "source_identity": source_identity}, sort_keys=True))
+        # Keep stdout backward-compatible for scripts/tests that use the prepare
+        # result as a path. Exact input identity remains persisted in metadata
+        # and manifest rather than mixed into the path-valued stdout contract.
+        print(str(run_dir))
         return 0
 
     def run(args: argparse.Namespace) -> int:
