@@ -27,14 +27,14 @@ jobs:
             --repo SemanticMap/semgraphex \
             --name haken-conceptnet-100k-m5-evidence \
             --dir recovered
-          find recovered -maxdepth 2 -type f -printf '%P\n' | sort
+          find recovered -maxdepth 4 -type f -printf '%P\n' | sort
 
       - name: Show exact r035 failure
         run: |
           echo '===== r035_time.txt ====='
-          cat recovered/r035_time.txt || true
+          cat recovered/tmp/m5_evidence/r035_time.txt || true
           echo '===== r035_stdout.json ====='
-          cat recovered/r035_stdout.json || true
+          cat recovered/tmp/m5_evidence/r035_stdout.json || true
 
       - uses: actions/setup-python@v5
         with:
@@ -48,14 +48,15 @@ jobs:
 
       - name: Reconstruct prepared graph contract from evidence
         run: |
+          SRC=recovered/tmp/m5_evidence
           mkdir -p recovered/prepared
-          cp recovered/adjacency.npz recovered/prepared/adjacency.npz
-          cp recovered/nodes.json recovered/prepared/nodes.json
-          cp recovered/prepared_graph_metadata.json recovered/prepared/graph_metadata.json
-          cp recovered/prepare_manifest.json recovered/prepared/manifest.json
+          cp "$SRC/adjacency.npz" recovered/prepared/adjacency.npz
+          cp "$SRC/nodes.json" recovered/prepared/nodes.json
+          cp "$SRC/prepared_graph_metadata.json" recovered/prepared/graph_metadata.json
+          cp "$SRC/prepare_manifest.json" recovered/prepared/manifest.json
           python - <<'PY'
           import json, pathlib
-          p=pathlib.Path('recovered/prepare_manifest.json')
+          p=pathlib.Path('recovered/tmp/m5_evidence/prepare_manifest.json')
           manifest=json.loads(p.read_text())
           pathlib.Path('recovered/prepared/resolved_config.json').write_text(
               json.dumps(manifest['resolved_config'], indent=2, sort_keys=True)+'\n'
