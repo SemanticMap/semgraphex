@@ -1,0 +1,43 @@
+name: Haken Colab-equivalent smoke
+
+on:
+  push:
+    branches: [haken]
+    paths:
+      - '.github/workflows/haken_colab_smoke.yml'
+      - 'src/semmap_haken/**'
+      - 'configs/synthetic_plateau_smoke.yaml'
+      - 'requirements/constraints.txt'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+jobs:
+  synthetic-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c requirements/constraints.txt -e .
+      - name: Run M4 synthetic falsification smoke
+        run: |
+          python -m semmap_haken.research_cli synthetic --config configs/synthetic_plateau_smoke.yaml | tee synthetic_stdout.json
+      - name: Show produced evidence
+        if: always()
+        run: |
+          find tmp/runs -maxdepth 4 -type f -print 2>/dev/null || true
+          cat synthetic_stdout.json 2>/dev/null || true
+      - name: Upload synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haken-synthetic-smoke
+          path: |
+            tmp/runs/
+            synthetic_stdout.json
+          if-no-files-found: warn
