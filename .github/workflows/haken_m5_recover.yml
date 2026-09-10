@@ -58,13 +58,23 @@ jobs:
           cp "$SRC/prepare_manifest.json" recovered/prepared/manifest.json
           python - <<'PY'
           import json, pathlib
+          root=pathlib.Path('recovered/prepared')
           p=pathlib.Path('recovered/tmp/m5_evidence/prepare_manifest.json')
           manifest=json.loads(p.read_text())
-          pathlib.Path('recovered/prepared/resolved_config.json').write_text(
-              json.dumps(manifest['resolved_config'], indent=2, sort_keys=True)+'\n'
+          (root/'resolved_config.json').write_text(json.dumps(manifest['resolved_config'], indent=2, sort_keys=True)+'\n')
+          (root/'COMPLETED').write_text('complete\n')
+          # selected_edges.jsonl is provenance-only and was not copied into attempt-2 evidence.
+          # Hierarchy computation consumes adjacency.npz + nodes.json. Preserve their original
+          # checksums, create an explicit empty recovery edge-audit file, and remove only the
+          # unavailable edge-audit checksum from the recovery metadata.
+          (root/'selected_edges.jsonl').write_text('')
+          meta=json.loads((root/'graph_metadata.json').read_text())
+          meta.get('checksums', {}).pop('selected_edges.jsonl', None)
+          meta['recovery_note'] = (
+              'selected_edges.jsonl was not included in attempt-2 artifact; recovery uses the original '
+              'checksum-verified adjacency.npz and nodes.json. Empty selected_edges is noncomputational.'
           )
-          pathlib.Path('recovered/prepared/COMPLETED').write_text('complete\n')
-          meta=json.loads(pathlib.Path('recovered/prepared/graph_metadata.json').read_text())
+          (root/'graph_metadata.json').write_text(json.dumps(meta, indent=2, sort_keys=True)+'\n')
           assert meta['data_report']['node_count'] == 100000
           print(json.dumps(meta['data_report'], indent=2, sort_keys=True))
           PY
