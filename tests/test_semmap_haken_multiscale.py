@@ -41,6 +41,63 @@ def test_plateau_requires_consecutive_good_transitions_and_stable_r() -> None:
     assert detect_plateaus(unstable, PlateauOptions(min_consecutive=3)).candidates == ()
 
 
+def test_plateau_reduction_gate_accepts_floor_quantization_but_not_a_missing_merge() -> None:
+    node_count = 3333
+    minimum = 0.03
+    requested_merges = int(np.floor(node_count * minimum + 1e-12))
+
+    def transition(achieved_merges: int) -> TransitionEvidence:
+        coarse_node_count = node_count - achieved_merges
+        return TransitionEvidence(
+            source_level=0,
+            target_level=1,
+            source_r=4,
+            target_r=4,
+            fine_node_count=node_count,
+            coarse_node_count=coarse_node_count,
+            compression_ratio=node_count / coarse_node_count,
+            achieved_reduction=achieved_merges / node_count,
+            subspace_projection_distance=0.1,
+            slow_eigenvalue_max_abs_error=0.05,
+            mean_trajectory_relative_error=0.2,
+            shortfall_reason=None,
+            method="connectivity_agglomerative",
+        )
+
+    levels = (
+        LevelEvidence(0, node_count, 0, 4, 0.9, -0.1, 0.2, 0.1, 1, 10),
+        LevelEvidence(1, node_count - requested_merges, 0, 4, 0.9, -0.1, 0.2, 0.1, 2, 11),
+    )
+    options = PlateauOptions(min_consecutive=1, min_achieved_reduction=minimum)
+
+    quantized = HierarchyResult(
+        levels,
+        (transition(requested_merges),),
+        tuple(),
+        tuple(),
+        "max_levels",
+        "connectivity_agglomerative",
+        minimum,
+    )
+    quantized_report = detect_plateaus(quantized, options)
+    assert quantized_report.qualifying_transitions == (0,)
+    assert len(quantized_report.candidates) == 1
+
+    missing_one = HierarchyResult(
+        levels,
+        (transition(requested_merges - 1),),
+        tuple(),
+        tuple(),
+        "max_levels",
+        "connectivity_agglomerative",
+        minimum,
+    )
+    missing_report = detect_plateaus(missing_one, options)
+    assert missing_report.qualifying_transitions == ()
+    assert missing_report.candidates == ()
+    assert missing_report.rejected[0]["reasons"] == ["insufficient_reduction"]
+
+
 def test_synthetic_controls_are_sparse_symmetric_and_distinct() -> None:
     positive, negative = build_synthetic_controls(SyntheticOptions(macro_blocks=4, nodes_per_block=8, internal_weight=1.0, bridge_weight=0.05, seed=7))
     assert positive.adjacency.shape == negative.adjacency.shape == (32, 32)
