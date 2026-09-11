@@ -36,6 +36,20 @@ Use the tested (not hash-locked) constraints in [`requirements/constraints.txt`]
 
 Starter inputs are [`configs/conceptnet_en_smoke.yaml`](configs/conceptnet_en_smoke.yaml), [`configs/conceptnet_en_small.yaml`](configs/conceptnet_en_small.yaml), and the profiles under [`configs/resource_profiles/`](configs/resource_profiles/).
 
+To build the deterministic 100k-node subset directly from the already-decompressed
+official dump in `data/cache`, use the explicit plain-text input switch:
+
+```bash
+python scripts/extract_conceptnet_100k.py \
+  --decompressed-input data/cache/conceptnet-assertions-5.7.0.csv \
+  --output data/conceptnet_en_100k.tsv \
+  --metadata data/conceptnet_en_100k.metadata.json
+```
+
+Use `--input <path>.gz` instead for the gzip-compressed dump. The two input switches
+are mutually exclusive. Both modes stream the source three times without loading the
+complete dump into memory; `--decompressed-input` avoids repeated gzip decoding.
+
 ## A1 sparse spectral diagnostics
 
 [`src/semmap_haken/operators.py`](src/semmap_haken/operators.py) provides sparse undirected normalized adjacency \(S=D^{-1/2}AD^{-1/2}\), preserving zero-degree nodes as zero rows and never materializing an NxN dense array. [`src/semmap_haken/modes.py`](src/semmap_haken/modes.py) uses iterative `eigsh` to emit *slow-mode candidates*—not established order parameters—with residuals, growth/decay rates for \(J=-\alpha I+\beta S\), stable-mode relaxation times, IPR/participation and localization diagnostics, degree correlations, eigengaps, timescale gaps, and a compact JSON/NPZ artifact.

@@ -1,8 +1,8 @@
 logs/
-datas/
 __pycache__/
 .venv/
 *.egg-info/
 runs
 tmp/
 semgraphex/__pycache__/
+data/

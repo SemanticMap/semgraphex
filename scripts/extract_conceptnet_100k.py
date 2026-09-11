@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build a deterministic connected 100k-node English ConceptNet subgraph.
 
-The extractor uses three streaming passes over the official compressed assertions dump.
+The extractor uses three streaming passes over a compressed or decompressed official
+assertions dump.
 Pass 1 computes weighted degree and full connected components without retaining edges.
 Pass 2 builds adjacency only for a bounded high-degree candidate pool and selects exactly
 ``target_nodes`` by a deterministic degree-prioritized connected traversal. Pass 3 writes
@@ -17,20 +18,33 @@ import math
 import time
 from collections import Counter, deque
 from pathlib import Path
+from typing import Sequence, TextIO
 
 DEFAULT_RELATIONS = ("RelatedTo", "IsA", "PartOf", "HasA", "UsedFor", "HasProperty")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input", help="Path to the gzip-compressed ConceptNet assertions dump")
+    input_group.add_argument(
+        "--decompressed-input",
+        help="Path to an already-decompressed ConceptNet assertions file",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--metadata", required=True)
     parser.add_argument("--target-nodes", type=int, default=100_000)
     parser.add_argument("--candidate-multiplier", type=float, default=3.0)
     parser.add_argument("--min-weight", type=float, default=1.0)
     parser.add_argument("--relations", nargs="+", default=list(DEFAULT_RELATIONS))
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def open_source(path: Path, *, compressed: bool) -> TextIO:
+    """Open one repeatable streaming pass over compressed or plain assertions."""
+    if compressed:
+        return gzip.open(path, "rt", encoding="utf-8", newline="")
+    return path.open("rt", encoding="utf-8", newline="")
 
 
 def relation_name(uri: str) -> str:
@@ -87,7 +101,8 @@ class DSU:
 
 def main() -> int:
     args = parse_args()
-    source = Path(args.input)
+    compressed_input = args.input is not None
+    source = Path(args.input if compressed_input else args.decompressed_input)
     output = Path(args.output)
     metadata_path = Path(args.metadata)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +132,7 @@ def main() -> int:
         return idx
 
     # Pass 1: degrees + connected components over all eligible English edges.
-    with gzip.open(source, "rt", encoding="utf-8", newline="") as stream:
+    with open_source(source, compressed=compressed_input) as stream:
         for line in stream:
             total_lines += 1
             fields = line.rstrip("\n").split("\t")
@@ -156,7 +171,7 @@ def main() -> int:
     # Pass 2: adjacency only inside the high-degree candidate pool.
     pool_adjacency: list[list[int]] = [[] for _ in range(pool_size)]
     candidate_assertions = 0
-    with gzip.open(source, "rt", encoding="utf-8", newline="") as stream:
+    with open_source(source, compressed=compressed_input) as stream:
         for line in stream:
             fields = line.rstrip("\n").split("\t")
             item = eligible(fields, relations, args.min_weight)
@@ -232,7 +247,7 @@ def main() -> int:
     written = 0
     seen: set[str] = set()
     selected_relation_counts = Counter()
-    with gzip.open(source, "rt", encoding="utf-8", newline="") as stream, output.open("wt", encoding="utf-8", newline="") as sink:
+    with open_source(source, compressed=compressed_input) as stream, output.open("wt", encoding="utf-8", newline="") as sink:
         for line in stream:
             fields = line.rstrip("\n").split("\t")
             item = eligible(fields, relations, args.min_weight)
@@ -251,6 +266,7 @@ def main() -> int:
     report = {
         "schema_version": 2,
         "input": str(source),
+        "input_compression": "gzip" if compressed_input else "none",
         "target_nodes": args.target_nodes,
         "selected_nodes_seen_in_induced_edges": len(seen),
         "missing_selected_nodes": missing[:100],
