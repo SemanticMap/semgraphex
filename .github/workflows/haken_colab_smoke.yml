@@ -1,16 +1,6 @@
 name: Haken Colab-equivalent smoke
 
 on:
-  push:
-    branches: [haken]
-    paths:
-      - '.github/workflows/haken_colab_smoke.yml'
-      - 'src/semmap_haken/**'
-      - 'configs/synthetic_plateau_smoke.yaml'
-      - 'configs/m41_synthetic_sweep.yaml'
-      - 'tests/test_semmap_haken_*.py'
-      - 'requirements/constraints.txt'
-      - 'pyproject.toml'
   workflow_dispatch:
 
 jobs:
