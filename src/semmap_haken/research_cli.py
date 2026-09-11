@@ -1,8 +1,4 @@
-"""CLI handlers for M3 multiscale runs and M4 synthetic falsification.
-
-Runnable directly as ``python -m semmap_haken.research_cli ...`` until these
-research commands are promoted into the stable top-level CLI surface.
-"""
+"""CLI handlers for multiscale, synthetic, and fixed-hierarchy dynamics studies."""
 
 from __future__ import annotations
 
@@ -25,6 +21,7 @@ def register_research_handlers() -> None:
     from .cli import register_handler
     from .compute import ComputeContext
     from .config import load_config
+    from .dynamics_compare import compare_checkpoint_dynamics, materialize_dynamics_checkpoints
     from .graph_build import load_prepared_graph
     from .hierarchy import run_hierarchy, save_hierarchy_result
     from .manifest import RunManifest
@@ -146,8 +143,41 @@ def register_research_handlers() -> None:
         print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "controls": summary}, sort_keys=True))
         return 0
 
+    def dynamics_checkpoints(args: object) -> int:
+        config = load_config(args.config)
+        extensions = load_research_extensions(config.source_path)
+        if not extensions.dynamics_comparison.enabled:
+            raise ValueError("dynamics_comparison.enabled must be true")
+        index = materialize_dynamics_checkpoints(args.hierarchy_run, extensions.dynamics_comparison)
+        print(json.dumps({
+            "checkpoint_root": str(Path(args.hierarchy_run).expanduser().resolve() / "dynamics_checkpoints"),
+            "checkpoints": len(index["checkpoints"]),
+            "unavailable_targets": index["unavailable_targets"],
+        }, sort_keys=True))
+        return 0
+
+    def compare_dynamics(args: object) -> int:
+        config = load_config(args.config)
+        extensions = load_research_extensions(config.source_path)
+        if not extensions.dynamics_comparison.enabled:
+            raise ValueError("dynamics_comparison.enabled must be true")
+        report = compare_checkpoint_dynamics(
+            args.hierarchy_run,
+            config=config,
+            options=extensions.dynamics_comparison,
+        )
+        print(json.dumps({
+            "models": report["models"],
+            "rows": len(report["rows"]),
+            "unavailable_targets": report["unavailable_targets"],
+            "output_dir": str(Path(args.hierarchy_run).expanduser().resolve() / "dynamics_comparison"),
+        }, sort_keys=True))
+        return 0
+
     register_handler("multiscale", multiscale)
     register_handler("synthetic", synthetic)
+    register_handler("dynamics-checkpoints", dynamics_checkpoints)
+    register_handler("compare-dynamics", compare_dynamics)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,6 +191,12 @@ def main(argv: list[str] | None = None) -> int:
     multiscale.add_argument("--prepared-graph")
     synthetic = subparsers.add_parser("synthetic")
     synthetic.add_argument("--config", required=True)
+    checkpoints = subparsers.add_parser("dynamics-checkpoints")
+    checkpoints.add_argument("--config", required=True)
+    checkpoints.add_argument("--hierarchy-run", required=True)
+    comparison = subparsers.add_parser("compare-dynamics")
+    comparison.add_argument("--config", required=True)
+    comparison.add_argument("--hierarchy-run", required=True)
     args = parser.parse_args(argv)
     return _HANDLERS[args.command](args)
 
