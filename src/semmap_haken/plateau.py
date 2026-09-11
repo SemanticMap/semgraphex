@@ -6,8 +6,13 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
+
 from .hierarchy import HierarchyResult, TransitionEvidence
 from .multiscale_config import PlateauOptions
+
+
+_REDUCTION_FLOAT_EPSILON = 1e-12
 
 
 @dataclass(frozen=True)
@@ -41,11 +46,26 @@ class PlateauReport:
         }
 
 
+def _reduction_quantization_epsilon(item: TransitionEvidence, minimum: float) -> float:
+    """Return the exact floor-quantization gap for a reduction threshold.
+
+    Coarsening requests an integer number of merges via ``floor(N * c)``.  A
+    nominal threshold such as 3% therefore often has a largest attainable
+    reduction just below 0.03.  The detector should accept that unavoidable
+    discretization, but it must not forgive one genuinely missing merge.
+    """
+    if item.fine_node_count <= 0:
+        return _REDUCTION_FLOAT_EPSILON
+    discrete_minimum = np.floor(item.fine_node_count * minimum + _REDUCTION_FLOAT_EPSILON) / item.fine_node_count
+    return max(0.0, float(minimum - discrete_minimum)) + _REDUCTION_FLOAT_EPSILON
+
+
 def _transition_check(item: TransitionEvidence, options: PlateauOptions) -> tuple[bool, tuple[str, ...]]:
     reasons: list[str] = []
     if item.target_r is None or abs(item.source_r - item.target_r) > options.r_tolerance:
         reasons.append("r_instability")
-    if item.achieved_reduction < options.min_achieved_reduction:
+    reduction_epsilon = _reduction_quantization_epsilon(item, options.min_achieved_reduction)
+    if item.achieved_reduction + reduction_epsilon < options.min_achieved_reduction:
         reasons.append("insufficient_reduction")
     if item.subspace_projection_distance is None or item.subspace_projection_distance > options.max_subspace_distance:
         reasons.append("subspace_distortion")
