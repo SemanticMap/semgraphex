@@ -1,4 +1,4 @@
-"""Validated optional M3/M4 sections from the same experiment YAML file."""
+"""Validated optional M3/M4/M5 research sections from one experiment YAML file."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import yaml
 
 
 HierarchyMethod = Literal["connectivity_matching", "unconstrained_matching", "connectivity_agglomerative"]
+DynamicsModel = Literal["linear", "cubic_haken", "tanh"]
 
 
 @dataclass(frozen=True)
@@ -41,10 +42,44 @@ class SyntheticOptions:
 
 
 @dataclass(frozen=True)
+class DynamicsComparisonOptions:
+    """Compare several dynamics laws on one already-built graph hierarchy."""
+
+    enabled: bool = False
+    models: tuple[DynamicsModel, ...] = ("linear", "cubic_haken", "tanh")
+    cubic_g: float = 1.0
+    nonlinear_max_step: float = 0.05
+    post_transient_fraction: float = 0.25
+    node_targets: tuple[int, ...] = (
+        33000,
+        30000,
+        25000,
+        24000,
+        20000,
+        15000,
+        10000,
+        7500,
+        5000,
+        3000,
+        2000,
+        1000,
+        500,
+        400,
+        300,
+        250,
+        200,
+        150,
+        100,
+        50,
+    )
+
+
+@dataclass(frozen=True)
 class ResearchExtensions:
     hierarchy: HierarchyOptions
     plateau: PlateauOptions
     synthetic: SyntheticOptions
+    dynamics_comparison: DynamicsComparisonOptions
 
 
 def _mapping(document: dict, key: str) -> dict:
@@ -61,6 +96,7 @@ def load_research_extensions(path: str | Path) -> ResearchExtensions:
     h = _mapping(document, "hierarchy")
     p = _mapping(document, "plateau")
     s = _mapping(document, "synthetic")
+    d = _mapping(document, "dynamics_comparison")
     method = h.get("method", "connectivity_matching")
     if method not in {"connectivity_matching", "unconstrained_matching", "connectivity_agglomerative"}:
         raise ValueError("hierarchy.method is unsupported")
@@ -98,4 +134,29 @@ def load_research_extensions(path: str | Path) -> ResearchExtensions:
         raise ValueError("synthetic requires at least two blocks with four nodes each")
     if synthetic.internal_weight <= 0 or not 0 < synthetic.bridge_weight < synthetic.internal_weight:
         raise ValueError("synthetic weights must satisfy 0 < bridge_weight < internal_weight")
-    return ResearchExtensions(hierarchy, plateau, synthetic)
+
+    models_raw = d.get("models", ["linear", "cubic_haken", "tanh"])
+    if not isinstance(models_raw, list) or not models_raw:
+        raise ValueError("dynamics_comparison.models must be a non-empty list")
+    allowed_models = {"linear", "cubic_haken", "tanh"}
+    if any(model not in allowed_models for model in models_raw) or len(set(models_raw)) != len(models_raw):
+        raise ValueError("dynamics_comparison.models must be unique values from linear, cubic_haken, tanh")
+    targets_raw = d.get("node_targets", list(DynamicsComparisonOptions().node_targets))
+    if not isinstance(targets_raw, list) or not targets_raw or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 2 for value in targets_raw
+    ):
+        raise ValueError("dynamics_comparison.node_targets must be a non-empty list of integers >= 2")
+    cubic_g = float(d.get("cubic_g", 1.0))
+    nonlinear_max_step = float(d.get("nonlinear_max_step", 0.05))
+    post_fraction = float(d.get("post_transient_fraction", 0.25))
+    if cubic_g <= 0 or nonlinear_max_step <= 0 or not 0 <= post_fraction < 1:
+        raise ValueError("invalid dynamics_comparison nonlinear parameters")
+    dynamics_comparison = DynamicsComparisonOptions(
+        enabled=bool(d.get("enabled", False)),
+        models=tuple(models_raw),
+        cubic_g=cubic_g,
+        nonlinear_max_step=nonlinear_max_step,
+        post_transient_fraction=post_fraction,
+        node_targets=tuple(int(value) for value in targets_raw),
+    )
+    return ResearchExtensions(hierarchy, plateau, synthetic, dynamics_comparison)
