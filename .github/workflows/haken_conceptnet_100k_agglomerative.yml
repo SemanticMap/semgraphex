@@ -2,15 +2,6 @@ name: Haken ConceptNet 100k agglomerative experiment
 
 on:
   workflow_dispatch:
-  push:
-    branches: [haken]
-    paths:
-      - '.github/workflows/haken_conceptnet_100k_agglomerative.yml'
-      - 'src/semmap_haken/coarsen.py'
-      - 'src/semmap_haken/multiscale_config.py'
-      - 'tests/test_semmap_haken_agglomerative.py'
-      - 'configs/haken_multiscale_conceptnet_100k_agglomerative_r035.yaml'
-      - 'configs/haken_multiscale_conceptnet_100k_agglomerative_r050.yaml'
 
 jobs:
   conceptnet-100k-agglomerative:
