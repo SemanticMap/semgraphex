@@ -43,12 +43,20 @@ official dump in `data/cache`, use the explicit plain-text input switch:
 python scripts/extract_conceptnet_100k.py \
   --decompressed-input data/cache/conceptnet-assertions-5.7.0.csv \
   --output data/conceptnet_en_100k.tsv \
-  --metadata data/conceptnet_en_100k.metadata.json
+  --metadata data/conceptnet_en_100k.metadata.json \
+  --workers 8 \
+  --batch-size 10000
 ```
 
 Use `--input <path>.gz` instead for the gzip-compressed dump. The two input switches
 are mutually exclusive. Both modes stream the source three times without loading the
 complete dump into memory; `--decompressed-input` avoids repeated gzip decoding.
+`--workers` enables order-preserving process-based parsing for every pass, while the
+main process performs deterministic graph reduction and output. `--workers 1` is the
+serial fallback and default. `--batch-size` controls lines per parser task; larger
+values reduce inter-process overhead but raise peak memory. The executor keeps at most
+twice the worker count in flight, and the metadata records both settings and the chosen
+parallel strategy.
 
 ## A1 sparse spectral diagnostics
 
