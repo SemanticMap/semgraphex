@@ -1,0 +1,100 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+
+dataset:
+  source: conceptnet-5.7
+  version: "5.7.0"
+  source_url: https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
+  path: ../data/conceptnet_en_100k.tsv
+  max_rows: null
+  language: en
+  relations: [RelatedTo, IsA, PartOf, HasA, UsedFor, HasProperty]
+  min_weight: 1.0
+  max_nodes: 100000
+  component: all
+
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: log1p
+  operator: normalized_adjacency
+
+runtime:
+  profile: conceptnet_100k
+  random_seed: 1729
+  resource_profile: resource_profiles/conceptnet_100k.yaml
+
+execution:
+  backend: cpu
+  device: 0
+  dtype: float64
+  workers: 1
+  reserved_cpu_cores: 1
+  threads_per_worker: 1
+  batch_size: auto
+  deterministic: true
+  allow_auto_fallback: true
+
+# Hierarchy construction is kept identical to the previous spectral/Haken
+# runs for comparability. The post-hierarchy dynamics pass below evaluates
+# TANH only on every adjacent scale.
+dynamics:
+  model: linear
+  alpha: 1.0
+  beta: auto_critical
+  auto_critical_margin: 0.05
+  time_start: 0.0
+  time_stop: 8.0
+  time_steps: 41
+  perturbations_per_kind: 1
+  perturbation_amplitude: 1.0
+  perturbation_seed: 1729
+  random_sparse_fraction: 0.001
+  storage_policy: all
+  max_storage_mb: 512
+
+spectral:
+  prepared_graph_dir: null
+  top_k: 48
+  max_r: 24
+  tolerance: 1.0e-8
+  maxiter: null
+  symmetry_tolerance: 1.0e-10
+
+coarsening:
+  enabled: true
+  methods: [connectivity_matching, unconstrained_matching]
+  target_reduction: 0.03
+  embedding_weighting: none
+  seed: 1729
+  tie_breaking: distance_then_node_index
+  aggregation: sum
+  distance_threshold: null
+
+hierarchy:
+  enabled: true
+  method: connectivity_agglomerative
+  max_levels: 300
+  min_nodes: 33
+
+# Linear plateau detection is disabled for this TANH-only dynamics run.
+plateau:
+  enabled: false
+  min_consecutive: 2
+  r_tolerance: 0
+  max_subspace_distance: 0.45
+  max_trajectory_error: 0.50
+  max_eigenvalue_error: 0.30
+  min_achieved_reduction: 0.03
+
+dynamics_comparison:
+  enabled: true
+  models: [tanh]
+  cubic_g: 1.0
+  nonlinear_max_step: 0.05
+  post_transient_fraction: 0.25
+  all_levels: false
+  node_targets: [100000, 97000, 94090, 91268, 88530, 85875, 83299, 80801, 78377, 76026, 73746, 71534, 69388, 67307, 65288, 63330, 61431, 59589, 57802, 56068, 54386, 52755, 51173, 49638, 48149, 46705, 45304, 43945, 42627, 41349, 40109, 38906, 37739, 36607, 35509, 34444, 33411, 32409, 31437, 30494, 29580, 28693, 27833, 26999, 26190, 25405, 24643, 23904, 23187, 22492, 21818, 21164, 20530, 19915, 19318, 18739, 18177, 17632, 17104, 16591, 16094, 15612, 15144, 14690, 14250, 13823, 13409, 13007, 12617, 12239, 11872, 11516, 11171, 10836, 10511, 10196, 9891, 9595, 9308, 9029, 8759, 8497, 8243, 7996, 7757, 7525, 7300, 7081, 6869, 6663, 6464, 6271, 6083, 5901, 5724, 5553, 5387, 5226, 5070, 4918, 4771, 4628, 4490, 4356, 4226, 4100, 3977, 3858, 3743, 3631, 3523, 3418, 3316, 3217, 3121, 3028, 2938, 2850, 2765, 2683, 2603, 2525, 2450, 2377, 2306, 2237, 2170, 2105, 2042, 1981, 1922, 1865, 1810, 1756, 1704, 1653, 1604, 1556, 1510, 1465, 1422, 1380, 1339, 1299, 1261, 1224, 1188, 1153, 1119, 1086, 1054, 1023, 993, 964, 936, 908, 881, 855, 830, 806, 782, 759, 737, 715, 694, 674, 654, 635, 616, 598, 581, 564, 548, 532, 517, 502, 487, 473, 459, 446, 433, 421, 409, 397, 386, 375, 364, 354, 344, 334, 324, 315, 306, 297, 289, 281, 273, 265, 258, 251, 244, 237, 230, 224, 218, 212, 206, 200, 194, 189, 184, 179, 174, 169, 164, 160, 156, 152, 148, 144, 140, 136, 132, 129, 126, 123, 120, 117, 114, 111, 108, 105, 102, 99, 97, 95, 93, 91, 89, 87, 85, 83, 81, 79, 77, 75, 73, 71, 69, 67, 65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34]
