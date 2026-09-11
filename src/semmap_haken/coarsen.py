@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import heapq
 from typing import Literal
 
 import numpy as np
@@ -123,15 +122,21 @@ def _connectivity_agglomerative(
     seed: int,
     distance_threshold: float | None,
 ) -> PartitionResult:
-    """Merge adjacent clusters by centroid distance until the requested reduction.
+    """Connectivity-constrained single-link agglomerative clustering.
 
-    Each node starts as its own cluster.  Candidate merges exist only between
-    clusters that share at least one graph edge.  Cluster coordinates are the
-    size-weighted mean of member Haken coordinates.  A priority queue selects
-    the smallest current centroid distance; stale entries are discarded using
-    per-cluster generation counters.  Because a previously merged cluster may
-    merge again in the same coarsening step, this method is not limited by the
-    disjoint-pair ceiling of ``connectivity_matching``.
+    Every node starts as its own cluster.  Only actual graph edges are eligible
+    links, and their weights are Euclidean distances in the current Haken
+    embedding.  Processing those links from shortest to longest with a
+    disjoint-set union is exactly single-link agglomeration restricted to graph
+    connectivity: two clusters merge when their closest admissible boundary
+    edge is encountered.  Unlike pairwise matching, a growing cluster may merge
+    repeatedly in the same coarsening level, so reductions up to 50% are not
+    capped by a disjoint-pair matching.
+
+    The implementation never forms an N-by-N distance matrix.  It computes one
+    distance per existing undirected edge, sorts those O(m) values once, and
+    then performs near-constant-time union/find operations.  Complexity is
+    O(m log m + m r) time and O(m + n + n r) memory for embedding dimension r.
     """
     node_count = adjacency.shape[0]
     requested = _requested_merges(node_count, target_reduction)
@@ -147,77 +152,44 @@ def _connectivity_agglomerative(
         )
 
     points = np.asarray(coordinates, dtype=np.float64)
-    parent = np.arange(node_count, dtype=np.int64)
-    active = np.ones(node_count, dtype=bool)
-    sizes = np.ones(node_count, dtype=np.int64)
-    centroids = points.copy()
-    generation = np.zeros(node_count, dtype=np.int64)
-
-    neighbours: list[set[int]] = []
-    for node in range(node_count):
-        row = adjacency.indices[adjacency.indptr[node] : adjacency.indptr[node + 1]]
-        neighbours.append({int(item) for item in row if int(item) != node})
-
     upper = sparse.triu(adjacency, k=1, format="coo")
-    heap: list[tuple[float, int, int, int, int]] = []
-    for raw_left, raw_right in zip(upper.row, upper.col, strict=True):
-        left, right = int(raw_left), int(raw_right)
-        distance = float(np.linalg.norm(centroids[left] - centroids[right]))
-        heap.append((distance, left, right, 0, 0))
-    heapq.heapify(heap)
+    left = upper.row.astype(np.int64, copy=False)
+    right = upper.col.astype(np.int64, copy=False)
+    if left.size == 0:
+        return _partition_from_clusters(
+            node_count,
+            [(node,) for node in range(node_count)],
+            [],
+            method="connectivity_agglomerative",
+            reduction=target_reduction,
+            seed=seed,
+            shortfall="insufficient_connected_cluster_merges",
+        )
 
+    deltas = points[left] - points[right]
+    distances = np.sqrt(np.einsum("ij,ij->i", deltas, deltas))
+    del deltas
+    order = np.lexsort((right, left, distances))
+
+    parent = np.arange(node_count, dtype=np.int64)
     merge_log: list[tuple[int, int, float]] = []
-    achieved = 0
     threshold_blocked = False
 
-    while achieved < requested and heap:
-        distance, left, right, left_gen, right_gen = heapq.heappop(heap)
-        if not active[left] or not active[right]:
-            continue
-        if int(generation[left]) != left_gen or int(generation[right]) != right_gen:
-            continue
-        if right not in neighbours[left]:
-            continue
+    for edge_index in order:
+        if len(merge_log) >= requested:
+            break
+        idx = int(edge_index)
+        distance = float(distances[idx])
         if distance_threshold is not None and distance > distance_threshold:
             threshold_blocked = True
             break
-
-        keep, drop = (left, right) if left < right else (right, left)
-        keep_size, drop_size = int(sizes[keep]), int(sizes[drop])
-        total_size = keep_size + drop_size
-        centroids[keep] = (keep_size * centroids[keep] + drop_size * centroids[drop]) / total_size
-        sizes[keep] = total_size
-        sizes[drop] = 0
+        raw_left, raw_right = int(left[idx]), int(right[idx])
+        root_left, root_right = _find(parent, raw_left), _find(parent, raw_right)
+        if root_left == root_right:
+            continue
+        keep, drop = (root_left, root_right) if root_left < root_right else (root_right, root_left)
         parent[drop] = keep
-
-        boundary = (neighbours[keep] | neighbours[drop]) - {keep, drop}
-        active_boundary = {node for node in boundary if active[node]}
-        for neighbour in active_boundary:
-            neighbours[neighbour].discard(keep)
-            neighbours[neighbour].discard(drop)
-            neighbours[neighbour].add(keep)
-        neighbours[keep] = active_boundary
-        neighbours[drop].clear()
-        active[drop] = False
-        generation[keep] += 1
-        generation[drop] += 1
-        achieved += 1
-        merge_log.append((keep, drop, float(distance)))
-
-        keep_generation = int(generation[keep])
-        for neighbour in active_boundary:
-            left_id, right_id = (keep, neighbour) if keep < neighbour else (neighbour, keep)
-            new_distance = float(np.linalg.norm(centroids[left_id] - centroids[right_id]))
-            heapq.heappush(
-                heap,
-                (
-                    new_distance,
-                    left_id,
-                    right_id,
-                    int(generation[left_id]),
-                    int(generation[right_id]),
-                ),
-            )
+        merge_log.append((raw_left, raw_right, distance))
 
     grouped: dict[int, list[int]] = {}
     for node in range(node_count):
@@ -226,7 +198,7 @@ def _connectivity_agglomerative(
     clusters = [tuple(members) for _, members in sorted(grouped.items())]
 
     shortfall: str | None = None
-    if achieved < requested:
+    if len(merge_log) < requested:
         shortfall = "distance_threshold_prevented_target" if threshold_blocked else "insufficient_connected_cluster_merges"
     return _partition_from_clusters(
         node_count,
@@ -260,14 +232,14 @@ def build_partition(adjacency: sparse.spmatrix, coordinates: np.ndarray, *, meth
     candidates = _connectivity_candidates(matrix, points) if method == "connectivity_matching" else _unconstrained_candidates(points)
     claimed: set[int] = set()
     pairs: list[tuple[int, int, float]] = []
-    for distance, left, right in candidates:
+    for distance, left_node, right_node in candidates:
         if len(pairs) == requested:
             break
         if distance_threshold is not None and distance > distance_threshold:
             break
-        if left not in claimed and right not in claimed:
-            claimed.update((left, right))
-            pairs.append((left, right, distance))
+        if left_node not in claimed and right_node not in claimed:
+            claimed.update((left_node, right_node))
+            pairs.append((left_node, right_node, distance))
     if len(pairs) < requested:
         reason = "insufficient_disjoint_adjacent_pairs" if method == "connectivity_matching" else "insufficient_disjoint_nearest_neighbor_pairs"
         if distance_threshold is not None:
