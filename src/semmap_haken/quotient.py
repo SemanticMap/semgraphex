@@ -65,7 +65,14 @@ def build_quotient(
     if membership.shape[0] != fine.shape[0]:
         raise ValueError("fine_to_coarse must have one entry per fine node")
     sizes = np.asarray(membership.sum(axis=0)).ravel().astype(int)
+    
     coarse = (membership.T @ fine @ membership).tocsr()
+
+    # For an undirected fine graph P^T A P is mathematically symmetric.
+    # Remove sparse floating-point accumulation asymmetry explicitly.
+    coarse = ((coarse + coarse.T) * 0.5).tocsr()
+    coarse.eliminate_zeros()
+    
     if aggregation == "mean_density":
         coarse = _scale_blocks(coarse, np.outer(sizes, sizes))
     masses = sizes / float(fine.shape[0])
