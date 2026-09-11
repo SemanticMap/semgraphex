@@ -43,13 +43,14 @@ class SyntheticOptions:
 
 @dataclass(frozen=True)
 class DynamicsComparisonOptions:
-    """Compare several dynamics laws on one already-built graph hierarchy."""
+    """Compare one or more dynamics laws on one already-built graph hierarchy."""
 
     enabled: bool = False
     models: tuple[DynamicsModel, ...] = ("linear", "cubic_haken", "tanh")
     cubic_g: float = 1.0
     nonlinear_max_step: float = 0.05
     post_transient_fraction: float = 0.25
+    all_levels: bool = False
     node_targets: tuple[int, ...] = (
         33000,
         30000,
@@ -141,11 +142,16 @@ def load_research_extensions(path: str | Path) -> ResearchExtensions:
     allowed_models = {"linear", "cubic_haken", "tanh"}
     if any(model not in allowed_models for model in models_raw) or len(set(models_raw)) != len(models_raw):
         raise ValueError("dynamics_comparison.models must be unique values from linear, cubic_haken, tanh")
+    all_levels = d.get("all_levels", False)
+    if not isinstance(all_levels, bool):
+        raise ValueError("dynamics_comparison.all_levels must be a boolean")
     targets_raw = d.get("node_targets", list(DynamicsComparisonOptions().node_targets))
-    if not isinstance(targets_raw, list) or not targets_raw or any(
+    if not isinstance(targets_raw, list) or any(
         isinstance(value, bool) or not isinstance(value, int) or value < 2 for value in targets_raw
     ):
-        raise ValueError("dynamics_comparison.node_targets must be a non-empty list of integers >= 2")
+        raise ValueError("dynamics_comparison.node_targets must be a list of integers >= 2")
+    if not all_levels and not targets_raw:
+        raise ValueError("dynamics_comparison.node_targets must be non-empty unless all_levels=true")
     cubic_g = float(d.get("cubic_g", 1.0))
     nonlinear_max_step = float(d.get("nonlinear_max_step", 0.05))
     post_fraction = float(d.get("post_transient_fraction", 0.25))
@@ -157,6 +163,7 @@ def load_research_extensions(path: str | Path) -> ResearchExtensions:
         cubic_g=cubic_g,
         nonlinear_max_step=nonlinear_max_step,
         post_transient_fraction=post_fraction,
+        all_levels=all_levels,
         node_targets=tuple(int(value) for value in targets_raw),
     )
     return ResearchExtensions(hierarchy, plateau, synthetic, dynamics_comparison)
