@@ -9,10 +9,13 @@ from typing import Literal
 import yaml
 
 
+HierarchyMethod = Literal["connectivity_matching", "unconstrained_matching", "connectivity_agglomerative"]
+
+
 @dataclass(frozen=True)
 class HierarchyOptions:
     enabled: bool = False
-    method: Literal["connectivity_matching", "unconstrained_matching"] = "connectivity_matching"
+    method: HierarchyMethod = "connectivity_matching"
     max_levels: int = 8
     min_nodes: int = 16
 
@@ -59,7 +62,7 @@ def load_research_extensions(path: str | Path) -> ResearchExtensions:
     p = _mapping(document, "plateau")
     s = _mapping(document, "synthetic")
     method = h.get("method", "connectivity_matching")
-    if method not in {"connectivity_matching", "unconstrained_matching"}:
+    if method not in {"connectivity_matching", "unconstrained_matching", "connectivity_agglomerative"}:
         raise ValueError("hierarchy.method is unsupported")
     hierarchy = HierarchyOptions(
         enabled=bool(h.get("enabled", False)),
