@@ -2,12 +2,6 @@ name: Haken M5 recover prepared 100k
 
 on:
   workflow_dispatch:
-  push:
-    branches: [haken]
-    paths:
-      - '.github/workflows/haken_m5_recover.yml'
-      - 'configs/haken_multiscale_conceptnet_100k_r035.yaml'
-      - 'configs/haken_multiscale_conceptnet_100k_r050.yaml'
 
 permissions:
   actions: read
