@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, replace
@@ -22,6 +23,11 @@ from .modes import analyze_normalized_adjacency
 from .multiscale_config import HierarchyOptions
 from .operators import normalized_adjacency
 from .quotient import build_quotient
+
+
+_PROGRESS_BAR_WIDTH = 24
+_PROGRESS_WINDOW = 5
+_REDUCTION_FLOAT_EPSILON = 1e-12
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,45 @@ def _compose_membership(
     return result
 
 
+def _estimate_planned_contractions(
+    node_count: int,
+    *,
+    min_nodes: int,
+    max_levels: int,
+    target_reduction: float,
+) -> int:
+    """Estimate contractions using the same floor quantization as coarsening."""
+    current = int(node_count)
+    planned = 0
+    while planned < max_levels and current > min_nodes and current >= 3:
+        requested = min(
+            current // 2,
+            int(np.floor(current * target_reduction + _REDUCTION_FLOAT_EPSILON)),
+        )
+        if requested <= 0:
+            break
+        current -= requested
+        planned += 1
+    return planned
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m {secs:02d}s"
+    return f"{secs:d}s"
+
+
+def _progress_bar(fraction: float, width: int = _PROGRESS_BAR_WIDTH) -> str:
+    fraction = min(1.0, max(0.0, float(fraction)))
+    filled = min(width, int(round(width * fraction)))
+    return "█" * filled + "░" * (width - filled)
+
+
 def run_hierarchy(
     adjacency: sparse.spmatrix,
     node_ids: Sequence[str],
@@ -114,6 +159,23 @@ def run_hierarchy(
     memberships: list[dict[int, tuple[str, ...]]] = []
     stop_reason = "max_levels"
     time_grid = np.linspace(config.dynamics.time_start, config.dynamics.time_stop, config.dynamics.time_steps)
+
+    planned_contractions = _estimate_planned_contractions(
+        current.shape[0],
+        min_nodes=options.min_nodes,
+        max_levels=options.max_levels,
+        target_reduction=config.coarsening.target_reduction,
+    )
+    progress_durations: list[float] = []
+    progress_checkpoint = started
+    print(
+        "[haken] planned "
+        f"{planned_contractions} contractions | "
+        f"N={current.shape[0]:,} -> <= {options.min_nodes:,} | "
+        f"target_reduction={config.coarsening.target_reduction:.4f}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     for level in range(options.max_levels + 1):
         if current.shape[0] < 3:
@@ -210,6 +272,28 @@ def run_hierarchy(
         current_members = _compose_membership(current_members, quotient.parent_child)
         current = quotient.adjacency.tocsr()
         current_ids = tuple(f"level{level + 1}/c{index}" for index in range(current.shape[0]))
+
+        now = time.perf_counter()
+        progress_durations.append(now - progress_checkpoint)
+        progress_checkpoint = now
+        completed = level + 1
+        denominator = max(1, planned_contractions)
+        fraction = min(1.0, completed / denominator)
+        recent_mean = float(np.mean(progress_durations[-_PROGRESS_WINDOW:]))
+        remaining = max(0, planned_contractions - completed)
+        eta_seconds = recent_mean * remaining
+        elapsed_seconds = now - started
+        print(
+            f"[haken] [{_progress_bar(fraction)}] "
+            f"{fraction * 100:6.2f}% | "
+            f"level {completed}/{planned_contractions} | "
+            f"N={current.shape[0]:,} | "
+            f"step={_format_duration(progress_durations[-1])} | "
+            f"elapsed={_format_duration(elapsed_seconds)} | "
+            f"ETA={_format_duration(eta_seconds)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     by_level = {item.level: item.selected_r for item in levels}
     transitions = [replace(item, target_r=by_level.get(item.target_level)) for item in transitions]
