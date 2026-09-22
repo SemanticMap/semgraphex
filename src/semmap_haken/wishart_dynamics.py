@@ -173,11 +173,16 @@ def compute_dynamic_snapshot(
     matrix = _undirected_nonnegative(adjacency)
     n = matrix.shape[0]
     rng = np.random.default_rng(seed)
-    degrees = np.asarray(matrix.sum(axis=1)).ravel()
-    total = degrees.sum()
-    stationary = degrees / total if total > 0 else np.zeros(n, dtype=np.float64)
-    mean_degree = float(np.mean(degrees)) if n else 0.0
-    second = float(np.mean(degrees ** 2)) if n else 0.0
+    strengths = np.asarray(matrix.sum(axis=1)).ravel()
+    topological_degree = np.asarray((matrix != 0).sum(axis=1)).ravel().astype(np.float64)
+    total_strength = strengths.sum()
+    stationary = (
+        strengths / total_strength
+        if total_strength > 0
+        else np.zeros(n, dtype=np.float64)
+    )
+    mean_degree = float(np.mean(topological_degree)) if n else 0.0
+    second = float(np.mean(topological_degree ** 2)) if n else 0.0
 
     spreading = None if second <= 0 else mean_degree / second
     denominator = second - mean_degree
