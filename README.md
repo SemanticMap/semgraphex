@@ -138,3 +138,18 @@ python -m pytest tests
 ```
 
 The historical prototype remains available only for compatibility and is not evidence for the Haken/ConceptNet research program.
+
+
+## Recursive Wishart compression figures
+
+An experimental recursive framework for discovering unknown compression figures
+with Wishart mode analysis is documented in
+[`docs/wishart_recursive_coarsening.md`](docs/wishart_recursive_coarsening.md).
+
+Start with:
+
+```bash
+python scripts/run_wishart_coarsening.py --config configs/wishart_conceptnet_small.yaml
+```
+
+Use the optional `wishart` dependency extra for low-rank GW and FGW metrics.
