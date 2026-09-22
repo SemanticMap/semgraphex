@@ -280,6 +280,29 @@ def relation_js_neighbors(candidates: Sequence[EgoCandidate], *, k: int) -> Neig
     return _knn_from_distance_matrix(distances, k, {"backend": "pairwise", "metric": "sqrt_js", "relations": relations})
 
 
+def _spectral_sample_coordinates(candidate: EgoCandidate, dimension: int) -> np.ndarray:
+    """Permutation-invariant structural coordinates used by low-rank GW.
+
+    The coordinates come from the leading nontrivial eigenvectors of the
+    symmetrized normalized adjacency. They are not ConceptNet text embeddings.
+    """
+    adjacency = ((candidate.adjacency + candidate.adjacency.T) * 0.5).toarray()
+    n = adjacency.shape[0]
+    if n == 1:
+        return np.zeros((1, 1), dtype=np.float64)
+    degrees = adjacency.sum(axis=1)
+    inv = np.zeros_like(degrees, dtype=np.float64)
+    mask = degrees > 0
+    inv[mask] = 1.0 / np.sqrt(degrees[mask])
+    normalized = inv[:, None] * adjacency * inv[None, :]
+    values, vectors = np.linalg.eigh(normalized)
+    order = np.argsort(values)[::-1]
+    take = order[1 : 1 + min(dimension, max(1, n - 1))]
+    if len(take) == 0:
+        return np.zeros((n, 1), dtype=np.float64)
+    return vectors[:, take] * np.sqrt(np.maximum(np.abs(values[take]), 1e-12))[None, :]
+
+
 def _transport_support(candidate: EgoCandidate, rank: int) -> tuple[np.ndarray, np.ndarray]:
     """Deterministic degree-landmark support and shortest-path structure cost."""
     adjacency = candidate.adjacency.tocsr()
@@ -323,9 +346,9 @@ def transport_neighbors(
 ) -> NeighborGraph:
     """Landmark-reduced GW or FGW via POT.
 
-    This deliberately computes GW on at most `rank` deterministic landmarks per
-    ego graph.  It is a practical low-rank/subsampled GW approximation, not an
-    exact linear-GW implementation.
+    `lowrank_gw` uses POT's low-rank GW solver (Scetbon--Peyre--Cuturi)
+    on structural spectral coordinates. `fgw` uses deterministic degree
+    landmarks to keep the exact FGW pair solver bounded.
     """
     if len(candidates) > max_candidates:
         raise ValueError(
@@ -339,42 +362,61 @@ def transport_neighbors(
             "GW/FGW metrics require POT. Install with: pip install -e '.[wishart]'"
         ) from error
 
-    supports = [_transport_support(candidate, rank) for candidate in candidates]
     relations = tuple(sorted({r for c in candidates for r in c.relation_layers}))
-    node_features = [
-        _node_relation_features(candidate, keep, relations)
-        for candidate, (keep, _) in zip(candidates, supports, strict=True)
-    ]
     n = len(candidates)
     matrix = np.zeros((n, n), dtype=np.float64)
-    for i in range(n):
-        keep_i, c_i = supports[i]
-        p = np.full(len(keep_i), 1.0 / len(keep_i))
-        for j in range(i + 1, n):
-            keep_j, c_j = supports[j]
-            q = np.full(len(keep_j), 1.0 / len(keep_j))
-            if metric == "lowrank_gw":
-                value = ot.gromov.gromov_wasserstein2(
-                    c_i, c_j, p, q, loss_fun="square_loss", log=False
+
+    if metric == "lowrank_gw":
+        coordinates = [
+            _spectral_sample_coordinates(candidate, min(8, rank))
+            for candidate in candidates
+        ]
+        for i in range(n):
+            for j in range(i + 1, n):
+                plan_rank = min(rank, len(coordinates[i]), len(coordinates[j]))
+                _, _, _, log = ot.gromov.lowrank_gromov_wasserstein_samples(
+                    coordinates[i],
+                    coordinates[j],
+                    rank=max(1, plan_rank),
+                    reg=0.0,
+                    seed_init=49,
+                    log=True,
                 )
-            else:
+                value = float(log.get("value", 0.0))
+                matrix[i, j] = matrix[j, i] = math.sqrt(max(0.0, value))
+        metadata = {
+            "backend": "POT",
+            "metric": metric,
+            "lowrank_solver": "ot.gromov.lowrank_gromov_wasserstein_samples",
+            "plan_rank": rank,
+            "structural_coordinates": "normalized-adjacency spectral embedding",
+        }
+    else:
+        supports = [_transport_support(candidate, rank) for candidate in candidates]
+        node_features = [
+            _node_relation_features(candidate, keep, relations)
+            for candidate, (keep, _) in zip(candidates, supports, strict=True)
+        ]
+        for i in range(n):
+            keep_i, c_i = supports[i]
+            p = np.full(len(keep_i), 1.0 / len(keep_i))
+            for j in range(i + 1, n):
+                keep_j, c_j = supports[j]
+                q = np.full(len(keep_j), 1.0 / len(keep_j))
                 feature_cost = cdist(node_features[i], node_features[j], metric="sqeuclidean")
                 value = ot.gromov.fused_gromov_wasserstein2(
                     feature_cost, c_i, c_j, p, q,
                     loss_fun="square_loss", alpha=fgw_alpha, log=False,
                 )
-            matrix[i, j] = matrix[j, i] = math.sqrt(max(0.0, float(value)))
-    return _knn_from_distance_matrix(
-        matrix,
-        k,
-        {
+                matrix[i, j] = matrix[j, i] = math.sqrt(max(0.0, float(value)))
+        metadata = {
             "backend": "POT",
             "metric": metric,
             "landmark_rank": rank,
             "relations": relations,
-            "fgw_alpha": fgw_alpha if metric == "fgw" else None,
-        },
-    )
+            "fgw_alpha": fgw_alpha,
+        }
+    return _knn_from_distance_matrix(matrix, k, metadata)
 
 
 def build_neighbor_graph(
