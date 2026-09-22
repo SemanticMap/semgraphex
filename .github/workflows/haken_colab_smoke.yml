@@ -1,0 +1,47 @@
+name: Haken Colab-equivalent smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  synthetic-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and test tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c requirements/constraints.txt -e '.[dev]'
+      - name: Run complete Haken regression suite
+        run: |
+          pytest -q tests/test_semmap_haken_*.py
+      - name: Run original M4 synthetic smoke
+        run: |
+          python -m semmap_haken.research_cli synthetic --config configs/synthetic_plateau_smoke.yaml | tee synthetic_stdout.json
+      - name: Run M4.1 sensitivity/specificity sweep
+        run: |
+          python -m semmap_haken.m41_cli sweep --config configs/m41_synthetic_sweep.yaml --output tmp/runs/m41-sweep | tee m41_stdout.json
+      - name: Diagnose M4.1 failures without retuning
+        run: |
+          python -m semmap_haken.m41_diagnose tmp/runs/m41-sweep/m41_sweep.json tmp/runs/m41-sweep/m41_diagnostics.json | tee m41_diagnostic_stdout.json
+      - name: Show M4.1 reports
+        if: always()
+        run: |
+          cat tmp/runs/m41-sweep/m41_report.md 2>/dev/null || true
+          cat tmp/runs/m41-sweep/m41_diagnostics.md 2>/dev/null || true
+          cat m41_stdout.json 2>/dev/null || true
+      - name: Upload synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haken-m41-evidence
+          path: |
+            tmp/runs/
+            synthetic_stdout.json
+            m41_stdout.json
+            m41_diagnostic_stdout.json
+          if-no-files-found: warn

@@ -1,0 +1,78 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+dataset:
+  source: conceptnet-5.7
+  version: "5.7.0"
+  source_url: https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
+  path: ../data/conceptnet_en_100k.tsv
+  max_rows: null
+  language: en
+  relations: [RelatedTo, IsA, PartOf, HasA, UsedFor, HasProperty]
+  min_weight: 1.0
+  max_nodes: 100000
+  component: all
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: log1p
+  operator: normalized_adjacency
+runtime:
+  profile: conceptnet_100k
+  random_seed: 1729
+  resource_profile: resource_profiles/conceptnet_100k.yaml
+execution:
+  backend: cpu
+  device: 0
+  dtype: float64
+  workers: 1
+  reserved_cpu_cores: 1
+  threads_per_worker: 1
+  batch_size: auto
+  deterministic: true
+  allow_auto_fallback: true
+dynamics:
+  model: linear
+  alpha: 1.0
+  beta: auto_critical
+  auto_critical_margin: 0.05
+  time_start: 0.0
+  time_stop: 8.0
+  time_steps: 41
+  perturbations_per_kind: 1
+  perturbation_amplitude: 1.0
+  perturbation_seed: 1729
+  random_sparse_fraction: 0.001
+  storage_policy: all
+  max_storage_mb: 512
+spectral:
+  prepared_graph_dir: null
+  top_k: 48
+  max_r: 24
+  tolerance: 1.0e-8
+  maxiter: null
+  symmetry_tolerance: 1.0e-10
+coarsening:
+  enabled: true
+  methods: [connectivity_matching, unconstrained_matching]
+  target_reduction: 0.35
+  embedding_weighting: none
+  seed: 1729
+  tie_breaking: distance_then_node_index
+  aggregation: sum
+  distance_threshold: null
+hierarchy:
+  enabled: true
+  method: connectivity_agglomerative
+  max_levels: 8
+  min_nodes: 128
+plateau:
+  enabled: true
+  min_consecutive: 2
+  r_tolerance: 0
+  max_subspace_distance: 0.45
+  max_trajectory_error: 0.50
+  max_eigenvalue_error: 0.30
+  min_achieved_reduction: 0.10

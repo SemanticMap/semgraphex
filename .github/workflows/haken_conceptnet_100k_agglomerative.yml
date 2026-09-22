@@ -1,0 +1,151 @@
+name: Haken ConceptNet 100k agglomerative experiment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  conceptnet-100k-agglomerative:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned research environment
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c requirements/constraints.txt -e '.[dev]'
+          python --version
+          pip freeze | sort > m52_pip_freeze.txt
+
+      - name: Run complete Haken regression suite
+        run: pytest -q tests/test_semmap_haken_*.py
+
+      - name: Record machine resources
+        run: |
+          mkdir -p tmp/m52_evidence data/cache
+          uname -a | tee tmp/m52_evidence/machine.txt
+          nproc | tee -a tmp/m52_evidence/machine.txt
+          free -h | tee -a tmp/m52_evidence/machine.txt
+          df -h . | tee -a tmp/m52_evidence/machine.txt
+          git rev-parse HEAD | tee tmp/m52_evidence/commit_sha.txt
+
+      - name: Download official ConceptNet 5.7 dump
+        run: |
+          set -o pipefail
+          curl -L --fail --retry 4 --retry-delay 5 \
+            --output data/cache/conceptnet-assertions-5.7.0.csv.gz \
+            https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
+          sha256sum data/cache/conceptnet-assertions-5.7.0.csv.gz | tee tmp/m52_evidence/conceptnet_dump_sha256.txt
+
+      - name: Extract deterministic connected real English 100k-node subgraph
+        run: |
+          set -o pipefail
+          /usr/bin/time -v python scripts/extract_conceptnet_100k.py \
+            --input data/cache/conceptnet-assertions-5.7.0.csv.gz \
+            --output data/conceptnet_en_100k.tsv \
+            --metadata tmp/m52_evidence/extraction.json \
+            --target-nodes 100000 \
+            --candidate-multiplier 3.0 \
+            --min-weight 1.0 \
+            --relations RelatedTo IsA PartOf HasA UsedFor HasProperty \
+            2> tmp/m52_evidence/extraction_time.txt | tee tmp/m52_evidence/extraction_stdout.json
+          sha256sum data/conceptnet_en_100k.tsv | tee tmp/m52_evidence/conceptnet_en_100k_sha256.txt
+
+      - name: Prepare sparse 100k graph
+        run: |
+          set -o pipefail
+          PREPARED_DIR=$(semmap-haken prepare --config configs/conceptnet_en_100k.yaml)
+          echo "$PREPARED_DIR" | tee tmp/m52_evidence/prepared_dir.txt
+          echo "PREPARED_DIR=$PREPARED_DIR" >> "$GITHUB_ENV"
+          cp "$PREPARED_DIR/graph_metadata.json" tmp/m52_evidence/prepared_graph_metadata.json
+          cp "$PREPARED_DIR/manifest.json" tmp/m52_evidence/prepare_manifest.json
+          python - <<'PY'
+          import json, pathlib
+          m=json.loads(pathlib.Path('tmp/m52_evidence/prepared_graph_metadata.json').read_text())
+          r=m['data_report']
+          print(json.dumps(r, indent=2, sort_keys=True))
+          assert r['node_count'] == 100000, r
+          PY
+
+      - name: Run agglomerative Haken hierarchy at 35 percent per level
+        run: |
+          set -o pipefail
+          /usr/bin/time -v python -m semmap_haken.research_cli multiscale \
+            --config configs/haken_multiscale_conceptnet_100k_agglomerative_r035.yaml \
+            --prepared-graph "$PREPARED_DIR" \
+            2> tmp/m52_evidence/r035_time.txt | tee tmp/m52_evidence/r035_stdout.json
+
+      - name: Run agglomerative Haken hierarchy at 50 percent per level
+        run: |
+          set -o pipefail
+          /usr/bin/time -v python -m semmap_haken.research_cli multiscale \
+            --config configs/haken_multiscale_conceptnet_100k_agglomerative_r050.yaml \
+            --prepared-graph "$PREPARED_DIR" \
+            2> tmp/m52_evidence/r050_time.txt | tee tmp/m52_evidence/r050_stdout.json
+
+      - name: Collect compact M5.2 evidence
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, pathlib, shutil
+          root=pathlib.Path('tmp/m52_evidence')
+          rows={}
+          for tag in ('r035','r050'):
+              stdout=root/f'{tag}_stdout.json'
+              if not stdout.exists() or not stdout.read_text().strip():
+                  rows[tag]={'status':'missing'}
+                  continue
+              payload=json.loads(stdout.read_text().splitlines()[-1])
+              run_dir=pathlib.Path(payload['run_dir'])
+              hierarchy=run_dir/'hierarchy'/'hierarchy.json'
+              plateau=run_dir/'plateau.json'
+              manifest=run_dir/'manifest.json'
+              for src,name in ((hierarchy,f'{tag}_hierarchy.json'),(plateau,f'{tag}_plateau.json'),(manifest,f'{tag}_manifest.json')):
+                  if src.exists(): shutil.copy2(src,root/name)
+              rows[tag]={'run':payload}
+              if hierarchy.exists():
+                  h=json.loads(hierarchy.read_text())
+                  rows[tag]['levels']=h['levels']
+                  rows[tag]['transitions']=h['transitions']
+                  rows[tag]['elapsed_seconds']=h['elapsed_seconds']
+              if plateau.exists(): rows[tag]['plateau']=json.loads(plateau.read_text())
+          summary={
+              'extraction': json.loads((root/'extraction.json').read_text()) if (root/'extraction.json').exists() else None,
+              'prepared': json.loads((root/'prepared_graph_metadata.json').read_text())['data_report'] if (root/'prepared_graph_metadata.json').exists() else None,
+              'runs': rows,
+          }
+          (root/'m52_summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          md=['# M5.2 ConceptNet 100k agglomerative summary','']
+          if summary['prepared']:
+              r=summary['prepared']; md += [f"Prepared nodes: **{r['node_count']}**",f"Prepared edges: **{r['edge_count']}**",'']
+          for tag in ('r035','r050'):
+              item=rows.get(tag,{})
+              md += [f'## {tag}']
+              if 'levels' not in item:
+                  md += ['Run did not complete.','']; continue
+              md += [f"Elapsed seconds: {item['elapsed_seconds']:.3f}",f"Levels: {len(item['levels'])}",f"Transitions: {len(item['transitions'])}"]
+              md += ['','| level | nodes | r | nnz | reconstruction error |','|---:|---:|---:|---:|---:|']
+              for x in item['levels']:
+                  md.append(f"| {x['level']} | {x['node_count']} | {x['selected_r']} | {x['adjacency_nnz']} | {x['mean_rank_r_reconstruction_error']:.6f} |")
+              md += ['','| transition | reduction | subspace distance | eigenvalue error | trajectory error | shortfall |','|---|---:|---:|---:|---:|---|']
+              for x in item['transitions']:
+                  md.append(f"| {x['source_level']}->{x['target_level']} | {x['achieved_reduction']:.6f} | {x['subspace_projection_distance'] if x['subspace_projection_distance'] is not None else 'NA'} | {x['slow_eigenvalue_max_abs_error'] if x['slow_eigenvalue_max_abs_error'] is not None else 'NA'} | {x['mean_trajectory_relative_error'] if x['mean_trajectory_relative_error'] is not None else 'NA'} | {x['shortfall_reason'] or ''} |")
+              candidates=(item.get('plateau') or {}).get('candidates',[])
+              md += ['',f"Plateau candidates: **{len(candidates)}**",'']
+          (root/'m52_summary.md').write_text('\n'.join(md)+'\n')
+          print((root/'m52_summary.md').read_text())
+          PY
+
+      - name: Upload M5.2 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haken-conceptnet-100k-m52-agglomerative-evidence
+          path: |
+            tmp/m52_evidence/
+            m52_pip_freeze.txt
+          if-no-files-found: warn

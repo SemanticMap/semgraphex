@@ -1,33 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "semgraphex"
+name = "semmap-haken"
 version = "0.1.0"
-authors = [ { name = "SemanticMap" } ]
-description = "Graphon-based semantic concept extraction and search"
-requires-python = ">=3.9"
+description = "Sparse, reproducible Haken-coarsening research foundation for ConceptNet"
 readme = "README.md"
+requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["graphon","graph","NLP","semantic search","concept extraction"]
+authors = [{ name = "SemanticMap" }]
+keywords = ["ConceptNet", "graphs", "spectral dynamics", "research"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "License :: OSI Approved :: MIT License",
     "Intended Audience :: Science/Research",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+    "numpy>=1.24,<2.0",
+    "scipy>=1.10,<1.14",
+    "scikit-learn>=1.3",
+    "PyYAML>=6.0",
+    "networkx>=3.1",
 ]
 
+[project.optional-dependencies]
+cuda = ["cupy-cuda12x>=13,<15"]
+legacy = [
+    "spacy>=3.7",
+    "nltk>=3.8",
+    "gensim>=4.3",
+    "faiss-cpu>=1.7.4",
+    "annoy>=1.17.3",
+    "joblib>=1.3",
+]
+dev = ["pytest>=7.4"]
+notebook = [
+    "nbformat>=5.9",
+    "nbclient>=0.8",
+    "ipykernel>=6.29",
+    "matplotlib>=3.7,<3.9",
+]
 
-dependencies = [
+[project.scripts]
+semmap-haken = "semmap_haken.cli:main"
 
-"spacy >=3.7.0",
-"nltk >=3.8.0",
-"gensim >=4.3.0",
-"scikit-learn >=1.3.0",
-"networkx >=3.1",
-"numpy >=2.3.2",
-"scipy >=1.11.0",
-"faiss-cpu >=1.7.4", # if installation fails on some systems, user can switch to annoy
-"annoy >=1.17.3",
-"joblib >=1.3.0"]
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["semmap_haken*", "semgraphex*"]
 
-[build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.pytest.ini_options]
+testpaths = ["tests"]

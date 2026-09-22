@@ -1,0 +1,101 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+dataset:
+  source: synthetic-controls
+  language: ""
+  relations: []
+  min_weight: 0.0
+  max_nodes: 256
+  component: all
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: raw
+  operator: normalized_adjacency
+runtime:
+  profile: smoke
+  random_seed: 1729
+execution:
+  backend: cpu
+  device: 0
+  dtype: float64
+  workers: 1
+  reserved_cpu_cores: 1
+  threads_per_worker: 1
+  batch_size: auto
+  deterministic: true
+  allow_auto_fallback: true
+dynamics:
+  model: linear
+  alpha: 1.0
+  beta: auto_critical
+  auto_critical_margin: 0.05
+  time_start: 0.0
+  time_stop: 5.0
+  time_steps: 31
+  perturbations_per_kind: 1
+  perturbation_amplitude: 1.0
+  perturbation_seed: 1729
+  random_sparse_fraction: 0.10
+  storage_policy: all
+  max_storage_mb: 64
+spectral:
+  prepared_graph_dir: null
+  top_k: 16
+  max_r: 8
+  tolerance: 1.0e-10
+  maxiter: null
+  symmetry_tolerance: 1.0e-10
+coarsening:
+  enabled: true
+  methods: [connectivity_matching, unconstrained_matching]
+  target_reduction: 0.5
+  embedding_weighting: none
+  seed: 1729
+  tie_breaking: distance_then_node_index
+  aggregation: sum
+  distance_threshold: null
+hierarchy:
+  enabled: true
+  method: connectivity_matching
+  max_levels: 4
+  min_nodes: 8
+plateau:
+  enabled: true
+  min_consecutive: 2
+  r_tolerance: 0
+  max_subspace_distance: 0.45
+  max_trajectory_error: 0.60
+  max_eigenvalue_error: 0.30
+  min_achieved_reduction: 0.10
+synthetic:
+  macro_blocks: 4
+  nodes_per_block: 16
+  internal_weight: 1.0
+  bridge_weight: 0.05
+  seed: 1729
+m41:
+  # Transient = short initial response after perturbation. 0.5 means that the
+  # post-transient metric uses the second half of simulated time.
+  post_transient_start_fraction: 0.5
+  # Positive controls: smaller bridge weight means stronger separation between
+  # internally coherent macro-blocks.
+  bridge_weights: [0.02, 0.05, 0.10]
+  target_reductions: [0.35, 0.50]
+  seeds: [1729, 1730]
+  trajectory_metrics: [full, slow, post_transient]
+  r_tolerances: [0, 1]
+  subspace_thresholds: [0.20, 0.45, 0.80]
+  trajectory_thresholds: [0.25, 0.50, 0.80, 1.20]
+  eigenvalue_thresholds: [0.15, 0.30, 0.60]
+  min_consecutive: 2
+  min_achieved_reduction: 0.10
+  # Sensitivity = positive-control detection rate. Specificity = negative-control
+  # rejection rate. Multiple successful settings are required to avoid treating
+  # one hand-tuned threshold as evidence.
+  robust_sensitivity: 0.75
+  robust_specificity: 0.75
+  robust_setting_count: 3

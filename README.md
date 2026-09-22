@@ -1,53 +1,140 @@
-# semgraphex
+# semmap-haken
 
-Prototype implementation of a pipeline to extract concepts from a text corpus, build local co-occurrence graphs, approximate them with simple non-parametric graphon estimators, derive vector descriptors, and index them for similarity search.
+`semmap-haken` is the active, sparse-first research foundation for testing the Haken-coarsening ConceptNet hypotheses. The approved design is in [`docs/haken_coarsening_roadmap.md`](docs/haken_coarsening_roadmap.md). It is **notebook-first, library-backed, and CLI-reproducible**: notebooks will call package APIs, while the CLI is the replayable interface for every reportable run.
 
-This is a research prototype: algorithms are intentionally simple & modular so they can be swapped for more advanced variants.
+## Installation
 
-## Pipeline Overview
+Install the active core package with:
 
-1. Preprocess corpus (tokenize, lemmatize, sentence-split, stopword removal)
-2. Extract candidate concepts (NER + statistical keyness + optional embedding clustering)
-3. For each concept: gather context windows and build weighted co-occurrence graph
-4. Estimate a graphon W (piecewise-constant block model smoothing) plus optional S(x) (degree-based signal)
-5. Derive descriptor vector (spectral + density + degree stats + sampled W blocks)
-6. Index descriptors in FAISS (fallback to Annoy) for approximate similarity search
-7. Query: run same pipeline for query text and retrieve nearest concepts.
-
-## Graphex (Global Concept Network)
-
-After fitting concept-level graphons you can aggregate them into a global concept network (graphex):
-
-1. Take all concept descriptor vectors produced during `fit`.
-2. Compute pairwise cosine similarities, threshold to form inter-concept edges.
-3. Embed concepts into a low-dimensional latent space with PCA (scaled to [0,1]^2).
-4. Estimate a discretized W(x,y) over the latent square by binning/smoothing edge weights.
-5. Compute S(x) as normalized weighted degree (hubness) of each concept.
-6. Collect prominent edges I (those above similarity threshold).
-
-Code:
-
-```python
-from semgraphex import ConceptGraphonIndexer
-indexer = ConceptGraphonIndexer().fit(corpus)
-grx = indexer.build_graphex(similarity_threshold=0.55)
-print(grx.top_hubs())
+```bash
+python -m pip install -e .
 ```
 
-`GraphexRepresentation` provides:
+For notebook validation and optional headless notebook execution, install the isolated extra rather than adding Jupyter packages to the research core:
 
-- `concepts`: list of concept labels
-- `coords`: latent coordinates (n,2) in [0,1]
-- `W_grid`: discretized kernel-smoothed estimate of W
-- `S`: hubness signal per concept
-- `I`: list of (concept_i, concept_j, weight) edges above threshold
+```bash
+python -m pip install -e '.[notebook]'
+```
 
-This forms a simple semantic map for downstream visualization or clustering.
+The legacy [`semgraphex/`](semgraphex/) package remains importable during migration. Its corpus-search dependencies are deliberately isolated in the `legacy` optional group:
 
-## Quick Start
+```bash
+python -m pip install -e '.[legacy]'
+```
 
-(After installing dependencies) see `examples/demo_basic.py` once created.
+## Data preparation (M0)
 
-## Disclaimer
+- [`src/semmap_haken/config.py`](src/semmap_haken/config.py) loads and validates a YAML file once, then exposes a resolved, serializable configuration shared by notebook and CLI callers.
+- [`src/semmap_haken/data_manager.py`](src/semmap_haken/data_manager.py) acquires a versioned dump from a verified cache, explicit manual path, or HTTP URL. HTTP downloads stream through `*.part`, verify size/SHA-256, then atomically rename. Interrupted downloads restart rather than trust partial content; the core has no Colab import.
+- [`src/semmap_haken/conceptnet.py`](src/semmap_haken/conceptnet.py) streams plain or gzip five-field assertion TSV, preserves full URIs/direction/provenance, and reports filtering and invalid-record counters. ConceptNet `weight` is a heuristic confidence/informativeness weight, never a probability.
+- [`src/semmap_haken/graph_build.py`](src/semmap_haken/graph_build.py) constructs a SciPy CSR adjacency without dense NxN allocation and persists a round-trippable prepared artifact.
 
-Graphon estimation here is a simplified approximation (histogram/block model smoothing). For rigorous estimation consider methods like Universal Singular Value Thresholding (USVT), neighborhood smoothing, or stochastic block model fitting.
+Prepared artifacts are published atomically only after artifact checksums and a `COMPLETED` marker are written. Each run persists its configured local input path, declared source/version/URL, input format, row limit, selected-edge provenance in `selected_edges.jsonl`, and replay metadata. The default `graph.self_loop_policy` is `exclude`. Input download, decompression, and source-file checksum verification are deliberately outside `prepare`.
+
+Use the tested (not hash-locked) constraints in [`requirements/constraints.txt`](requirements/constraints.txt): `python -m pip install -c requirements/constraints.txt -e '.[dev,notebook]'`, then run `python -m pytest -q` in a clean environment.
+- [`src/semmap_haken/manifest.py`](src/semmap_haken/manifest.py) persists resolved config, provenance, checksums, stage states, and notebook/Colab metadata—including resource and Drive-cache fields.
+
+Starter inputs are [`configs/conceptnet_en_smoke.yaml`](configs/conceptnet_en_smoke.yaml), [`configs/conceptnet_en_small.yaml`](configs/conceptnet_en_small.yaml), and the profiles under [`configs/resource_profiles/`](configs/resource_profiles/).
+
+To build the deterministic 100k-node subset directly from the already-decompressed
+official dump in `data/cache`, use the explicit plain-text input switch:
+
+```bash
+python scripts/extract_conceptnet_100k.py \
+  --decompressed-input data/cache/conceptnet-assertions-5.7.0.csv \
+  --output data/conceptnet_en_100k.tsv \
+  --metadata data/conceptnet_en_100k.metadata.json \
+  --workers 8 \
+  --batch-size 10000
+```
+
+Use `--input <path>.gz` instead for the gzip-compressed dump. The two input switches
+are mutually exclusive. Both modes stream the source three times without loading the
+complete dump into memory; `--decompressed-input` avoids repeated gzip decoding.
+`--workers` enables order-preserving process-based parsing for every pass, while the
+main process performs deterministic graph reduction and output. `--workers 1` is the
+serial fallback and default. `--batch-size` controls lines per parser task; larger
+values reduce inter-process overhead but raise peak memory. The executor keeps at most
+twice the worker count in flight, and the metadata records both settings and the chosen
+parallel strategy.
+
+## A1 sparse spectral diagnostics
+
+[`src/semmap_haken/operators.py`](src/semmap_haken/operators.py) provides sparse undirected normalized adjacency \(S=D^{-1/2}AD^{-1/2}\), preserving zero-degree nodes as zero rows and never materializing an NxN dense array. [`src/semmap_haken/modes.py`](src/semmap_haken/modes.py) uses iterative `eigsh` to emit *slow-mode candidates*—not established order parameters—with residuals, growth/decay rates for \(J=-\alpha I+\beta S\), stable-mode relaxation times, IPR/participation and localization diagnostics, degree correlations, eigengaps, timescale gaps, and a compact JSON/NPZ artifact.
+
+For `beta: auto_critical`, A1 requires a connected, nonnegative undirected normalized-adjacency graph without isolates. It excludes the unique Perron/stationary \(\lambda=1\) mode from candidate selection, requests \(\beta=(\alpha-m)/\lambda_*\) for the leading eligible positive nontrivial \(\lambda_*\), then clips to \(\beta\le\alpha-m\) so the full Jacobian remains stable. The artifact persists requested/selected beta, target eigenvalue, margin, spectral abscissa, and the clipping caveat. The `r` diagnostic compares maximum eigengap and timescale-gap proposals; agreement is used, otherwise eigengap is the deterministic fallback.
+
+## M1 linear dynamics workflow
+
+[`src/semmap_haken/dynamics.py`](src/semmap_haken/dynamics.py) evolves \(\dot{x}=(-\alpha I+\beta S)x\) with sparse [`expm_multiply()`](src/semmap_haken/dynamics.py:160), never a dense matrix exponential. It produces seeded single-node, Gaussian, random-sparse, and hub-targeted perturbations. For each trajectory it projects onto the selected nontrivial A1 eigenvectors and records relative RMSE \(\|x-\hat{x}\|_F/\|x\|_F\) and max-amplitude NRMSE. These outputs are **slow-mode candidate diagnostics, not proof of order parameters**.
+
+Prepare a graph, set `spectral.prepared_graph_dir` in [`configs/haken_linear_smoke.yaml`](configs/haken_linear_smoke.yaml) or [`configs/haken_linear_small.yaml`](configs/haken_linear_small.yaml), then run:
+
+```bash
+python -m semmap_haken prepare --config configs/conceptnet_en_smoke.yaml
+python -m semmap_haken run --config configs/haken_linear_smoke.yaml
+```
+
+The `run` directory contains atomic spectral and dynamics NPZ/JSON/CSV artifacts, checksums and manifest references, plus spectrum, relaxation-time, eigengap, and reconstruction PNG plots through the optional `notebook` extra. The storage policy is configurable: `all` writes trajectories (smoke), while `summaries` writes initial states, modal amplitudes, and metrics only (small profile). Local-neighborhood and relation-group perturbations remain deferred because the prepared artifact has no inexpensive semantic-group index.
+
+## M2 one-step Haken coarsening
+
+[`src/semmap_haken/haken_embedding.py`](src/semmap_haken/haken_embedding.py) builds the topology-only coordinate matrix \(Z=\Phi[:,1:1+r]\), excluding the Perron mode and consuming only M1 numerical spectral arrays. [`src/semmap_haken/coarsen.py`](src/semmap_haken/coarsen.py) then runs the first-evidence pair sequentially at one matched requested reduction: deterministic adjacency-constrained greedy matching and bounded-nearest-neighbour unconstrained matching. Both order candidates by `(Haken distance, fine index)`; neither receives ConceptNet labels, relation names, text, or semantic metadata, and neither constructs a dense fine pair-distance matrix.
+
+[`src/semmap_haken/quotient.py`](src/semmap_haken/quotient.py) forms the sparse quotient using the membership indicator \(P\): sum aggregation is \(A'=P^TAP\), retaining intra-cluster weight on the diagonal and conserving total adjacency weight. `mean_density` divides each quotient block by \(|C_a||C_b|\). The result preserves original full ConceptNet URIs, supernode sizes/masses, and reversible parent-child membership. [`src/semmap_haken/metrics.py`](src/semmap_haken/metrics.py) uses block-mean restriction \(R(x)_c=|C_c|^{-1}\sum_{i\in C_c}x_i\) and broadcast lifting \(L(y)_i=y_{c(i)}\); these are adjoint under the uniform fine and mass-weighted coarse inner products. It compares lifted coarse and fine *subspaces* using principal angles/projection distance, never raw eigenvectors, pairs sorted nontrivial eigenvalues with explicit truncation, and reports \(\lVert X-LY\rVert_F/\lVert X\rVert_F\) against the same full-system perturbations. This is distinct from M1 rank-\(r\) reconstruction error.
+
+Prepare a graph, replace `spectral.prepared_graph_dir` in [`configs/haken_one_step_smoke.yaml`](configs/haken_one_step_smoke.yaml) or [`configs/haken_one_step_small.yaml`](configs/haken_one_step_small.yaml) with the emitted `prepare-*` directory, then run:
+
+```bash
+python -m semmap_haken prepare --config configs/conceptnet_en_smoke.yaml
+python -m semmap_haken run --config configs/haken_one_step_smoke.yaml
+```
+
+Enabled M2 runs force the trusted CPU float64 reference context before M1 modes and trajectories are computed; the request and any override are visible in telemetry. Each method is atomically persisted under `run-*/coarsening/{connectivity_matching,unconstrained_matching}/` as `quotient.npz`, `mapping.json`, `embedding_metadata.json`, and `metrics.json`. The metric payload is schema-versioned and records resolved config, input checksums, execution semantics, artifact checksums, compression/shortfall, coarse diagnostics, subspace/eigenvalue errors, per-perturbation trajectory errors, runtime, and caveats.
+
+M2 is evidence plumbing only: candidate coordinates are not proven order parameters; one-step distortion is not a plateau result; neither baselines, null models, nonlinear slaving, nor multiscale hierarchy are implemented here. [`notebooks/03_one_step_haken_coarsening.ipynb`](notebooks/03_one_step_haken_coarsening.ipynb) is an offline-first thin CLI-backed display of the same artifact contract.
+
+## Acceleration foundation
+
+[`src/semmap_haken/compute.py`](src/semmap_haken/compute.py) resolves the typed `execution` section in the linear configs. `cpu` is strict and never imports CuPy; `cuda` is strict and fails when CuPy or the selected NVIDIA device is unavailable; `auto` prefers a usable CUDA device and records an explicit CPU fallback reason otherwise. The selected backend, CPU/GPU inventory, dtype, workers, batch size, solver method, timing, and fallback information are persisted in spectral diagnostics, dynamics summaries, and the run manifest.
+
+The base installation remains CPU-only. In a CUDA 12 Colab runtime, install the optional extra only after confirming the runtime's CUDA compatibility:
+
+```bash
+pip install -e '.[cuda,notebook]'
+python -m semmap_haken run --config configs/haken_linear_smoke.yaml
+```
+
+CPU propagation remains SciPy `expm_multiply` and supports deterministic, stable-index process chunks. CUDA uses lazy CuPy CSR eigensolving and an explicitly labelled sparse RK4 propagation fallback because CuPy does not provide an equivalent sparse `expm_multiply`; it is an accuracy-controlled approximation, not an exact CPU-equivalent propagator. CUDA float64 parity must be measured before interpreting CUDA results; float32 is an ablation. No performance claim is made without a recorded benchmark.
+
+## Colab-first quick start
+
+Use [`notebooks/00_colab_setup_and_conceptnet.ipynb`](notebooks/00_colab_setup_and_conceptnet.ipynb) in a clean Colab runtime, then run [`notebooks/01_data_smoke_and_sparse_graph.ipynb`](notebooks/01_data_smoke_and_sparse_graph.ipynb) and [`notebooks/02_linear_modes_and_dynamics.ipynb`](notebooks/02_linear_modes_and_dynamics.ipynb). The new notebook preflights resources, uses the offline fixture by default, delegates to the package CLI, and displays beta selection, `r` candidates, and trajectory reconstruction error.
+
+Safety is deliberate: both notebooks default to the committed offline tiny fixture; `ALLOW_PRODUCTION_DOWNLOAD` is `False`; Drive use is disabled; and no headless test clones, installs packages, mounts Drive, or accesses the network. A production dump requires explicit opt-in or a manually supplied local path after the shared resource preflight reports available RAM/disk against the selected profile.
+
+Notebook execution is **active-local first**. The helpers in [`src/semmap_haken/notebook.py`](src/semmap_haken/notebook.py) resolve the same workspace/data/cache/runs roots as [`src/semmap_haken/config.py`](src/semmap_haken/config.py), capture an execution snapshot, and can atomically copy selected light metadata to a user-selected durable destination. They never automatically persist heavy sparse artifacts or assume a personal Drive path.
+
+The notebook↔CLI contract is strict: notebooks use package APIs and the public `prepare` workflow; they display source, checksum/cache status, preflight, `run_id`, and artifact paths. The resulting [`manifest.json`](src/semmap_haken/manifest.py) and resolved config are the provenance record, while [`semmap-haken prepare`](src/semmap_haken/cli.py) remains the reproducible replay interface.
+
+## CLI surface
+
+```bash
+python -m semmap_haken --help
+python -m semmap_haken download --help
+python -m semmap_haken prepare --help
+python -m semmap_haken run --help
+python -m semmap_haken evaluate --help
+```
+
+`prepare` requires `dataset.path` to reference an already-downloaded, already-decompressed ConceptNet assertions TSV/CSV file, such as `../conceptnet-assertions-5.7.0.csv`. It does not download, decompress, or verify the source file. Set `dataset.max_rows: 1000` to parse only the first 1,000 physical rows before malformed-row handling and filtering; use `null` to parse the entire file. This prefix limit is deterministic but order-sensitive, not a semantic sample. Set `dataset.relations: []` to accept all ConceptNet relation types, or list names such as `RelatedTo` and `IsA` to whitelist only those types. Similarly, `dataset.language: ""` disables language filtering. The starter configurations write ephemeral run artifacts beneath `./tmp/runs/prepare-*/`: `adjacency.npz`, `nodes.json`, `graph_metadata.json`, `resolved_config.json`, and `manifest.json`. The repository-local [`tmp/`](tmp/) directory is ignored by Git and is the supported location for temporary configs and smoke-run output.
+
+URI indices are lexicographic and therefore independent of input order. With `component: largest`, ties select the component whose lexicographically smallest URI is smallest; `max_nodes` then retains the first URI-sorted nodes and induces the corresponding sparse subgraph. This is reproducible but not a semantic sampling rule. Large dumps remain streamed, yet graph construction holds accepted edge aggregates and must be budgeted for available RAM/disk.
+
+## Development verification
+
+```bash
+python -m pytest tests
+```
+
+The historical prototype remains available only for compatibility and is not evidence for the Haken/ConceptNet research program.

@@ -1,0 +1,25 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+dataset:
+  source: conceptnet-5.7
+  version: "5.7.0"
+  source_url: https://conceptnet.s3.amazonaws.com/downloads/2019/edges/conceptnet-assertions-5.7.0.csv.gz
+  path: null
+  max_rows: 1000
+  language: en
+  relations: [RelatedTo, IsA, PartOf, HasA, UsedFor, HasProperty]
+  min_weight: 1.0
+  max_nodes: 1000
+  component: largest
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: log1p
+  operator: normalized_adjacency
+runtime:
+  profile: smoke
+  random_seed: 1729
+  resource_profile: resource_profiles/smoke.yaml

@@ -1,0 +1,5 @@
+name: small
+expected_max_nodes: 10000
+recommended_ram_gib: 12
+recommended_disk_gib: 20
+notes: Starter profile only; download, parsing, and graph construction are future workstreams.
