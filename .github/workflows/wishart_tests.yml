@@ -1,0 +1,28 @@
+name: Wishart coarsening unit tests
+
+on:
+  pull_request:
+    paths:
+      - 'src/semmap_haken/wishart_*.py'
+      - 'scripts/run_wishart_coarsening.py'
+      - 'tests/test_semmap_haken_wishart.py'
+      - 'pyproject.toml'
+      - 'requirements/constraints.txt'
+  workflow_dispatch:
+
+jobs:
+  wishart-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and Wishart extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c requirements/constraints.txt -e '.[dev,wishart]'
+      - name: Run Wishart unit tests
+        run: |
+          pytest -q tests/test_semmap_haken_wishart.py
