@@ -163,8 +163,8 @@ def typed_wl_features(
                     out_start, out_stop = layer.indptr[node], layer.indptr[node + 1]
                     for nbr in layer.indices[out_start:out_stop]:
                         messages.append(f"o:{relation}:{labels[int(nbr)]}")
-                    column = layer.getcol(node)
-                    for nbr in column.indices:
+                    column = layer[:, node].tocoo()
+                    for nbr in column.row:
                         messages.append(f"i:{relation}:{labels[int(nbr)]}")
                 token = labels[node] + "|" + "|".join(sorted(messages))
                 digest = hashlib.blake2b(token.encode("utf-8"), digest_size=12).hexdigest()
