@@ -54,3 +54,48 @@ def test_typed_wl_changes_when_relation_type_changes():
     b = EgoCandidate(1, np.arange(3), adjacency, {"UsedFor": adjacency})
     features = typed_wl_features((a, b), iterations=2, dimension=128).toarray()
     assert not np.allclose(features[0], features[1])
+
+
+def test_dynamic_snapshot_runs_on_small_sparse_graph():
+    from semmap_haken.wishart_dynamics import compute_dynamic_snapshot
+
+    adjacency = sparse.csr_matrix(
+        np.array([
+            [0, 1, 0, 1],
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [1, 0, 1, 0],
+        ], dtype=float)
+    )
+    snapshot, vectors = compute_dynamic_snapshot(
+        adjacency,
+        slow_modes=2,
+        mfpt_pairs=2,
+        mfpt_walks_per_pair=2,
+        mfpt_max_steps=20,
+        betweenness_samples=4,
+        clustering_samples=4,
+        distance_samples=4,
+        seed=7,
+    )
+    assert snapshot.node_count == 4
+    assert vectors.stationary_mass.shape == (4,)
+    assert np.isclose(vectors.stationary_mass.sum(), 1.0)
+    assert snapshot.mean_degree == 2.0
+
+
+def test_partition_contracts_each_figure_instance_separately():
+    from semmap_haken.wishart_hierarchy import (
+        FigureOccurrence,
+        _partition_from_occurrences,
+    )
+
+    occurrences = (
+        FigureOccurrence(figure_type=3, candidate_index=0, center=0, nodes=(0, 1), kth_radius=0.1),
+        FigureOccurrence(figure_type=3, candidate_index=4, center=4, nodes=(4, 5), kth_radius=0.1),
+    )
+    plan = _partition_from_occurrences(6, occurrences)
+    assert plan.fine_to_coarse[0] == plan.fine_to_coarse[1]
+    assert plan.fine_to_coarse[4] == plan.fine_to_coarse[5]
+    assert plan.fine_to_coarse[0] != plan.fine_to_coarse[4]
+    assert len(plan.figure_type_by_coarse) == 2
