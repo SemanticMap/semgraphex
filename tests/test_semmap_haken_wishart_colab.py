@@ -156,3 +156,38 @@ def test_colab_preflight_uses_local_scratch_capacity(tmp_path: Path) -> None:
     assert result.ok is True
     assert result.source_bytes == 1024
     assert result.recommended_scratch_bytes == 1024
+
+
+def test_colab_cli_end_to_end_with_fake_drive_and_tiny_conceptnet(
+    tmp_path: Path,
+) -> None:
+    from semmap_haken.wishart_colab_cli import main
+
+    drive_root = tmp_path / "drive"
+    drive_data = drive_root / "data"
+    drive_data.mkdir(parents=True)
+    source_fixture = Path("tests/fixtures/conceptnet_tiny.tsv")
+    dataset = drive_data / "conceptnet_tiny.tsv"
+    dataset.write_bytes(source_fixture.read_bytes())
+
+    scratch = tmp_path / "scratch"
+    exit_code = main([
+        "--config",
+        "configs/wishart_conceptnet_small.yaml",
+        "--drive-root",
+        str(drive_root),
+        "--scratch-root",
+        str(scratch),
+        "--dataset-drive",
+        "data/conceptnet_tiny.tsv",
+        "--run-name",
+        "e2e",
+        "--keep-scratch",
+    ])
+    assert exit_code == 0
+    durable = drive_root / "runs" / "e2e"
+    assert (durable / "input.json").is_file()
+    assert (durable / "hierarchy.json").is_file()
+    assert (durable / "COLAB_RUN.json").is_file()
+    assert (durable / "DRIVE_CHECKPOINT.json").is_file()
+    assert (durable / "COMPLETED").is_file()
