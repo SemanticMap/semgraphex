@@ -44,6 +44,7 @@ class FigureOccurrence:
     candidate_index: int
     center: int
     nodes: tuple[int, ...]
+    prototype_to_fine_nodes: tuple[int, ...]
     kth_radius: float
     raw_bits: float
     encoded_bits: float
@@ -77,6 +78,7 @@ class _ScannedOccurrence:
     candidate_index: int
     center: int
     nodes: tuple[int, ...]
+    prototype_to_fine_nodes: tuple[int, ...]
     dictionary_type_id: str
 
 
@@ -284,17 +286,24 @@ def _scan_known_types(
     dictionary_options: DictionaryOptions,
 ) -> tuple[tuple[_ScannedOccurrence, ...], Counter[str]]:
     if dictionary_options.frequency_scan == "discovery":
-        scanned = tuple(
-            _ScannedOccurrence(
-                candidate_index=index,
-                center=int(candidate.center),
-                nodes=tuple(int(x) for x in candidate.nodes),
-                dictionary_type_id=str(type_id),
+        rows: list[_ScannedOccurrence] = []
+        for index, candidate in enumerate(discovery_candidates):
+            matched = dictionary.match_with_mapping(candidate)
+            if matched is None:
+                continue
+            rows.append(
+                _ScannedOccurrence(
+                    candidate_index=index,
+                    center=int(candidate.center),
+                    nodes=tuple(int(x) for x in candidate.nodes),
+                    prototype_to_fine_nodes=tuple(
+                        int(candidate.nodes[local_index])
+                        for local_index in matched.prototype_to_candidate
+                    ),
+                    dictionary_type_id=matched.graph_type.type_id,
+                )
             )
-            for index, (candidate, type_id) in enumerate(
-                zip(discovery_candidates, discovery_type_ids, strict=True)
-            )
-        )
+        scanned = tuple(rows)
     else:
         rows: list[_ScannedOccurrence] = []
         seen: set[tuple[str, tuple[int, ...]]] = set()
@@ -313,9 +322,10 @@ def _scan_known_types(
                 candidate_centers=range(start, stop),
             )
             for candidate in candidates:
-                graph_type = dictionary.match(candidate)
-                if graph_type is None:
+                matched = dictionary.match_with_mapping(candidate)
+                if matched is None:
                     continue
+                graph_type = matched.graph_type
                 nodes = tuple(int(x) for x in candidate.nodes)
                 key = (graph_type.type_id, nodes)
                 if key in seen:
@@ -326,6 +336,10 @@ def _scan_known_types(
                         candidate_index=next_index,
                         center=int(candidate.center),
                         nodes=nodes,
+                        prototype_to_fine_nodes=tuple(
+                            int(candidate.nodes[local_index])
+                            for local_index in matched.prototype_to_candidate
+                        ),
                         dictionary_type_id=graph_type.type_id,
                     )
                 )
@@ -447,6 +461,8 @@ def _score_and_select_occurrences(
     graph_node_count: int,
     relation_count: int,
     dictionary_options: DictionaryOptions,
+    min_figure_nodes: int,
+    max_figures: int,
 ) -> tuple[tuple[FigureOccurrence, ...], dict[str, object], dict[str, str]]:
     eligible_counts = {
         type_id: int(count)
@@ -463,6 +479,8 @@ def _score_and_select_occurrences(
     payload_by_index: dict[int, tuple[_ScannedOccurrence, float, float]] = {}
 
     for item in scanned:
+        if len(item.nodes) < min_figure_nodes:
+            continue
         support = eligible_counts.get(item.dictionary_type_id, 0)
         if support <= 0:
             continue
@@ -499,6 +517,9 @@ def _score_and_select_occurrences(
         scored,
         local_improvement=dictionary_options.local_improvement,
     )
+    selected_mdl = tuple(
+        sorted(selected_mdl, key=lambda item: item.mdl_gain, reverse=True)[:max_figures]
+    )
     selected: list[FigureOccurrence] = []
     for mdl in selected_mdl:
         item, raw_bits, encoded_bits = payload_by_index[mdl.candidate_index]
@@ -515,6 +536,7 @@ def _score_and_select_occurrences(
                 candidate_index=item.candidate_index,
                 center=item.center,
                 nodes=item.nodes,
+                prototype_to_fine_nodes=item.prototype_to_fine_nodes,
                 kth_radius=kth_radius,
                 raw_bits=raw_bits,
                 encoded_bits=encoded_bits,
@@ -655,6 +677,7 @@ def _write_transition(
                 "candidate_index": item.candidate_index,
                 "center": item.center,
                 "fine_nodes": list(item.nodes),
+                "prototype_to_fine_nodes": list(item.prototype_to_fine_nodes),
                 "kth_radius": item.kth_radius,
                 "raw_bits_proxy": item.raw_bits,
                 "encoded_bits_proxy": item.encoded_bits,
@@ -799,6 +822,8 @@ def run_wishart_hierarchy(
             symbol_types=symbol_types,
             wishart_options=options,
             dictionary_options=dictionary_options,
+            min_figure_nodes=options.min_figure_nodes,
+            max_figures=options.max_figures_per_level,
         )
 
         type_ids, clustering, type_info, metric_metadata = _cluster_dictionary_types(
