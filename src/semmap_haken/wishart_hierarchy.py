@@ -824,8 +824,6 @@ def run_wishart_hierarchy(
             symbol_types=symbol_types,
             wishart_options=options,
             dictionary_options=dictionary_options,
-            min_figure_nodes=options.min_figure_nodes,
-            max_figures=options.max_figures_per_level,
         )
 
         type_ids, clustering, type_info, metric_metadata = _cluster_dictionary_types(
