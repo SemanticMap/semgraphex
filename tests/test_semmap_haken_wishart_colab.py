@@ -190,4 +190,8 @@ def test_colab_cli_end_to_end_with_fake_drive_and_tiny_conceptnet(
     assert (durable / "hierarchy.json").is_file()
     assert (durable / "COLAB_RUN.json").is_file()
     assert (durable / "DRIVE_CHECKPOINT.json").is_file()
+    assert (durable / "dictionary" / "graph_types.jsonl").is_file()
+    assert (durable / "dictionary" / "grammar.jsonl").is_file()
+    assert (durable / "dictionary" / "huffman.json").is_file()
+    assert (durable / "level_000" / "symbolic_nodes.jsonl").is_file()
     assert (durable / "COMPLETED").is_file()
