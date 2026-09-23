@@ -584,14 +584,16 @@ def _write_dictionary_artifacts(
     dictionary_dir = directory / "dictionary"
     dictionary.write(dictionary_dir)
     family_registry.write(dictionary_dir)
-    counts = dictionary.frequency_counts(accepted=False)
+    accepted_counts = dictionary.frequency_counts(accepted=True)
+    candidate_counts = dictionary.frequency_counts(accepted=False)
     (dictionary_dir / "huffman.json").write_text(
         json.dumps(
             {
                 type_id: {
                     "code": code,
                     "bits": len(code),
-                    "candidate_frequency": counts.get(type_id, 0),
+                    "accepted_frequency": accepted_counts.get(type_id, 0),
+                    "candidate_frequency": candidate_counts.get(type_id, 0),
                 }
                 for type_id, code in sorted(huffman.items())
             },
@@ -835,7 +837,7 @@ def run_wishart_hierarchy(
             dictionary_options=dictionary_options,
         )
 
-        occurrences, mdl_metrics, current_huffman = _score_and_select_occurrences(
+        occurrences, mdl_metrics, selection_huffman = _score_and_select_occurrences(
             scanned,
             dictionary,
             level=level,
@@ -844,7 +846,18 @@ def run_wishart_hierarchy(
             graph_node_count=current.shape[0],
             relation_count=len(relation_layers),
             dictionary_options=dictionary_options,
+            min_figure_nodes=options.min_figure_nodes,
+            max_figures=options.max_figures_per_level,
         )
+        current_huffman = (
+            build_canonical_huffman_codes(
+                dictionary.frequency_counts(accepted=True)
+            )
+            if dictionary_options.huffman
+            else {}
+        )
+        mdl_metrics["selection_huffman_codes"] = len(selection_huffman)
+        mdl_metrics["global_huffman_codes"] = len(current_huffman)
 
         observed_types = {
             type_id
