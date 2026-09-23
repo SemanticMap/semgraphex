@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Mapping, Sequence
 
-import networkx as nx
 import numpy as np
 from scipy import sparse
+from scipy.sparse.csgraph import shortest_path
 from scipy.sparse.linalg import eigsh
 
 from .quotient import membership_matrix
@@ -109,6 +109,120 @@ def _sample_nodes(n: int, count: int, rng: np.random.Generator) -> np.ndarray:
     return np.sort(rng.choice(n, size=count, replace=False))
 
 
+def _binary_topology(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
+    topology = (matrix != 0).astype(np.uint8).tocsr()
+    topology.setdiag(0)
+    topology.eliminate_zeros()
+    return topology
+
+
+def _sampled_betweenness_unweighted(
+    topology: sparse.csr_matrix,
+    *,
+    sample_count: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Approximate unnormalized undirected betweenness using sampled Brandes sources.
+
+    This avoids materializing a NetworkX graph, which is expensive in Colab.
+    The n/k scaling matches the standard source-sampling idea; the final 1/2
+    corrects double counting for undirected paths.
+    """
+    n = topology.shape[0]
+    result = np.zeros(n, dtype=np.float64)
+    if n < 2 or topology.nnz == 0:
+        return result
+    sources = _sample_nodes(n, min(sample_count, n), rng)
+    for source in sources:
+        source = int(source)
+        stack: list[int] = []
+        predecessors: list[list[int]] = [[] for _ in range(n)]
+        sigma = np.zeros(n, dtype=np.float64)
+        sigma[source] = 1.0
+        distance = np.full(n, -1, dtype=np.int64)
+        distance[source] = 0
+        queue = [source]
+        head = 0
+        while head < len(queue):
+            vertex = queue[head]
+            head += 1
+            stack.append(vertex)
+            start, stop = topology.indptr[vertex], topology.indptr[vertex + 1]
+            for neighbor in topology.indices[start:stop]:
+                neighbor = int(neighbor)
+                if distance[neighbor] < 0:
+                    distance[neighbor] = distance[vertex] + 1
+                    queue.append(neighbor)
+                if distance[neighbor] == distance[vertex] + 1:
+                    sigma[neighbor] += sigma[vertex]
+                    predecessors[neighbor].append(vertex)
+
+        dependency = np.zeros(n, dtype=np.float64)
+        while stack:
+            node = stack.pop()
+            if sigma[node] > 0:
+                coefficient = (1.0 + dependency[node]) / sigma[node]
+                for predecessor in predecessors[node]:
+                    dependency[predecessor] += sigma[predecessor] * coefficient
+            if node != source:
+                result[node] += dependency[node]
+
+    scale = (n / float(len(sources))) * 0.5
+    return result * scale
+
+
+def _sampled_clustering(
+    topology: sparse.csr_matrix,
+    *,
+    sample_count: int,
+    rng: np.random.Generator,
+) -> float | None:
+    n = topology.shape[0]
+    if n == 0:
+        return None
+    sample = _sample_nodes(n, sample_count, rng)
+    values: list[float] = []
+    for node in sample:
+        start, stop = topology.indptr[int(node)], topology.indptr[int(node) + 1]
+        neighbors = topology.indices[start:stop]
+        degree = len(neighbors)
+        if degree < 2:
+            values.append(0.0)
+            continue
+        # For symmetric topology nnz of the neighbor-induced subgraph counts
+        # each undirected edge twice, exactly the numerator 2*T.
+        neighbor_edges_twice = topology[neighbors][:, neighbors].nnz
+        values.append(float(neighbor_edges_twice / (degree * (degree - 1))))
+    return float(np.mean(values)) if values else None
+
+
+def _sampled_path_distances(
+    topology: sparse.csr_matrix,
+    *,
+    sample_count: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    n = topology.shape[0]
+    if n < 2 or topology.nnz == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    sources = _sample_nodes(n, min(sample_count, n), rng)
+    rows: list[tuple[float, float, float]] = []
+    for source in sources:
+        distances = shortest_path(
+            topology,
+            directed=False,
+            unweighted=True,
+            indices=int(source),
+        )
+        reachable = np.flatnonzero(np.isfinite(distances))
+        reachable = reachable[reachable != int(source)]
+        if reachable.size == 0:
+            continue
+        target = int(rng.choice(reachable))
+        rows.append((float(source), float(target), float(distances[target])))
+    return np.asarray(rows, dtype=np.float64).reshape((-1, 3))
+
+
 def _mfpt_monte_carlo(
     matrix: sparse.csr_matrix,
     *,
@@ -197,41 +311,31 @@ def compute_dynamic_snapshot(
         max_steps=mfpt_max_steps, rng=rng,
     )
 
-    graph = nx.from_scipy_sparse_array(matrix, create_using=nx.Graph)
-    betweenness = np.zeros(n, dtype=np.float64)
-    max_b = None
-    congestion = None
-    if n >= 2 and graph.number_of_edges() > 0:
-        k = min(betweenness_samples, n)
-        values = nx.betweenness_centrality(
-            graph, k=k if k < n else None, normalized=False, weight=None, seed=seed
-        )
-        for node, value in values.items():
-            betweenness[int(node)] = float(value)
-        max_b = float(betweenness.max(initial=0.0))
-        if max_b > 0:
-            congestion = (n - 1.0) / max_b
+    topology = _binary_topology(matrix)
+    betweenness = _sampled_betweenness_unweighted(
+        topology,
+        sample_count=betweenness_samples,
+        rng=rng,
+    )
+    max_b = float(betweenness.max(initial=0.0)) if betweenness.size else None
+    congestion = (
+        (n - 1.0) / max_b
+        if max_b is not None and max_b > 0
+        else None
+    )
 
-    clustering = None
-    if n:
-        sample = _sample_nodes(n, clustering_samples, rng)
-        local = nx.clustering(graph, nodes=[int(x) for x in sample], weight=None)
-        if local:
-            clustering = float(np.mean(list(local.values())))
+    clustering = _sampled_clustering(
+        topology,
+        sample_count=clustering_samples,
+        rng=rng,
+    )
 
-    sampled_pairs: list[tuple[float, float, float]] = []
-    if n >= 2 and graph.number_of_edges() > 0:
-        sources = _sample_nodes(n, min(distance_samples, n), rng)
-        for source in sources:
-            lengths = nx.single_source_shortest_path_length(graph, int(source))
-            targets = [node for node in lengths if node != int(source)]
-            if not targets:
-                continue
-            target = int(rng.choice(targets))
-            sampled_pairs.append((float(source), float(target), float(lengths[target])))
-            if len(sampled_pairs) >= distance_samples:
-                break
-    distance_values = np.array([item[2] for item in sampled_pairs], dtype=np.float64)
+    sampled_pairs = _sampled_path_distances(
+        topology,
+        sample_count=distance_samples,
+        rng=rng,
+    )
+    distance_values = sampled_pairs[:, 2] if sampled_pairs.size else np.empty(0)
     mean_distance = float(distance_values.mean()) if distance_values.size else None
     median_distance = float(np.median(distance_values)) if distance_values.size else None
     p95_distance = float(np.quantile(distance_values, 0.95)) if distance_values.size else None
@@ -239,7 +343,7 @@ def compute_dynamic_snapshot(
     caveats = (
         "directed inputs are symmetrized for these diagnostics",
         "MFPT is Monte-Carlo estimated with a finite step cap",
-        "betweenness is source-sampled when node_count exceeds betweenness_samples",
+        "betweenness uses source-sampled unweighted Brandes directly on CSR topology",
         "spreading threshold uses <k>/<k^2> heterogeneous-mean-field proxy",
         "percolation threshold uses <k>/(<k^2>-<k>) configuration-model proxy",
         "congestion threshold uses (N-1)/max unnormalized betweenness proxy",
@@ -268,7 +372,7 @@ def compute_dynamic_snapshot(
         slow_eigenvalues=slow_values,
         slow_eigenvectors=slow_vectors,
         betweenness=betweenness,
-        sampled_distances=np.asarray(sampled_pairs, dtype=np.float64).reshape((-1, 3)),
+        sampled_distances=sampled_pairs,
     )
     return snapshot, vectors
 

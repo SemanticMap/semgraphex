@@ -11,7 +11,7 @@ from typing import Mapping, Sequence
 import numpy as np
 from scipy import sparse
 from scipy.sparse.csgraph import shortest_path
-from scipy.spatial.distance import cdist, jensenshannon
+from scipy.spatial.distance import cdist
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 
@@ -151,6 +151,12 @@ def typed_wl_features(
     for candidate_index, candidate in enumerate(candidates):
         n = candidate.adjacency.shape[0]
         labels = [f"d:{candidate.adjacency.getrow(i).nnz}" for i in range(n)]
+        # Repeated sparse column slicing is expensive on Colab. Build incoming
+        # CSR layers once so both directions are O(local degree) per node.
+        typed_layers = [
+            (relation, layer.tocsr(), layer.T.tocsr())
+            for relation, layer in sorted(candidate.relation_layers.items())
+        ]
         counts: dict[int, float] = {}
         for label in labels:
             b = _bucket("0|" + label, dimension)
@@ -159,12 +165,12 @@ def typed_wl_features(
             updated: list[str] = []
             for node in range(n):
                 messages: list[str] = []
-                for relation, layer in sorted(candidate.relation_layers.items()):
-                    out_start, out_stop = layer.indptr[node], layer.indptr[node + 1]
-                    for nbr in layer.indices[out_start:out_stop]:
+                for relation, outgoing, incoming in typed_layers:
+                    out_start, out_stop = outgoing.indptr[node], outgoing.indptr[node + 1]
+                    for nbr in outgoing.indices[out_start:out_stop]:
                         messages.append(f"o:{relation}:{labels[int(nbr)]}")
-                    column = layer[:, node].tocoo()
-                    for nbr in column.row:
+                    in_start, in_stop = incoming.indptr[node], incoming.indptr[node + 1]
+                    for nbr in incoming.indices[in_start:in_stop]:
                         messages.append(f"i:{relation}:{labels[int(nbr)]}")
                 token = labels[node] + "|" + "|".join(sorted(messages))
                 digest = hashlib.blake2b(token.encode("utf-8"), digest_size=12).hexdigest()
@@ -263,22 +269,73 @@ def _knn_from_distance_matrix(matrix: np.ndarray, k: int, metadata: dict[str, ob
     return NeighborGraph(indices, distances, metadata)
 
 
-def relation_js_neighbors(candidates: Sequence[EgoCandidate], *, k: int) -> NeighborGraph:
+def _sqrt_js_block(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Vectorized sqrt Jensen-Shannon distances for normalized row histograms."""
+    p = left[:, None, :]
+    q = right[None, :, :]
+    m = 0.5 * (p + q)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kl_p = np.where(p > 0, p * np.log2(p / m), 0.0)
+        kl_q = np.where(q > 0, q * np.log2(q / m), 0.0)
+    divergence = 0.5 * (kl_p.sum(axis=2) + kl_q.sum(axis=2))
+    distances = np.sqrt(np.maximum(divergence, 0.0))
+
+    left_zero = np.isclose(left.sum(axis=1), 0.0)
+    right_zero = np.isclose(right.sum(axis=1), 0.0)
+    if np.any(left_zero) or np.any(right_zero):
+        both_zero = left_zero[:, None] & right_zero[None, :]
+        one_zero = left_zero[:, None] ^ right_zero[None, :]
+        distances[both_zero] = 0.0
+        distances[one_zero] = 1.0
+    return distances
+
+
+def relation_js_neighbors(
+    candidates: Sequence[EgoCandidate],
+    *,
+    k: int,
+    block_size: int = 128,
+) -> NeighborGraph:
+    """Top-k sqrt(JS) neighbors without materializing an N x N matrix.
+
+    Memory is O(block_size * N + N * k), which is substantially safer in Colab
+    than the previous all-pairs distance matrix.
+    """
     features, relations = relation_histogram_features(candidates)
     n = features.shape[0]
-    distances = np.zeros((n, n), dtype=np.float64)
-    # scipy's Jensen-Shannon function already returns sqrt(JS divergence).
-    for i in range(n):
-        for j in range(i + 1, n):
-            if not features[i].any() and not features[j].any():
-                value = 0.0
-            elif not features[i].any() or not features[j].any():
-                value = 1.0
-            else:
-                value = float(jensenshannon(features[i], features[j], base=2.0))
-            distances[i, j] = distances[j, i] = value
-    return _knn_from_distance_matrix(distances, k, {"backend": "pairwise", "metric": "sqrt_js", "relations": relations})
+    if n <= 1:
+        return NeighborGraph(
+            np.empty((n, 0), dtype=np.int64),
+            np.empty((n, 0), dtype=np.float64),
+            {"backend": "chunked_pairwise", "metric": "sqrt_js", "relations": relations},
+        )
+    k = min(k, n - 1)
+    block_size = max(1, min(int(block_size), n))
+    indices = np.empty((n, k), dtype=np.int64)
+    distances = np.empty((n, k), dtype=np.float64)
 
+    for block_start in range(0, n, block_size):
+        block_stop = min(n, block_start + block_size)
+        block = _sqrt_js_block(features[block_start:block_stop], features)
+        local_rows = np.arange(block_stop - block_start)
+        global_rows = np.arange(block_start, block_stop)
+        block[local_rows, global_rows] = np.inf
+        partition = np.argpartition(block, kth=k - 1, axis=1)[:, :k]
+        part_distances = np.take_along_axis(block, partition, axis=1)
+        order = np.argsort(part_distances, axis=1, kind="stable")
+        indices[block_start:block_stop] = np.take_along_axis(partition, order, axis=1)
+        distances[block_start:block_stop] = np.take_along_axis(part_distances, order, axis=1)
+
+    return NeighborGraph(
+        indices,
+        distances,
+        {
+            "backend": "chunked_pairwise",
+            "metric": "sqrt_js",
+            "relations": relations,
+            "block_size": block_size,
+        },
+    )
 
 def _spectral_sample_coordinates(candidate: EgoCandidate, dimension: int) -> np.ndarray:
     """Permutation-invariant structural coordinates used by low-rank GW.
@@ -431,6 +488,7 @@ def build_neighbor_graph(
     transport_rank: int,
     transport_max_candidates: int,
     fgw_alpha: float,
+    relation_js_block_size: int,
     seed: int,
 ) -> NeighborGraph:
     if len(candidates) <= 1:
@@ -445,7 +503,9 @@ def build_neighbor_graph(
         )
         result = _knn_from_features(features, k, "cosine")
     elif metric == "relation_js":
-        result = relation_js_neighbors(candidates, k=k)
+        result = relation_js_neighbors(
+            candidates, k=k, block_size=relation_js_block_size
+        )
     elif metric in {"lowrank_gw", "fgw"}:
         result = transport_neighbors(
             candidates, k=k, metric=metric, rank=transport_rank,
