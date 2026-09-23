@@ -22,8 +22,9 @@ class GraphType:
     node_count: int
     edge_count: int
     relation_signature: dict[str, int]
-    boundary_signature: tuple[tuple[str, str, int], ...]
+    boundary_signature: tuple[tuple[int, str, str, int], ...]
     child_types: tuple[str, ...]
+    prototype: dict[str, object]
     first_level: int
     levels_seen: set[int] = field(default_factory=set)
     candidate_frequency: int = 0
@@ -34,6 +35,14 @@ class GraphType:
         payload = asdict(self)
         payload["levels_seen"] = sorted(self.levels_seen)
         return payload
+
+
+@dataclass(frozen=True)
+class GraphMatch:
+    """Exact match plus prototype-node to candidate-local-node mapping."""
+
+    graph_type: GraphType
+    prototype_to_candidate: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -117,19 +126,39 @@ def _relation_signature(candidate: EgoCandidate) -> dict[str, int]:
     }
 
 
-def _candidate_graph(candidate: EgoCandidate) -> nx.DiGraph:
-    """Build an exact topology/edge-type graph for VF2 matching.
+def _boundary_by_node(
+    candidate: EgoCandidate,
+) -> dict[int, tuple[tuple[str, str, int], ...]]:
+    grouped: dict[int, list[tuple[str, str, int]]] = {}
+    for node, relation, direction, count in candidate.boundary_signature:
+        grouped.setdefault(int(node), []).append(
+            (str(relation), str(direction), int(count))
+        )
+    return {
+        node: tuple(sorted(values))
+        for node, values in grouped.items()
+    }
 
-    Edge weights are deliberately omitted from type identity. Relation labels
-    and recursive child-symbol labels are retained.
-    """
+
+def _candidate_graph(
+    candidate: EgoCandidate,
+    *,
+    boundary_sensitive: bool,
+) -> nx.DiGraph:
+    """Build an exact topology/edge-type graph for VF2 matching."""
     n = int(candidate.adjacency.shape[0])
     graph = nx.DiGraph()
     node_types = candidate.node_types or tuple(None for _ in range(n))
     if len(node_types) != n:
         raise ValueError("candidate.node_types must match candidate node count")
+    boundary = _boundary_by_node(candidate) if boundary_sensitive else {}
     for node, symbol_type in enumerate(node_types):
-        graph.add_node(node, symbol_type=symbol_type or "ATOM")
+        port_token = json.dumps(boundary.get(node, ()), separators=(",", ":"))
+        graph.add_node(
+            node,
+            symbol_type=symbol_type or "ATOM",
+            boundary_ports=port_token,
+        )
 
     relation_by_edge: dict[tuple[int, int], list[str]] = {}
     for relation, layer in sorted(candidate.relation_layers.items()):
@@ -145,16 +174,52 @@ def _candidate_graph(candidate: EgoCandidate) -> nx.DiGraph:
     return graph
 
 
+def _prototype_payload(
+    candidate: EgoCandidate,
+    *,
+    boundary_sensitive: bool,
+) -> dict[str, object]:
+    graph = _candidate_graph(candidate, boundary_sensitive=boundary_sensitive)
+    return {
+        "nodes": [
+            {
+                "prototype_node": int(node),
+                "symbol_type": str(data["symbol_type"]),
+                "boundary_ports": str(data["boundary_ports"]),
+            }
+            for node, data in sorted(graph.nodes(data=True))
+        ],
+        "edges": [
+            {
+                "source": int(source),
+                "target": int(target),
+                "relation": str(data["relation"]),
+            }
+            for source, target, data in sorted(
+                graph.edges(data=True),
+                key=lambda item: (int(item[0]), int(item[1]), str(item[2]["relation"])),
+            )
+        ],
+    }
+
+
 def candidate_fingerprint(
     candidate: EgoCandidate,
     *,
     boundary_sensitive: bool,
 ) -> str:
     """Permutation-invariant WL bucket used before exact VF2 verification."""
-    graph = _candidate_graph(candidate)
+    graph = _candidate_graph(
+        candidate,
+        boundary_sensitive=boundary_sensitive,
+    )
+    for node in graph.nodes:
+        graph.nodes[node]["identity"] = (
+            f"{graph.nodes[node]['symbol_type']}|{graph.nodes[node]['boundary_ports']}"
+        )
     wl_hash = nx.weisfeiler_lehman_graph_hash(
         graph,
-        node_attr="symbol_type",
+        node_attr="identity",
         edge_attr="relation",
         iterations=3,
         digest_size=16,
@@ -164,10 +229,37 @@ def candidate_fingerprint(
         "n": graph.number_of_nodes(),
         "e": graph.number_of_edges(),
         "relations": _relation_signature(candidate),
-        "boundary": list(candidate.boundary_signature) if boundary_sensitive else [],
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.blake2b(raw, digest_size=16).hexdigest()
+
+
+def _isomorphism_mapping(
+    left: EgoCandidate,
+    right: EgoCandidate,
+    *,
+    boundary_sensitive: bool,
+) -> dict[int, int] | None:
+    if left.adjacency.shape != right.adjacency.shape:
+        return None
+    if _relation_signature(left) != _relation_signature(right):
+        return None
+    node_match = nx.algorithms.isomorphism.categorical_node_match(
+        ["symbol_type", "boundary_ports"],
+        ["ATOM", "[]"],
+    )
+    edge_match = nx.algorithms.isomorphism.categorical_edge_match(
+        "relation", "__edge__"
+    )
+    matcher = nx.algorithms.isomorphism.DiGraphMatcher(
+        _candidate_graph(left, boundary_sensitive=boundary_sensitive),
+        _candidate_graph(right, boundary_sensitive=boundary_sensitive),
+        node_match=node_match,
+        edge_match=edge_match,
+    )
+    if not matcher.is_isomorphic():
+        return None
+    return {int(key): int(value) for key, value in matcher.mapping.items()}
 
 
 def candidates_are_isomorphic(
@@ -176,25 +268,13 @@ def candidates_are_isomorphic(
     *,
     boundary_sensitive: bool,
 ) -> bool:
-    """Exact relation-aware identity check after the WL bucket filter."""
-    if left.adjacency.shape != right.adjacency.shape:
-        return False
-    if boundary_sensitive and left.boundary_signature != right.boundary_signature:
-        return False
-    if _relation_signature(left) != _relation_signature(right):
-        return False
-    node_match = nx.algorithms.isomorphism.categorical_node_match(
-        "symbol_type", "ATOM"
-    )
-    edge_match = nx.algorithms.isomorphism.categorical_edge_match(
-        "relation", "__edge__"
-    )
-    return nx.is_isomorphic(
-        _candidate_graph(left),
-        _candidate_graph(right),
-        node_match=node_match,
-        edge_match=edge_match,
-    )
+    """Exact relation/boundary-aware identity check after the WL bucket filter."""
+    return _isomorphism_mapping(
+        left,
+        right,
+        boundary_sensitive=boundary_sensitive,
+    ) is not None
+
 
 
 class GraphDictionary:
@@ -227,7 +307,7 @@ class GraphDictionary:
 
         type_id = f"GT_{self._next_id:06d}"
         self._next_id += 1
-        child_types = tuple(sorted({item for item in candidate.node_types if item}))
+        child_types = tuple(item for item in candidate.node_types if item)
         graph_type = GraphType(
             type_id=type_id,
             fingerprint=fingerprint,
@@ -238,6 +318,10 @@ class GraphDictionary:
                 tuple(candidate.boundary_signature) if self.boundary_sensitive else ()
             ),
             child_types=child_types,
+            prototype=_prototype_payload(
+                candidate,
+                boundary_sensitive=self.boundary_sensitive,
+            ),
             first_level=int(level),
             levels_seen={int(level)},
         )
@@ -246,19 +330,33 @@ class GraphDictionary:
         self._by_fingerprint.setdefault(fingerprint, []).append(type_id)
         return graph_type
 
-    def match(self, candidate: EgoCandidate) -> GraphType | None:
+    def match_with_mapping(self, candidate: EgoCandidate) -> GraphMatch | None:
         fingerprint = candidate_fingerprint(
             candidate,
             boundary_sensitive=self.boundary_sensitive,
         )
         for type_id in self._by_fingerprint.get(fingerprint, []):
-            if candidates_are_isomorphic(
+            representative = self._representatives[type_id]
+            mapping = _isomorphism_mapping(
+                representative,
                 candidate,
-                self._representatives[type_id],
                 boundary_sensitive=self.boundary_sensitive,
-            ):
-                return self.types[type_id]
+            )
+            if mapping is None:
+                continue
+            ordered = tuple(
+                int(mapping[index])
+                for index in range(representative.adjacency.shape[0])
+            )
+            return GraphMatch(
+                graph_type=self.types[type_id],
+                prototype_to_candidate=ordered,
+            )
         return None
+
+    def match(self, candidate: EgoCandidate) -> GraphType | None:
+        matched = self.match_with_mapping(candidate)
+        return matched.graph_type if matched is not None else None
 
     def representative(self, type_id: str) -> EgoCandidate:
         return self._representatives[type_id]
