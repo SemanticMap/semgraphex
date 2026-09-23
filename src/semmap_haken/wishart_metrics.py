@@ -24,7 +24,7 @@ class EgoCandidate:
     nodes: np.ndarray
     adjacency: sparse.csr_matrix
     relation_layers: dict[str, sparse.csr_matrix]
-    boundary_signature: tuple[tuple[str, str, int], ...] = ()
+    boundary_signature: tuple[tuple[int, str, str, int], ...] = ()
     node_types: tuple[str | None, ...] = ()
 
 
@@ -130,18 +130,21 @@ def extract_ego_candidates(
             continue
         sub = graph[nodes][:, nodes].tocsr()
         layers: dict[str, sparse.csr_matrix] = {}
-        boundary: list[tuple[str, str, int]] = []
+        boundary: list[tuple[int, str, str, int]] = []
         for name, matrix in typed.items():
             local = matrix[nodes][:, nodes].tocsr()
             if local.nnz:
                 layers[name] = local
-            internal = int(local.nnz)
-            external_out = int(matrix[nodes].nnz) - internal
-            external_in = int(typed_incoming[name][nodes].nnz) - internal
-            if external_out > 0:
-                boundary.append((name, "out", external_out))
-            if external_in > 0:
-                boundary.append((name, "in", external_in))
+            incoming = typed_incoming[name]
+            for local_node, global_node in enumerate(nodes):
+                internal_out = int(local.getrow(local_node).nnz)
+                internal_in = int(local.getcol(local_node).nnz)
+                external_out = int(matrix.getrow(int(global_node)).nnz) - internal_out
+                external_in = int(incoming.getrow(int(global_node)).nnz) - internal_in
+                if external_out > 0:
+                    boundary.append((local_node, name, "out", external_out))
+                if external_in > 0:
+                    boundary.append((local_node, name, "in", external_in))
         local_types = tuple(symbol_types.get(int(node)) for node in nodes)
         candidates.append(
             EgoCandidate(
