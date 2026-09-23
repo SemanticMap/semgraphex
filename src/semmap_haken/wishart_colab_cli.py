@@ -22,7 +22,7 @@ from .wishart_colab import (
     stage_from_drive,
     sync_tree,
 )
-from .wishart_config import load_wishart_options
+from .wishart_config import load_dictionary_options, load_wishart_options
 from .wishart_hierarchy import run_wishart_hierarchy
 
 
@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
 
     config = load_config(config_path)
     options = load_wishart_options(config_path)
+    dictionary_options = load_dictionary_options(config_path)
     drive_root = ensure_drive_root(args.drive_root)
     scratch_root = args.scratch_root.expanduser().resolve()
     layout = ColabLayout(drive_root=drive_root, scratch_root=scratch_root)
@@ -224,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         "execution_environment": "colab",
         "config": str(config_path),
         "metric": options.metric,
+        "dictionary_enabled": dictionary_options.enabled,
         "source": source_meta,
         "drive_source": str(source_on_drive),
         "drive_run": str(drive_run),
@@ -257,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
                 graph,
                 directed=resolved_config.graph.directed,
                 options=options,
+                dictionary_options=dictionary_options,
                 output_dir=local_run,
                 checkpoint_hook=checkpoint,
             )
