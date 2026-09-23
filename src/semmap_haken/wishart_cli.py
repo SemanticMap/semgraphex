@@ -14,7 +14,11 @@ from semmap_haken.wishart_config import load_wishart_options
 from semmap_haken.wishart_hierarchy import run_wishart_hierarchy
 
 
-def _load_or_build(config_path: Path, prepared: Path | None):
+def _load_or_build(
+    config_path: Path,
+    prepared: Path | None,
+    dataset_path: Path | None = None,
+):
     config = load_config(config_path)
     if prepared is not None:
         return config, load_prepared_graph(prepared), {
@@ -22,9 +26,10 @@ def _load_or_build(config_path: Path, prepared: Path | None):
             "prepared_graph_dir": str(prepared.resolve()),
         }
 
-    if config.dataset.path is None:
+    selected_dataset = dataset_path.resolve() if dataset_path is not None else config.dataset.path
+    if selected_dataset is None:
         raise SystemExit(
-            "dataset.path is required when --prepared is not supplied"
+            "dataset.path or dataset_path override is required when --prepared is not supplied"
         )
     if config.graph.weight_transform not in {"binary", "raw", "log1p"}:
         raise SystemExit(
@@ -37,7 +42,7 @@ def _load_or_build(config_path: Path, prepared: Path | None):
         min_weight=config.dataset.min_weight,
     )
     assertions = stream_assertions(
-        config.dataset.path,
+        selected_dataset,
         filters,
         invalid_mode="skip_invalid",
         report=report,
@@ -53,7 +58,7 @@ def _load_or_build(config_path: Path, prepared: Path | None):
     )
     return config, graph, {
         "mode": "raw_conceptnet",
-        "dataset_path": str(config.dataset.path),
+        "dataset_path": str(selected_dataset),
         "parse_report": report.to_dict(),
         "graph_report": graph.report,
     }
