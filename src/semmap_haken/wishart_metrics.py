@@ -24,6 +24,8 @@ class EgoCandidate:
     nodes: np.ndarray
     adjacency: sparse.csr_matrix
     relation_layers: dict[str, sparse.csr_matrix]
+    boundary_signature: tuple[tuple[int, str, str, int], ...] = ()
+    node_types: tuple[str | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,28 +102,60 @@ def extract_ego_candidates(
     max_ego_nodes: int,
     candidate_limit: int,
     seed: int,
+    symbol_types: Mapping[int, str] | None = None,
+    candidate_centers: Sequence[int] | None = None,
 ) -> tuple[EgoCandidate, ...]:
     graph = adjacency.tocsr()
     n = graph.shape[0]
     if n == 0:
         return ()
-    centers = np.arange(n, dtype=np.int64)
-    if n > candidate_limit:
-        rng = np.random.default_rng(seed)
-        centers = np.sort(rng.choice(centers, size=candidate_limit, replace=False))
+    if candidate_centers is None:
+        centers = np.arange(n, dtype=np.int64)
+        if n > candidate_limit:
+            rng = np.random.default_rng(seed)
+            centers = np.sort(rng.choice(centers, size=candidate_limit, replace=False))
+    else:
+        centers = np.asarray(candidate_centers, dtype=np.int64)
+        if centers.ndim != 1:
+            raise ValueError("candidate_centers must be one-dimensional")
+        if np.any(centers < 0) or np.any(centers >= n):
+            raise ValueError("candidate_centers contain out-of-range node indices")
     candidates: list[EgoCandidate] = []
     typed = {name: matrix.tocsr() for name, matrix in relation_layers.items()}
+    typed_incoming = {name: matrix.T.tocsr() for name, matrix in typed.items()}
+    symbol_types = symbol_types or {}
     for center in centers:
         nodes = _ego_nodes(graph, int(center), radius, max_ego_nodes)
         if nodes.size < 2:
             continue
         sub = graph[nodes][:, nodes].tocsr()
-        layers = {
-            name: matrix[nodes][:, nodes].tocsr()
-            for name, matrix in typed.items()
-            if matrix[nodes][:, nodes].nnz
-        }
-        candidates.append(EgoCandidate(int(center), nodes, sub, layers))
+        layers: dict[str, sparse.csr_matrix] = {}
+        boundary: list[tuple[int, str, str, int]] = []
+        for name, matrix in typed.items():
+            local = matrix[nodes][:, nodes].tocsr()
+            if local.nnz:
+                layers[name] = local
+            incoming = typed_incoming[name]
+            for local_node, global_node in enumerate(nodes):
+                internal_out = int(local.getrow(local_node).nnz)
+                internal_in = int(local.getcol(local_node).nnz)
+                external_out = int(matrix.getrow(int(global_node)).nnz) - internal_out
+                external_in = int(incoming.getrow(int(global_node)).nnz) - internal_in
+                if external_out > 0:
+                    boundary.append((local_node, name, "out", external_out))
+                if external_in > 0:
+                    boundary.append((local_node, name, "in", external_in))
+        local_types = tuple(symbol_types.get(int(node)) for node in nodes)
+        candidates.append(
+            EgoCandidate(
+                int(center),
+                nodes,
+                sub,
+                layers,
+                boundary_signature=tuple(sorted(boundary)),
+                node_types=local_types,
+            )
+        )
     return tuple(candidates)
 
 
@@ -150,7 +184,11 @@ def typed_wl_features(
     data: list[float] = []
     for candidate_index, candidate in enumerate(candidates):
         n = candidate.adjacency.shape[0]
-        labels = [f"d:{candidate.adjacency.getrow(i).nnz}" for i in range(n)]
+        node_types = candidate.node_types or tuple(None for _ in range(n))
+        labels = [
+            f"d:{candidate.adjacency.getrow(i).nnz}|t:{node_types[i] or 'ATOM'}"
+            for i in range(n)
+        ]
         # Repeated sparse column slicing is expensive on Colab. Build incoming
         # CSR layers once so both directions are O(local degree) per node.
         typed_layers = [

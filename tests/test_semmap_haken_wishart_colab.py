@@ -190,4 +190,23 @@ def test_colab_cli_end_to_end_with_fake_drive_and_tiny_conceptnet(
     assert (durable / "hierarchy.json").is_file()
     assert (durable / "COLAB_RUN.json").is_file()
     assert (durable / "DRIVE_CHECKPOINT.json").is_file()
+    assert (durable / "dictionary" / "graph_types.jsonl").is_file()
+    assert (durable / "dictionary" / "grammar.jsonl").is_file()
+    assert (durable / "dictionary" / "huffman.json").is_file()
+    assert (durable / "level_000" / "symbolic_nodes.jsonl").is_file()
     assert (durable / "COMPLETED").is_file()
+
+
+def test_graph_dictionary_colab_notebook_targets_current_branch() -> None:
+    notebook_path = Path("notebooks/05_wishart_graph_dictionary_colab.ipynb")
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    sources = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+    )
+    assert "feature/wishart-graph-dictionary" in sources
+    assert "configs/wishart_conceptnet_dictionary.yaml" in sources
+    assert "semmap-wishart-colab" in sources
+    assert "subprocess.run(command, check=True)" in sources
+    assert "dictionary/graph_types.jsonl" not in sources
+    assert "'dictionary' / 'graph_types.jsonl'" in sources

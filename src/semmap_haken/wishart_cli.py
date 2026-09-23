@@ -10,7 +10,7 @@ from pathlib import Path
 from semmap_haken.config import load_config
 from semmap_haken.conceptnet import AssertionFilters, ParseReport, stream_assertions
 from semmap_haken.graph_build import build_sparse_graph, load_prepared_graph
-from semmap_haken.wishart_config import load_wishart_options
+from semmap_haken.wishart_config import load_dictionary_options, load_wishart_options
 from semmap_haken.wishart_hierarchy import run_wishart_hierarchy
 
 
@@ -83,6 +83,7 @@ def main() -> int:
 
     config, graph, source = _load_or_build(args.config.resolve(), args.prepared)
     options = load_wishart_options(args.config.resolve())
+    dictionary_options = load_dictionary_options(args.config.resolve())
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = (
         args.output.resolve()
@@ -96,6 +97,7 @@ def main() -> int:
                 "source": source,
                 "config": str(args.config.resolve()),
                 "metric": options.metric,
+                "dictionary_enabled": dictionary_options.enabled,
             },
             indent=2,
             sort_keys=True,
@@ -108,6 +110,7 @@ def main() -> int:
         graph,
         directed=config.graph.directed,
         options=options,
+        dictionary_options=dictionary_options,
         output_dir=output,
     )
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
