@@ -349,6 +349,7 @@ def run_wishart_hierarchy(
             transport_rank=options.transport_rank,
             transport_max_candidates=options.transport_max_candidates,
             fgw_alpha=options.fgw_alpha,
+            relation_js_block_size=options.relation_js_block_size,
             seed=options.random_seed + 3001 * level,
         )
         clustering = wishart_cluster(
