@@ -280,13 +280,16 @@ def sync_tree(
             copied += 1
     else:
         dst.mkdir(parents=True, exist_ok=True)
+        completed_source = src / "COMPLETED"
         for item in sorted(src.rglob("*")):
             if item.is_symlink() or not item.is_file():
                 continue
             if item.name.endswith(".part"):
                 continue
             relative = item.relative_to(src)
-            if relative == Path("COMPLETED") and not final:
+            # The completion marker is always handled explicitly after every
+            # other file, never as part of lexical directory traversal.
+            if relative == Path("COMPLETED"):
                 continue
             target = dst / relative
             if _same_file(item, target, compare_mode):
@@ -294,6 +297,13 @@ def sync_tree(
                 continue
             copied_bytes += _atomic_copy(item, target)
             copied += 1
+        if final and completed_source.is_file():
+            completed_target = dst / "COMPLETED"
+            if _same_file(completed_source, completed_target, compare_mode):
+                skipped += 1
+            else:
+                copied_bytes += _atomic_copy(completed_source, completed_target)
+                copied += 1
 
     return SyncStats(
         source=str(src),
@@ -324,25 +334,28 @@ class DriveCheckpointSync:
         local_run_dir: Path,
         event: Mapping[str, object],
     ) -> None:
-        # The hierarchy's local "completed" event is still checkpoint-only.
-        # The Colab CLI emits "published" after COLAB_RUN.json is written, so
-        # the durable COMPLETED marker is guaranteed to be the last payload.
+        # The hierarchy's local "completed" event remains checkpoint-only.
+        # The Colab CLI emits "published" only after COLAB_RUN.json exists.
         final = str(event.get("stage")) == "published"
+
+        # Phase 1: synchronize every payload except COMPLETED.
         stats = sync_tree(
             local_run_dir,
             self.drive_run_dir,
             compare_mode=self.compare_mode,
-            final=final,
+            final=False,
         )
+
+        # Phase 2: persist checkpoint metadata before the authoritative marker.
         checkpoint = {
             "event": dict(event),
-            "sync": stats.to_dict(),
+            "sync": {**stats.to_dict(), "final": final},
             "updated_at_unix": time.time(),
+            "completion_marker_policy": "written_after_checkpoint_when_stage_is_published",
         }
-        # Write checkpoint metadata last so it describes a fully copied batch.
-        checkpoint_path = self.drive_run_dir / "DRIVE_CHECKPOINT.json"
+        local_checkpoint = local_run_dir / "DRIVE_CHECKPOINT.json"
         with tempfile.NamedTemporaryFile(
-            dir=checkpoint_path.parent,
+            dir=local_run_dir,
             prefix=".DRIVE_CHECKPOINT.",
             suffix=".part",
             mode="w",
@@ -353,9 +366,19 @@ class DriveCheckpointSync:
             json.dump(checkpoint, temporary, indent=2, sort_keys=True)
             temporary.write("\n")
         try:
-            os.replace(temp_path, checkpoint_path)
+            os.replace(temp_path, local_checkpoint)
         finally:
             temp_path.unlink(missing_ok=True)
+        _atomic_copy(local_checkpoint, self.drive_run_dir / "DRIVE_CHECKPOINT.json")
+
+        # Phase 3: publish COMPLETED as the final durable write.
+        if final:
+            completed = local_run_dir / "COMPLETED"
+            if not completed.is_file():
+                raise FileNotFoundError(
+                    f"cannot publish completed run without local marker: {completed}"
+                )
+            _atomic_copy(completed, self.drive_run_dir / "COMPLETED")
 
 
 def resolve_drive_path(drive_root: str | Path, value: str | Path) -> Path:
