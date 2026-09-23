@@ -102,17 +102,26 @@ def test_drive_checkpoint_does_not_publish_completed_until_final(tmp_path: Path)
     assert (drive / "COMPLETED").is_file()
 
 
-def test_drive_checkpoint_hook_writes_event_metadata(tmp_path: Path) -> None:
+def test_drive_checkpoint_hook_writes_event_metadata_and_publishes_completed_last(
+    tmp_path: Path,
+) -> None:
     local = tmp_path / "run"
     drive = tmp_path / "durable"
     local.mkdir()
     (local / "input.json").write_text("{}", encoding="utf-8")
+    (local / "COMPLETED").write_text("complete\n", encoding="utf-8")
     hook = DriveCheckpointSync(drive_run_dir=drive)
-    hook(local, {"stage": "level", "level": 0})
+
+    hook(local, {"stage": "completed", "level": 0})
     payload = json.loads((drive / "DRIVE_CHECKPOINT.json").read_text(encoding="utf-8"))
-    assert payload["event"]["stage"] == "level"
-    assert payload["event"]["level"] == 0
+    assert payload["event"]["stage"] == "completed"
     assert (drive / "input.json").is_file()
+    assert not (drive / "COMPLETED").exists()
+
+    hook(local, {"stage": "published", "level": 0})
+    payload = json.loads((drive / "DRIVE_CHECKPOINT.json").read_text(encoding="utf-8"))
+    assert payload["event"]["stage"] == "published"
+    assert (drive / "COMPLETED").is_file()
 
 
 def test_stage_completed_prepared_tree_to_scratch(tmp_path: Path) -> None:
