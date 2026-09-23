@@ -103,15 +103,23 @@ def extract_ego_candidates(
     candidate_limit: int,
     seed: int,
     symbol_types: Mapping[int, str] | None = None,
+    candidate_centers: Sequence[int] | None = None,
 ) -> tuple[EgoCandidate, ...]:
     graph = adjacency.tocsr()
     n = graph.shape[0]
     if n == 0:
         return ()
-    centers = np.arange(n, dtype=np.int64)
-    if n > candidate_limit:
-        rng = np.random.default_rng(seed)
-        centers = np.sort(rng.choice(centers, size=candidate_limit, replace=False))
+    if candidate_centers is None:
+        centers = np.arange(n, dtype=np.int64)
+        if n > candidate_limit:
+            rng = np.random.default_rng(seed)
+            centers = np.sort(rng.choice(centers, size=candidate_limit, replace=False))
+    else:
+        centers = np.asarray(candidate_centers, dtype=np.int64)
+        if centers.ndim != 1:
+            raise ValueError("candidate_centers must be one-dimensional")
+        if np.any(centers < 0) or np.any(centers >= n):
+            raise ValueError("candidate_centers contain out-of-range node indices")
     candidates: list[EgoCandidate] = []
     typed = {name: matrix.tocsr() for name, matrix in relation_layers.items()}
     typed_incoming = {name: matrix.T.tocsr() for name, matrix in typed.items()}
