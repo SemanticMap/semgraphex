@@ -33,6 +33,9 @@ class WishartOptions:
     k_neighbors: int = 12
     significance: float = 0.7
     min_cluster_size: int = 3
+    min_cluster_mass: float = 3.0
+    clustering_domain: Literal["candidates", "canonical_types"] = "canonical_types"
+    density_weight: Literal["uniform", "occurrence_frequency"] = "occurrence_frequency"
     min_figure_nodes: int = 2
     max_figures_per_level: int = 1000
     max_levels: int = 6
@@ -73,6 +76,9 @@ class WishartOptions:
             k_neighbors=int(raw.get("k_neighbors", 12)),
             significance=float(raw.get("significance", 0.7)),
             min_cluster_size=int(raw.get("min_cluster_size", 3)),
+            min_cluster_mass=float(raw.get("min_cluster_mass", 3.0)),
+            clustering_domain=str(raw.get("clustering_domain", "canonical_types")),
+            density_weight=str(raw.get("density_weight", "occurrence_frequency")),
             min_figure_nodes=int(raw.get("min_figure_nodes", 2)),
             max_figures_per_level=int(raw.get("max_figures_per_level", 1000)),
             max_levels=int(raw.get("max_levels", 6)),
@@ -132,6 +138,16 @@ class WishartOptions:
             raise ValueError("wishart.aggregation must be sum or mean_density")
         if self.significance < 0:
             raise ValueError("wishart.significance must be non-negative")
+        if self.min_cluster_mass <= 0:
+            raise ValueError("wishart.min_cluster_mass must be positive")
+        if self.clustering_domain not in {"candidates", "canonical_types"}:
+            raise ValueError(
+                "wishart.clustering_domain must be candidates or canonical_types"
+            )
+        if self.density_weight not in {"uniform", "occurrence_frequency"}:
+            raise ValueError(
+                "wishart.density_weight must be uniform or occurrence_frequency"
+            )
         if not 0 <= self.fgw_alpha <= 1:
             raise ValueError("wishart.fgw_alpha must be in [0, 1]")
         if self.graphlet_size not in {3, 4}:
@@ -147,3 +163,70 @@ def load_wishart_options(path: str | Path) -> WishartOptions:
     if not isinstance(raw, Mapping):
         raise ValueError("wishart must be a mapping")
     return WishartOptions.from_mapping(raw)
+
+
+@dataclass(frozen=True)
+class DictionaryOptions:
+    """Persistent graph-dictionary and MDL selection options."""
+
+    enabled: bool = True
+    boundary_sensitive: bool = True
+    frequency_scan: Literal["full", "discovery"] = "full"
+    min_support: int = 3
+    min_mdl_gain_bits: float = 0.0
+    local_improvement: bool = True
+    family_match_jaccard: float = 0.5
+    max_dictionary_size: int = 20000
+    huffman: bool = True
+    stop_on_nonpositive_mdl: bool = True
+    no_positive_mdl_levels: int = 2
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "DictionaryOptions":
+        selection = raw.get("selection", {})
+        if not isinstance(selection, Mapping):
+            raise ValueError("dictionary.selection must be a mapping")
+        limits = raw.get("limits", {})
+        if not isinstance(limits, Mapping):
+            raise ValueError("dictionary.limits must be a mapping")
+        stop = raw.get("stop", {})
+        if not isinstance(stop, Mapping):
+            raise ValueError("dictionary.stop must be a mapping")
+        result = cls(
+            enabled=bool(raw.get("enabled", True)),
+            boundary_sensitive=bool(raw.get("boundary_sensitive", True)),
+            frequency_scan=str(raw.get("frequency_scan", "full")),
+            min_support=int(raw.get("min_support", 3)),
+            min_mdl_gain_bits=float(selection.get("min_gain_bits", 0.0)),
+            local_improvement=bool(selection.get("local_improvement", True)),
+            family_match_jaccard=float(raw.get("family_match_jaccard", 0.5)),
+            max_dictionary_size=int(limits.get("max_dictionary_size", 20000)),
+            huffman=bool(raw.get("huffman", True)),
+            stop_on_nonpositive_mdl=bool(stop.get("on_nonpositive_mdl", True)),
+            no_positive_mdl_levels=int(stop.get("no_positive_mdl_levels", 2)),
+        )
+        result.validate()
+        return result
+
+    def validate(self) -> None:
+        if self.frequency_scan not in {"full", "discovery"}:
+            raise ValueError("dictionary.frequency_scan must be full or discovery")
+        if self.min_support <= 0:
+            raise ValueError("dictionary.min_support must be positive")
+        if self.max_dictionary_size <= 0:
+            raise ValueError("dictionary.max_dictionary_size must be positive")
+        if not 0.0 <= self.family_match_jaccard <= 1.0:
+            raise ValueError("dictionary.family_match_jaccard must be in [0, 1]")
+        if self.no_positive_mdl_levels <= 0:
+            raise ValueError("dictionary.stop.no_positive_mdl_levels must be positive")
+
+
+def load_dictionary_options(path: str | Path) -> DictionaryOptions:
+    source = Path(path)
+    document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    if not isinstance(document, Mapping):
+        raise ValueError("config must be a mapping")
+    raw = document.get("dictionary", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("dictionary must be a mapping")
+    return DictionaryOptions.from_mapping(raw)
