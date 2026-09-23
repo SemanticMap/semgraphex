@@ -49,6 +49,7 @@ notebook = [
 [project.scripts]
 semmap-haken = "semmap_haken.cli:main"
 semmap-wishart = "semmap_haken.wishart_cli:main"
+semmap-wishart-colab = "semmap_haken.wishart_colab_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
