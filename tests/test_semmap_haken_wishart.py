@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 from scipy import sparse
 from sklearn.neighbors import NearestNeighbors
@@ -247,3 +250,94 @@ def test_graph_dictionary_returns_prototype_to_occurrence_mapping() -> None:
     )
     assert set(fine_nodes) == {20, 21, 22}
     assert len(fine_nodes) == 3
+
+
+def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
+    tmp_path: Path,
+) -> None:
+    from semmap_haken.graph_build import PreparedGraph
+    from semmap_haken.wishart_config import DictionaryOptions, WishartOptions
+    from semmap_haken.wishart_hierarchy import run_wishart_hierarchy
+
+    n = 8
+    rows: list[int] = []
+    cols: list[int] = []
+    selected_edges: list[dict[str, object]] = []
+    node_ids = tuple(f"/c/en/n{i}" for i in range(n))
+    for i in range(n - 1):
+        rows.extend((i, i + 1))
+        cols.extend((i + 1, i))
+        selected_edges.append(
+            {
+                "start_uri": node_ids[i],
+                "end_uri": node_ids[i + 1],
+                "relation": "RelatedTo",
+                "aggregate_contribution": 1.0,
+            }
+        )
+    adjacency = sparse.csr_matrix(
+        (np.ones(len(rows)), (rows, cols)),
+        shape=(n, n),
+        dtype=float,
+    )
+    graph = PreparedGraph(
+        adjacency=adjacency,
+        node_ids=node_ids,
+        report={"node_count": n},
+        selected_edges=tuple(selected_edges),
+    )
+    options = WishartOptions(
+        radius=1,
+        max_ego_nodes=3,
+        candidate_limit=n,
+        k_neighbors=2,
+        min_cluster_size=1,
+        min_cluster_mass=1.0,
+        min_figure_nodes=2,
+        max_figures_per_level=10,
+        max_levels=1,
+        min_graph_nodes=2,
+        slow_modes=2,
+        mfpt_pairs=2,
+        mfpt_walks_per_pair=1,
+        mfpt_max_steps=20,
+        betweenness_samples=4,
+        clustering_samples=4,
+        distance_samples=4,
+        random_seed=7,
+    )
+    dictionary_options = DictionaryOptions(
+        boundary_sensitive=False,
+        frequency_scan="full",
+        frequency_scan_batch_size=3,
+        min_support=2,
+    )
+
+    output = tmp_path / "dictionary-run"
+    summary = run_wishart_hierarchy(
+        graph,
+        directed=False,
+        options=options,
+        dictionary_options=dictionary_options,
+        output_dir=output,
+    )
+
+    assert summary.final_nodes < n
+    assert (output / "dictionary" / "graph_types.jsonl").is_file()
+    assert (output / "dictionary" / "grammar.jsonl").is_file()
+    assert (output / "level_001" / "symbolic_nodes.jsonl").is_file()
+    transition = output / "transition_000_001"
+    assert (transition / "dictionary_metrics.json").is_file()
+    metrics = json.loads(
+        (transition / "dictionary_metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["scanned_occurrences"] >= n - 2
+    assert metrics["selected_occurrences"] > 0
+    occurrences = [
+        json.loads(line)
+        for line in (transition / "figure_occurrences.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert occurrences
+    assert all(item["prototype_to_fine_nodes"] for item in occurrences)
