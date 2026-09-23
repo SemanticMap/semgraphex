@@ -93,6 +93,23 @@ def mount_google_drive(
     return target
 
 
+def ensure_drive_root(path: str | Path) -> Path:
+    """Validate a Colab Drive mount before creating a project directory."""
+    root = Path(path).expanduser().resolve()
+    colab_mount = Path("/content/drive")
+    try:
+        under_colab_mount = root.is_relative_to(colab_mount)
+    except AttributeError:  # pragma: no cover - Python >= 3.10 in this project.
+        under_colab_mount = str(root).startswith(str(colab_mount))
+    if under_colab_mount and not (colab_mount / "MyDrive").is_dir():
+        raise RuntimeError(
+            "Google Drive does not appear mounted at /content/drive. "
+            "Run drive.mount('/content/drive') in a Colab cell first."
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _available_memory_bytes() -> int:
     try:
         pages = os.sysconf("SC_AVPHYS_PAGES")
@@ -307,7 +324,10 @@ class DriveCheckpointSync:
         local_run_dir: Path,
         event: Mapping[str, object],
     ) -> None:
-        final = str(event.get("stage")) == "completed"
+        # The hierarchy's local "completed" event is still checkpoint-only.
+        # The Colab CLI emits "published" after COLAB_RUN.json is written, so
+        # the durable COMPLETED marker is guaranteed to be the last payload.
+        final = str(event.get("stage")) == "published"
         stats = sync_tree(
             local_run_dir,
             self.drive_run_dir,
