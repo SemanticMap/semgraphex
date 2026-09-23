@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 from scipy import sparse
@@ -285,6 +286,7 @@ def run_wishart_hierarchy(
     directed: bool,
     options: WishartOptions,
     output_dir: str | Path,
+    checkpoint_hook: Callable[[Path, Mapping[str, object]], None] | None = None,
 ) -> WishartRunSummary:
     """Discover structural modes, contract non-overlapping instances, and repeat."""
     started = time.perf_counter()
@@ -318,6 +320,16 @@ def run_wishart_hierarchy(
             "adjacency_nnz": int(current.nnz),
             "dynamic_metrics": dynamic_summary,
         })
+        if checkpoint_hook is not None:
+            checkpoint_hook(
+                destination,
+                {
+                    "stage": "level",
+                    "level": level,
+                    "node_count": int(current.shape[0]),
+                    "adjacency_nnz": int(current.nnz),
+                },
+            )
 
         if level >= options.max_levels:
             stop_reason = "max_levels"
@@ -391,6 +403,17 @@ def run_wishart_hierarchy(
             cluster_rows=cluster_rows,
             memberships=memberships,
         )
+        if checkpoint_hook is not None:
+            checkpoint_hook(
+                destination,
+                {
+                    "stage": "transition",
+                    "source_level": level,
+                    "target_level": level + 1,
+                    "wishart_clusters": clustering.cluster_count,
+                    "figure_occurrences": len(occurrences),
+                },
+            )
 
         old_count = current.shape[0]
         current = _contract_matrix(
@@ -412,6 +435,10 @@ def run_wishart_hierarchy(
             "wishart_clusters": clustering.cluster_count,
             "figure_occurrences": len(occurrences),
         })
+        # Release candidate-local objects before the next scale.  This is
+        # especially helpful in Colab where the process shares a tight RAM cap.
+        del candidates, neighbors, clustering, occurrences, plan, cluster_rows
+        gc.collect()
 
     summary = WishartRunSummary(
         metric=options.metric,
@@ -432,4 +459,14 @@ def run_wishart_hierarchy(
         encoding="utf-8",
     )
     (destination / "COMPLETED").write_text("complete\n", encoding="utf-8")
+    if checkpoint_hook is not None:
+        checkpoint_hook(
+            destination,
+            {
+                "stage": "completed",
+                "levels": len(level_summaries),
+                "stop_reason": stop_reason,
+                "final_nodes": int(current.shape[0]),
+            },
+        )
     return summary
