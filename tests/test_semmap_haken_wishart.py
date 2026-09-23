@@ -100,6 +100,7 @@ def test_partition_contracts_each_figure_instance_separately():
             candidate_index=0,
             center=0,
             nodes=(0, 1),
+            prototype_to_fine_nodes=(0, 1),
             kth_radius=0.1,
             raw_bits=20.0,
             encoded_bits=8.0,
@@ -112,6 +113,7 @@ def test_partition_contracts_each_figure_instance_separately():
             candidate_index=4,
             center=4,
             nodes=(4, 5),
+            prototype_to_fine_nodes=(4, 5),
             kth_radius=0.1,
             raw_bits=20.0,
             encoded_bits=8.0,
@@ -134,7 +136,7 @@ def test_graph_dictionary_deduplicates_isomorphic_typed_candidates() -> None:
         np.array([10, 11, 12]),
         adjacency,
         {"IsA": layer},
-        boundary_signature=(("IsA", "out", 2),),
+        boundary_signature=((1, "IsA", "out", 2),),
         node_types=(None, None, None),
     )
     permutation = np.array([2, 1, 0])
@@ -216,3 +218,32 @@ def test_weighted_wishart_can_filter_by_cluster_occurrence_mass() -> None:
     )
     assert result.cluster_count == 1
     assert result.cluster_masses == {0: 20.0}
+
+
+def test_graph_dictionary_returns_prototype_to_occurrence_mapping() -> None:
+    adjacency = _layer([(0, 1), (1, 0), (1, 2), (2, 1)])
+    original = EgoCandidate(
+        0,
+        np.array([10, 11, 12]),
+        adjacency,
+        {"IsA": adjacency},
+        node_types=(None, None, None),
+    )
+    permutation = np.array([2, 1, 0])
+    permuted = EgoCandidate(
+        1,
+        np.array([20, 21, 22]),
+        adjacency[permutation][:, permutation].tocsr(),
+        {"IsA": adjacency[permutation][:, permutation].tocsr()},
+        node_types=(None, None, None),
+    )
+    dictionary = GraphDictionary(boundary_sensitive=False)
+    graph_type = dictionary.resolve_or_create(original, level=0)
+    matched = dictionary.match_with_mapping(permuted)
+    assert matched is not None
+    assert matched.graph_type.type_id == graph_type.type_id
+    fine_nodes = tuple(
+        int(permuted.nodes[index]) for index in matched.prototype_to_candidate
+    )
+    assert set(fine_nodes) == {20, 21, 22}
+    assert len(fine_nodes) == 3
