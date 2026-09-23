@@ -6,6 +6,9 @@ on:
       - 'src/semmap_haken/wishart_*.py'
       - 'scripts/run_wishart_coarsening.py'
       - 'tests/test_semmap_haken_wishart.py'
+      - 'tests/test_semmap_haken_wishart_colab.py'
+      - 'notebooks/04_wishart_colab_drive.ipynb'
+      - 'configs/wishart_conceptnet_colab.yaml'
       - 'pyproject.toml'
       - 'requirements/constraints.txt'
   workflow_dispatch:
@@ -25,4 +28,6 @@ jobs:
           pip install -c requirements/constraints.txt -e '.[dev,wishart]'
       - name: Run Wishart unit tests
         run: |
-          pytest -q tests/test_semmap_haken_wishart.py
+          pytest -q \
+            tests/test_semmap_haken_wishart.py \
+            tests/test_semmap_haken_wishart_colab.py
