@@ -136,7 +136,7 @@ def test_graph_dictionary_deduplicates_isomorphic_typed_candidates() -> None:
         np.array([10, 11, 12]),
         adjacency,
         {"IsA": layer},
-        boundary_signature=((1, "IsA", "out", 2),),
+        boundary_signature=((0, "IsA", "out", 2),),
         node_types=(None, None, None),
     )
     permutation = np.array([2, 1, 0])
@@ -145,7 +145,7 @@ def test_graph_dictionary_deduplicates_isomorphic_typed_candidates() -> None:
         np.array([20, 21, 22]),
         adjacency[permutation][:, permutation].tocsr(),
         {"IsA": layer[permutation][:, permutation].tocsr()},
-        boundary_signature=(("IsA", "out", 2),),
+        boundary_signature=((2, "IsA", "out", 2),),
         node_types=(None, None, None),
     )
     dictionary = GraphDictionary(boundary_sensitive=True)
