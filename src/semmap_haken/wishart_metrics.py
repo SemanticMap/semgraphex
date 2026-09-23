@@ -488,7 +488,7 @@ def build_neighbor_graph(
     transport_rank: int,
     transport_max_candidates: int,
     fgw_alpha: float,
-    relation_js_block_size: int = 128,
+    relation_js_block_size: int,
     seed: int,
 ) -> NeighborGraph:
     if len(candidates) <= 1:
