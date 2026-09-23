@@ -32,6 +32,7 @@ class WishartClustering:
     cluster_peaks: dict[int, float]
     completed_clusters: tuple[int, ...]
     cluster_sizes: dict[int, int]
+    cluster_masses: dict[int, float]
 
     @property
     def cluster_count(self) -> int:
@@ -44,6 +45,8 @@ def wishart_cluster(
     *,
     significance: float,
     min_cluster_size: int = 2,
+    sample_weights: np.ndarray | None = None,
+    min_cluster_mass: float | None = None,
 ) -> WishartClustering:
     """Cluster observations using a k-NN Wishart density-mode sweep.
 
@@ -63,15 +66,26 @@ def wishart_cluster(
             cluster_peaks={},
             completed_clusters=(),
             cluster_sizes={},
+            cluster_masses={},
         )
     if np.any(distances < 0) or not np.all(np.isfinite(distances)):
         raise ValueError("neighbor distances must be finite and non-negative")
     if significance < 0:
         raise ValueError("significance must be non-negative")
+    if sample_weights is None:
+        weights = np.ones(n, dtype=np.float64)
+    else:
+        weights = np.asarray(sample_weights, dtype=np.float64)
+        if weights.shape != (n,):
+            raise ValueError("sample_weights must have shape (n,)")
+        if np.any(weights <= 0) or not np.all(np.isfinite(weights)):
+            raise ValueError("sample_weights must be finite and positive")
+    if min_cluster_mass is not None and min_cluster_mass <= 0:
+        raise ValueError("min_cluster_mass must be positive when provided")
 
     kth = distances[:, -1]
     eps = np.finfo(np.float64).eps
-    density = -np.log(np.maximum(kth, eps))
+    density = np.log(weights) - np.log(np.maximum(kth, eps))
     order = np.lexsort((np.arange(n, dtype=np.int64), kth))
 
     labels = np.full(n, UNASSIGNED, dtype=np.int64)
@@ -154,14 +168,20 @@ def wishart_cluster(
                     merge_clusters(active, point)
         processed[point] = True
 
-    # Tiny modes do not constitute compression-figure types.
+    # Tiny or low-mass modes do not constitute compression-figure families.
     final_sizes: dict[int, int] = {}
+    final_masses: dict[int, float] = {}
     for cid in sorted(set(int(x) for x in labels if x >= 0)):
-        size = int(np.sum(labels == cid))
-        if size < min_cluster_size:
-            labels[labels == cid] = NOISE
+        mask = labels == cid
+        size = int(np.sum(mask))
+        mass = float(weights[mask].sum())
+        if size < min_cluster_size or (
+            min_cluster_mass is not None and mass < min_cluster_mass
+        ):
+            labels[mask] = NOISE
         else:
             final_sizes[cid] = size
+            final_masses[cid] = mass
 
     # Normalize surviving labels for stable artifact comparison.
     remap = {old: new for new, old in enumerate(sorted(final_sizes))}
@@ -173,6 +193,9 @@ def wishart_cluster(
     normalized_sizes = {
         remap[cid]: int(np.sum(normalized == remap[cid])) for cid in remap
     }
+    normalized_masses = {
+        remap[cid]: float(final_masses[cid]) for cid in remap
+    }
     normalized_completed = tuple(sorted(remap[cid] for cid in completed if cid in remap))
     return WishartClustering(
         labels=normalized,
@@ -181,4 +204,5 @@ def wishart_cluster(
         cluster_peaks=normalized_peaks,
         completed_clusters=normalized_completed,
         cluster_sizes=normalized_sizes,
+        cluster_masses=normalized_masses,
     )
