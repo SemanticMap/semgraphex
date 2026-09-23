@@ -14,6 +14,7 @@ from .wishart_cli import _load_or_build
 from .wishart_colab import (
     ColabLayout,
     DriveCheckpointSync,
+    ensure_drive_root,
     limit_native_threads,
     mount_google_drive,
     preflight_colab_storage,
@@ -132,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
 
     config = load_config(config_path)
     options = load_wishart_options(config_path)
-    drive_root = args.drive_root.expanduser().resolve()
+    drive_root = ensure_drive_root(args.drive_root)
     scratch_root = args.scratch_root.expanduser().resolve()
     layout = ColabLayout(drive_root=drive_root, scratch_root=scratch_root)
     layout.scratch_inputs.mkdir(parents=True, exist_ok=True)
@@ -306,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint(
         local_run,
         {
-            "stage": "completed",
+            "stage": "published",
             "levels": summary.levels,
             "final_nodes": summary.final_nodes,
             "stop_reason": summary.stop_reason,
