@@ -44,6 +44,7 @@ class WishartOptions:
     feature_dim: int = 512
     graphlet_size: int = 3
     graphlet_samples: int = 256
+    relation_js_block_size: int = 128
 
     transport_rank: int = 24
     transport_max_candidates: int = 256
@@ -82,6 +83,7 @@ class WishartOptions:
             feature_dim=int(raw.get("feature_dim", 512)),
             graphlet_size=int(raw.get("graphlet_size", 3)),
             graphlet_samples=int(raw.get("graphlet_samples", 256)),
+            relation_js_block_size=int(raw.get("relation_js_block_size", 128)),
             transport_rank=int(raw.get("transport_rank", 24)),
             transport_max_candidates=int(raw.get("transport_max_candidates", 256)),
             fgw_alpha=float(raw.get("fgw_alpha", 0.5)),
@@ -112,6 +114,7 @@ class WishartOptions:
             "feature_dim": self.feature_dim,
             "graphlet_size": self.graphlet_size,
             "graphlet_samples": self.graphlet_samples,
+            "relation_js_block_size": self.relation_js_block_size,
             "transport_rank": self.transport_rank,
             "transport_max_candidates": self.transport_max_candidates,
             "slow_modes": self.slow_modes,
