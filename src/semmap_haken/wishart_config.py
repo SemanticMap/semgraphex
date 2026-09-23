@@ -179,8 +179,6 @@ class DictionaryOptions:
     family_match_jaccard: float = 0.5
     max_dictionary_size: int = 20000
     huffman: bool = True
-    stop_on_nonpositive_mdl: bool = True
-    no_positive_mdl_levels: int = 2
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "DictionaryOptions":
@@ -190,9 +188,6 @@ class DictionaryOptions:
         limits = raw.get("limits", {})
         if not isinstance(limits, Mapping):
             raise ValueError("dictionary.limits must be a mapping")
-        stop = raw.get("stop", {})
-        if not isinstance(stop, Mapping):
-            raise ValueError("dictionary.stop must be a mapping")
         result = cls(
             enabled=bool(raw.get("enabled", True)),
             boundary_sensitive=bool(raw.get("boundary_sensitive", True)),
@@ -204,8 +199,6 @@ class DictionaryOptions:
             family_match_jaccard=float(raw.get("family_match_jaccard", 0.5)),
             max_dictionary_size=int(limits.get("max_dictionary_size", 20000)),
             huffman=bool(raw.get("huffman", True)),
-            stop_on_nonpositive_mdl=bool(stop.get("on_nonpositive_mdl", True)),
-            no_positive_mdl_levels=int(stop.get("no_positive_mdl_levels", 2)),
         )
         result.validate()
         return result
@@ -221,8 +214,6 @@ class DictionaryOptions:
             raise ValueError("dictionary.max_dictionary_size must be positive")
         if not 0.0 <= self.family_match_jaccard <= 1.0:
             raise ValueError("dictionary.family_match_jaccard must be in [0, 1]")
-        if self.no_positive_mdl_levels <= 0:
-            raise ValueError("dictionary.stop.no_positive_mdl_levels must be positive")
 
 
 def load_dictionary_options(path: str | Path) -> DictionaryOptions:
