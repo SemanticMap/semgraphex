@@ -204,10 +204,14 @@ def test_graph_dictionary_colab_notebook_targets_current_branch() -> None:
         "".join(cell.get("source", []))
         for cell in notebook["cells"]
     )
-    assert "feature/wishart-colab-gpu-resume" in sources
+    assert "feature/wishart-gpu-first-parallel" in sources
     assert "configs/wishart_conceptnet_dictionary.yaml" in sources
     assert "--config-drive" in sources
     assert "--resume" in sources
+    assert "requirements/constraints-colab.txt" in sources
+    assert ".[wishart,notebook,gpu]" in sources
+    assert "HAS_GPU" in sources
+    assert "BASE_RUN_NAME" in sources
     assert "MyDrive/SemanticMap/colab/wishart" in sources
     assert "semmap-wishart-colab" in sources
     assert "subprocess.run(command, check=True)" in sources
