@@ -425,3 +425,86 @@ def test_sampled_brandes_spawn_matches_serial_bit_for_bit() -> None:
         topology, sample_count=6, rng=np.random.default_rng(47), workers=2,
     )
     np.testing.assert_array_equal(serial, process_pool)
+
+
+def test_auto_gpu_knn_prefers_cuda_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from semmap_haken import wishart_gpu
+    from semmap_haken.wishart_metrics import _knn_from_features
+
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        wishart_gpu, "resolve_device",
+        lambda requested: "cuda",
+    )
+
+    def fake_cuda(features, *, k: int, query_batch_size: int):
+        observed.update(k=k, batch=query_batch_size)
+        return (
+            np.array([[1], [0], [0]], dtype=np.int64),
+            np.array([[0.5], [0.5], [1.0]], dtype=np.float64),
+            {"backend": "torch_cuda", "device": "cuda"},
+        )
+
+    monkeypatch.setattr(wishart_gpu, "cuda_cosine_neighbors", fake_cuda)
+    result = _knn_from_features(
+        np.eye(3), k=1, metric="cosine",
+        device="auto", gpu_batch_size=7, min_gpu_types=2,
+    )
+    assert result.metadata["backend"] == "torch_cuda"
+    assert observed == {"k": 1, "batch": 7}
+
+
+def test_cuda_oom_fallback_is_visible_and_recomputes_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from semmap_haken import wishart_gpu
+    from semmap_haken.wishart_metrics import _knn_from_features
+
+    monkeypatch.setattr(
+        wishart_gpu, "resolve_device", lambda requested: "cuda",
+    )
+
+    def fail_cuda(features, *, k: int, query_batch_size: int):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(wishart_gpu, "cuda_cosine_neighbors", fail_cuda)
+    with pytest.warns(RuntimeWarning, match="out of GPU memory"):
+        result = _knn_from_features(
+            np.eye(3), k=1, metric="cosine",
+            device="auto", gpu_batch_size=7, min_gpu_types=2,
+        )
+    assert result.metadata["backend"] == "sklearn_cpu"
+    assert result.metadata["fallback_reason"] == "cuda_out_of_memory"
+
+
+def test_complete_cpu_experiment_matches_across_worker_counts(
+    tmp_path: Path,
+) -> None:
+    from semmap_haken.wishart_config import ColabExecutionOptions
+    from semmap_haken.wishart_hierarchy import run_wishart_hierarchy
+
+    outputs = []
+    for workers in (1, 2):
+        target = tmp_path / f"workers-{workers}"
+        run_wishart_hierarchy(
+            _tiny_graph(), directed=False, options=_options(),
+            dictionary_options=DictionaryOptions(
+                boundary_sensitive=False, min_support=2,
+                frequency_scan_batch_size=3,
+            ),
+            execution_options=ColabExecutionOptions(
+                device="cpu", cpu_workers=workers,
+            ),
+            output_dir=target,
+        )
+        outputs.append(target)
+
+    names = ("dictionary/graph_types.jsonl", "dictionary/grammar.jsonl")
+    for name in names:
+        assert (outputs[0] / name).read_bytes() == (outputs[1] / name).read_bytes()
+    first = sorted(outputs[0].glob("transition_*/figure_occurrences.jsonl"))
+    second = sorted(outputs[1].glob("transition_*/figure_occurrences.jsonl"))
+    assert [p.name for p in first] == [p.name for p in second]
+    assert [p.read_bytes() for p in first] == [p.read_bytes() for p in second]
