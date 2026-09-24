@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import shutil
+import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +26,15 @@ from .wishart_colab import (
     stage_from_drive,
     sync_tree,
 )
-from .wishart_config import load_dictionary_options, load_wishart_options
+from .wishart_config import (
+    load_colab_options,
+    load_dictionary_options,
+    load_wishart_options,
+)
+from .wishart_gpu import resolve_device
+from .wishart_resume import (
+    config_sha256, load_latest_checkpoint, truncate_after_checkpoint,
+)
 from .wishart_hierarchy import run_wishart_hierarchy
 
 
@@ -54,11 +66,18 @@ def build_parser() -> argparse.ArgumentParser:
             "staging inputs from and checkpointing results to Google Drive."
         ),
     )
-    parser.add_argument("--config", required=True, type=Path)
+    config_group = parser.add_mutually_exclusive_group(required=True)
+    config_group.add_argument(
+        "--config", type=Path, help="Local YAML configuration path.",
+    )
+    config_group.add_argument(
+        "--config-drive", type=Path,
+        help="YAML stored under --drive-root; staged to fast local scratch.",
+    )
     parser.add_argument(
         "--drive-root",
         type=Path,
-        default=Path("/content/drive/MyDrive/SemanticMap/semgraphex"),
+        default=Path("/content/drive/MyDrive/SemanticMap/colab/wishart"),
         help="Durable project root on mounted Google Drive.",
     )
     parser.add_argument(
@@ -97,6 +116,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--force-remount", action="store_true")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Restore latest verified checkpoint from this named Drive run.",
+    )
+    parser.add_argument(
+        "--device", choices=("auto", "cpu", "cuda"),
+        help="Override colab.device from the YAML. CUDA applies to feature kNN.",
+    )
+    parser.add_argument(
+        "--cpu-workers", type=int,
+        help="Override bounded parallel ego-extraction workers.",
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
