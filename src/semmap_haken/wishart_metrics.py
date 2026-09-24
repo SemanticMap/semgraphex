@@ -355,15 +355,75 @@ def graphlet_features(
     return normalize(matrix, norm="l2", copy=False)
 
 
-def _knn_from_features(features: sparse.spmatrix | np.ndarray, k: int, metric: str) -> NeighborGraph:
+def _knn_from_features(
+    features: sparse.spmatrix | np.ndarray,
+    k: int,
+    metric: str,
+    *,
+    device: str = "cpu",
+    gpu_batch_size: int = 128,
+    min_gpu_types: int = 128,
+) -> NeighborGraph:
     count = features.shape[0]
     if count <= 1:
-        return NeighborGraph(np.empty((count, 0), dtype=np.int64), np.empty((count, 0)), {"backend": "features"})
+        return NeighborGraph(
+            np.empty((count, 0), dtype=np.int64),
+            np.empty((count, 0), dtype=np.float64),
+            {"backend": "features", "device": "cpu"},
+        )
     k = min(k, count - 1)
+    from .wishart_gpu import cuda_cosine_neighbors, resolve_device
+
+    actual = resolve_device(device)
+    if actual == "cuda" and (device == "cuda" or count >= min_gpu_types):
+        if metric != "cosine":
+            raise ValueError("CUDA feature search currently supports cosine only")
+        try:
+            indices, distances, metadata = cuda_cosine_neighbors(
+                features, k=k, query_batch_size=gpu_batch_size,
+            )
+            return NeighborGraph(indices, distances, metadata)
+        except RuntimeError as error:
+            if device != "auto" or "out of memory" not in str(error).lower():
+                raise
+            # Retry the entire neighbor graph on CPU; never silently mix
+            # results from GPU and CPU after a partial GPU failure.
+            fallback = "cuda_out_of_memory"
+
+    else:
+        fallback = "small_type_space" if actual == "cuda" else None
+
     model = NearestNeighbors(n_neighbors=k + 1, metric=metric, algorithm="brute")
     model.fit(features)
     distances, indices = model.kneighbors(features)
-    return NeighborGraph(indices[:, 1:].astype(np.int64), distances[:, 1:].astype(np.float64), {"backend": "features", "metric": metric})
+    # Duplicate feature vectors can make sklearn return a different identical
+    # point before 'self'; explicitly exclude the query index in every row.
+    output_indices = np.empty((count, k), dtype=np.int64)
+    output_distances = np.empty((count, k), dtype=np.float64)
+    for row in range(count):
+        retained = [(int(index), float(distance))
+                    for index, distance in zip(indices[row], distances[row])
+                    if int(index) != row]
+        if len(retained) < k:
+            additional = model.kneighbors(
+                features[row], n_neighbors=min(count, k + 2),
+            )
+            retained = [
+                (int(index), float(distance))
+                for index, distance in zip(additional[1][0], additional[0][0])
+                if int(index) != row
+            ]
+        retained = sorted(retained, key=lambda item: (item[1], item[0]))[:k]
+        output_indices[row] = [item[0] for item in retained]
+        output_distances[row] = [item[1] for item in retained]
+    metadata: dict[str, object] = {
+        "backend": "sklearn_cpu",
+        "metric": metric,
+        "device": "cpu",
+    }
+    if fallback is not None:
+        metadata["fallback_reason"] = fallback
+    return NeighborGraph(output_indices, output_distances, metadata)
 
 
 def _knn_from_distance_matrix(matrix: np.ndarray, k: int, metadata: dict[str, object]) -> NeighborGraph:
@@ -602,12 +662,18 @@ def build_neighbor_graph(
     fgw_alpha: float,
     relation_js_block_size: int,
     seed: int,
+    device: str = "cpu",
+    gpu_batch_size: int = 128,
+    min_gpu_types: int = 128,
 ) -> NeighborGraph:
     if len(candidates) <= 1:
         return NeighborGraph(np.empty((len(candidates), 0), dtype=np.int64), np.empty((len(candidates), 0)), {"metric": metric})
     if metric == "typed_wl":
         features = typed_wl_features(candidates, iterations=wl_iterations, dimension=feature_dim)
-        result = _knn_from_features(features, k, "cosine")
+        result = _knn_from_features(
+            features, k, "cosine", device=device,
+            gpu_batch_size=gpu_batch_size, min_gpu_types=min_gpu_types,
+        )
     elif metric == "graphlet":
         features = graphlet_features(
             candidates, graphlet_size=graphlet_size, samples=graphlet_samples,
@@ -615,10 +681,14 @@ def build_neighbor_graph(
         )
         result = _knn_from_features(features, k, "cosine")
     elif metric == "relation_js":
+        if device == "cuda":
+            raise ValueError("CUDA is supported for typed_wl and graphlet only")
         result = relation_js_neighbors(
             candidates, k=k, block_size=relation_js_block_size
         )
     elif metric in {"lowrank_gw", "fgw"}:
+        if device == "cuda":
+            raise ValueError("CUDA is supported for typed_wl and graphlet only")
         result = transport_neighbors(
             candidates, k=k, metric=metric, rank=transport_rank,
             max_candidates=transport_max_candidates, fgw_alpha=fgw_alpha,
