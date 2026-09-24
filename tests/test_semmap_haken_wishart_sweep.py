@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -134,6 +135,8 @@ def test_colab_notebook_does_not_rerun_graph_compression() -> None:
     assert "sweep_level" in code
     assert "K_VALUES = (1, 2, 3, 4, 6, 12)" in code
     assert "GITHUB_TOKEN" in code
-    assert "max_dictionary_size" not in code or "no" in code
     assert "run_wishart_hierarchy(" not in code
     assert "semmap-wishart-colab" not in code
+    for index, cell in enumerate(notebook["cells"]):
+        if cell["cell_type"] == "code":
+            ast.parse("".join(cell["source"]), filename=f"notebook_cell_{index}")
