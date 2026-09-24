@@ -204,8 +204,11 @@ def test_graph_dictionary_colab_notebook_targets_current_branch() -> None:
         "".join(cell.get("source", []))
         for cell in notebook["cells"]
     )
-    assert "feature/wishart-graph-dictionary" in sources
+    assert "feature/wishart-colab-gpu-resume" in sources
     assert "configs/wishart_conceptnet_dictionary.yaml" in sources
+    assert "--config-drive" in sources
+    assert "--resume" in sources
+    assert "MyDrive/SemanticMap/colab/wishart" in sources
     assert "semmap-wishart-colab" in sources
     assert "subprocess.run(command, check=True)" in sources
     assert "dictionary/graph_types.jsonl" not in sources
