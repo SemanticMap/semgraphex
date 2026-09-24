@@ -135,6 +135,14 @@ def test_colab_notebook_does_not_rerun_graph_compression() -> None:
     assert "sweep_level" in code
     assert "K_VALUES = (1, 2, 3, 4, 6, 12)" in code
     assert "GITHUB_TOKEN" in code
+    bootstrap = "".join(notebook["cells"][3]["source"])
+    assert "REPO_SRC = REPO_DIR / 'src'" in bootstrap
+    assert "sys.path.insert(0, repo_src_str)" in bootstrap
+    assert "importlib.invalidate_caches()" in bootstrap
+    assert "from semmap_haken.wishart_resume import load_latest_checkpoint" in bootstrap
+    assert "from semmap_haken.wishart_knn_replay import sweep_level" in bootstrap
+    checkpoint_cell = "".join(notebook["cells"][4]["source"])
+    assert "Сначала выполните ячейку 3" in checkpoint_cell
     assert "run_wishart_hierarchy(" not in code
     assert "semmap-wishart-colab" not in code
     for index, cell in enumerate(notebook["cells"]):
