@@ -342,3 +342,72 @@ def test_wl_feature_process_pool_matches_serial() -> None:
     np.testing.assert_array_equal(serial.indptr, parallel.indptr)
     np.testing.assert_array_equal(serial.indices, parallel.indices)
     np.testing.assert_array_equal(serial.data, parallel.data)
+
+
+def test_threaded_diagnostics_are_serial_equivalent() -> None:
+    from semmap_haken.wishart_dynamics import (
+        _binary_topology, _sampled_clustering, _sampled_path_distances,
+    )
+    topology = _binary_topology(_tiny_graph().adjacency)
+    a = _sampled_clustering(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=1,
+    )
+    b = _sampled_clustering(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=3,
+    )
+    assert a == b
+    serial = _sampled_path_distances(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=1,
+    )
+    parallel = _sampled_path_distances(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=3,
+    )
+    np.testing.assert_array_equal(serial, parallel)
+
+
+def test_parallel_graphlet_features_are_byte_identical() -> None:
+    from semmap_haken.wishart_metrics import graphlet_features
+
+    graph = _tiny_graph()
+    candidates = extract_ego_candidates(
+        graph.adjacency, {"RelatedTo": graph.adjacency},
+        radius=1, max_ego_nodes=3, candidate_limit=8, seed=7,
+    )
+    one = graphlet_features(
+        candidates, graphlet_size=3, samples=4,
+        dimension=128, seed=7, workers=1,
+    )
+    many = graphlet_features(
+        candidates, graphlet_size=3, samples=4,
+        dimension=128, seed=7, workers=2,
+    )
+    np.testing.assert_array_equal(one.indptr, many.indptr)
+    np.testing.assert_array_equal(one.indices, many.indices)
+    np.testing.assert_array_equal(one.data, many.data)
+
+
+def test_runner_records_per_level_phase_timing(tmp_path: Path) -> None:
+    from semmap_haken.wishart_hierarchy import run_wishart_hierarchy
+
+    output = tmp_path / "timed"
+    run_wishart_hierarchy(
+        _tiny_graph(), directed=False,
+        options=_options(),
+        dictionary_options=DictionaryOptions(
+            boundary_sensitive=False, min_support=2,
+            frequency_scan_batch_size=3,
+        ),
+        output_dir=output,
+    )
+    hierarchy = json.loads((output / "hierarchy.json").read_text(encoding="utf-8"))
+    first_level = hierarchy["levels_detail"][0]
+    timings = first_level["phase_timing_seconds"]
+    assert timings["dynamic_snapshot"] >= 0
+    assert timings["discovery"] >= 0
+    assert timings["full_scan"] >= 0
+    assert timings["wishart_knn_clustering"] >= 0
+    assert timings["mdl_scoring"] >= 0
