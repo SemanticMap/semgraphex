@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -178,8 +179,10 @@ def _prototype_payload(
     candidate: EgoCandidate,
     *,
     boundary_sensitive: bool,
+    graph: nx.DiGraph | None = None,
 ) -> dict[str, object]:
-    graph = _candidate_graph(candidate, boundary_sensitive=boundary_sensitive)
+    if graph is None:
+        graph = _candidate_graph(candidate, boundary_sensitive=boundary_sensitive)
     return {
         "nodes": [
             {
@@ -207,12 +210,11 @@ def candidate_fingerprint(
     candidate: EgoCandidate,
     *,
     boundary_sensitive: bool,
+    graph: nx.DiGraph | None = None,
 ) -> str:
     """Permutation-invariant WL bucket used before exact VF2 verification."""
-    graph = _candidate_graph(
-        candidate,
-        boundary_sensitive=boundary_sensitive,
-    )
+    if graph is None:
+        graph = _candidate_graph(candidate, boundary_sensitive=boundary_sensitive)
     for node in graph.nodes:
         graph.nodes[node]["identity"] = (
             f"{graph.nodes[node]['symbol_type']}|{graph.nodes[node]['boundary_ports']}"
@@ -239,6 +241,8 @@ def _isomorphism_mapping(
     right: EgoCandidate,
     *,
     boundary_sensitive: bool,
+    left_graph: nx.DiGraph | None = None,
+    right_graph: nx.DiGraph | None = None,
 ) -> dict[int, int] | None:
     if left.adjacency.shape != right.adjacency.shape:
         return None
@@ -252,8 +256,12 @@ def _isomorphism_mapping(
         "relation", "__edge__"
     )
     matcher = nx.algorithms.isomorphism.DiGraphMatcher(
-        _candidate_graph(left, boundary_sensitive=boundary_sensitive),
-        _candidate_graph(right, boundary_sensitive=boundary_sensitive),
+        left_graph if left_graph is not None else _candidate_graph(
+            left, boundary_sensitive=boundary_sensitive,
+        ),
+        right_graph if right_graph is not None else _candidate_graph(
+            right, boundary_sensitive=boundary_sensitive,
+        ),
         node_match=node_match,
         edge_match=edge_match,
     )
@@ -288,19 +296,62 @@ class GraphDictionary:
         self._next_id = 1
         self._candidate_level_counts: dict[tuple[str, int], int] = {}
         self._accepted_level_counts: dict[tuple[str, int], int] = {}
+        # Transient LRU: do not pickle NetworkX objects into every checkpoint.
+        self._representative_graphs: OrderedDict[str, nx.DiGraph] = OrderedDict()
 
-    def resolve_or_create(self, candidate: EgoCandidate, *, level: int) -> GraphType:
-        fingerprint = candidate_fingerprint(
-            candidate,
+    def __getstate__(self) -> dict[str, object]:
+        payload = dict(self.__dict__)
+        payload.pop("_representative_graphs", None)
+        return payload
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        self._representative_graphs = OrderedDict()
+
+    def _representative_graph(self, type_id: str) -> nx.DiGraph:
+        if type_id in self._representative_graphs:
+            self._representative_graphs.move_to_end(type_id)
+            return self._representative_graphs[type_id]
+        graph = _candidate_graph(
+            self._representatives[type_id],
             boundary_sensitive=self.boundary_sensitive,
         )
+        self._representative_graphs[type_id] = graph
+        if len(self._representative_graphs) > 2048:
+            self._representative_graphs.popitem(last=False)
+        return graph
+
+    def resolve_or_create(
+        self,
+        candidate: EgoCandidate,
+        *,
+        level: int,
+        fingerprint: str | None = None,
+    ) -> GraphType:
+        candidate_graph: nx.DiGraph | None = None
+        if fingerprint is None:
+            candidate_graph = _candidate_graph(
+                candidate, boundary_sensitive=self.boundary_sensitive,
+            )
+            fingerprint = candidate_fingerprint(
+                candidate,
+                boundary_sensitive=self.boundary_sensitive,
+                graph=candidate_graph,
+            )
         for type_id in self._by_fingerprint.get(fingerprint, []):
             representative = self._representatives[type_id]
-            if candidates_are_isomorphic(
-                candidate,
+            if candidate_graph is None:
+                candidate_graph = _candidate_graph(
+                    candidate, boundary_sensitive=self.boundary_sensitive,
+                )
+            mapping = _isomorphism_mapping(
                 representative,
+                candidate,
                 boundary_sensitive=self.boundary_sensitive,
-            ):
+                left_graph=self._representative_graph(type_id),
+                right_graph=candidate_graph,
+            )
+            if mapping is not None:
                 graph_type = self.types[type_id]
                 graph_type.levels_seen.add(int(level))
                 return graph_type
@@ -321,6 +372,7 @@ class GraphDictionary:
             prototype=_prototype_payload(
                 candidate,
                 boundary_sensitive=self.boundary_sensitive,
+                graph=candidate_graph,
             ),
             first_level=int(level),
             levels_seen={int(level)},
@@ -331,9 +383,13 @@ class GraphDictionary:
         return graph_type
 
     def match_with_mapping(self, candidate: EgoCandidate) -> GraphMatch | None:
+        candidate_graph = _candidate_graph(
+            candidate, boundary_sensitive=self.boundary_sensitive,
+        )
         fingerprint = candidate_fingerprint(
             candidate,
             boundary_sensitive=self.boundary_sensitive,
+            graph=candidate_graph,
         )
         for type_id in self._by_fingerprint.get(fingerprint, []):
             representative = self._representatives[type_id]
@@ -341,6 +397,8 @@ class GraphDictionary:
                 representative,
                 candidate,
                 boundary_sensitive=self.boundary_sensitive,
+                left_graph=self._representative_graph(type_id),
+                right_graph=candidate_graph,
             )
             if mapping is None:
                 continue

@@ -212,3 +212,299 @@ def test_colab_cli_loads_configuration_from_drive(tmp_path: Path) -> None:
     manifest = json.loads((run / "input.json").read_text(encoding="utf-8"))
     assert manifest["config_source"] == str(config)
     assert manifest["device"]["selected"] == "cpu"
+
+
+def test_graphlet_forwards_cuda_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    from semmap_haken import wishart_metrics as metrics
+
+    candidate_graph = _tiny_graph()
+    candidates = extract_ego_candidates(
+        candidate_graph.adjacency,
+        {"RelatedTo": candidate_graph.adjacency},
+        radius=1, max_ego_nodes=3, candidate_limit=8, seed=7,
+    )
+    seen: dict[str, object] = {}
+
+    def fake_knn(
+        features: sparse.spmatrix, k: int, metric: str, *,
+        device: str, gpu_batch_size: int, min_gpu_types: int,
+    ) -> metrics.NeighborGraph:
+        seen.update(metric=metric, device=device, batch=gpu_batch_size, minimum=min_gpu_types)
+        count = features.shape[0]
+        return metrics.NeighborGraph(
+            np.empty((count, 0), dtype=np.int64),
+            np.empty((count, 0), dtype=float), {"backend": "test"},
+        )
+
+    monkeypatch.setattr(metrics, "_knn_from_features", fake_knn)
+    metrics.build_neighbor_graph(
+        candidates, metric="graphlet", k=2,
+        wl_iterations=2, feature_dim=32, graphlet_size=3, graphlet_samples=4,
+        transport_rank=4, transport_max_candidates=16, fgw_alpha=0.5,
+        relation_js_block_size=8, seed=7, device="cuda",
+        gpu_batch_size=7, min_gpu_types=11,
+    )
+    assert seen == {"metric": "cosine", "device": "cuda", "batch": 7, "minimum": 11}
+
+
+def test_gpu_diagnostics_has_actionable_reason_on_cpu() -> None:
+    from semmap_haken.wishart_gpu import cuda_diagnostics
+
+    payload = cuda_diagnostics()
+    assert "torch_importable" in payload
+    assert "cuda_available" in payload
+    if not payload["cuda_available"]:
+        assert isinstance(payload.get("reason"), str) and payload["reason"]
+
+
+def test_resume_device_mismatch_explains_separate_runs() -> None:
+    from semmap_haken.wishart_colab_cli import _assert_resume_device_consistent
+
+    _assert_resume_device_consistent("cpu", "cpu")
+    with pytest.raises(ValueError, match="new run name"):
+        _assert_resume_device_consistent("cpu", "cuda")
+
+
+def test_discovery_process_pool_matches_serial() -> None:
+    from semmap_haken.graph_dictionary import GraphDictionary
+    from semmap_haken.wishart_hierarchy import _discover_types
+
+    graph = _tiny_graph()
+    candidates = extract_ego_candidates(
+        graph.adjacency, {"RelatedTo": graph.adjacency},
+        radius=1, max_ego_nodes=3, candidate_limit=8, seed=7,
+    )
+    baseline = _discover_types(
+        candidates, GraphDictionary(boundary_sensitive=False),
+        level=0, cpu_workers=1,
+    )
+    parallel = _discover_types(
+        candidates, GraphDictionary(boundary_sensitive=False),
+        level=0, cpu_workers=2,
+    )
+    assert baseline == parallel
+
+
+def test_full_scan_spawn_process_pool_matches_serial() -> None:
+    from semmap_haken.graph_dictionary import GraphDictionary
+    from semmap_haken.wishart_hierarchy import _discover_types, _scan_known_types
+
+    graph = _tiny_graph()
+    candidates = extract_ego_candidates(
+        graph.adjacency, {"RelatedTo": graph.adjacency},
+        radius=1, max_ego_nodes=3, candidate_limit=8, seed=7,
+    )
+    def run(workers: int):
+        dictionary = GraphDictionary(boundary_sensitive=False)
+        type_ids, _ = _discover_types(
+            candidates, dictionary, level=0, cpu_workers=workers,
+        )
+        return _scan_known_types(
+            graph.adjacency, {"RelatedTo": graph.adjacency}, dictionary,
+            level=0, discovery_candidates=candidates, discovery_type_ids=type_ids,
+            symbol_types={}, wishart_options=_options(),
+            dictionary_options=DictionaryOptions(
+                boundary_sensitive=False, frequency_scan="full",
+                frequency_scan_batch_size=3, min_support=2,
+            ),
+            cpu_workers=workers,
+        )
+    assert run(1) == run(2)
+
+
+def test_sparse_relation_contraction_parallel_matches_serial() -> None:
+    from semmap_haken.wishart_hierarchy import _contract_relation_layers
+
+    graph = _tiny_graph()
+    layers = {
+        "RelatedTo": graph.adjacency,
+        "Half": graph.adjacency.multiply(0.5).tocsr(),
+    }
+    assignment = np.array([0, 0, 1, 1, 2, 2, 3, 3])
+    serial = _contract_relation_layers(layers, assignment, aggregation="sum", workers=1)
+    parallel = _contract_relation_layers(layers, assignment, aggregation="sum", workers=2)
+    for name in layers:
+        np.testing.assert_array_equal(serial[name].indptr, parallel[name].indptr)
+        np.testing.assert_array_equal(serial[name].indices, parallel[name].indices)
+        np.testing.assert_array_equal(serial[name].data, parallel[name].data)
+
+
+def test_wl_feature_process_pool_matches_serial() -> None:
+    from semmap_haken.wishart_metrics import typed_wl_features
+
+    graph = _tiny_graph()
+    candidates = extract_ego_candidates(
+        graph.adjacency, {"RelatedTo": graph.adjacency},
+        radius=1, max_ego_nodes=3, candidate_limit=8, seed=7,
+    )
+    serial = typed_wl_features(candidates, iterations=2, dimension=128, workers=1)
+    parallel = typed_wl_features(candidates, iterations=2, dimension=128, workers=2)
+    np.testing.assert_array_equal(serial.indptr, parallel.indptr)
+    np.testing.assert_array_equal(serial.indices, parallel.indices)
+    np.testing.assert_array_equal(serial.data, parallel.data)
+
+
+def test_threaded_diagnostics_are_serial_equivalent() -> None:
+    from semmap_haken.wishart_dynamics import (
+        _binary_topology, _sampled_clustering, _sampled_path_distances,
+    )
+    topology = _binary_topology(_tiny_graph().adjacency)
+    a = _sampled_clustering(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=1,
+    )
+    b = _sampled_clustering(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=3,
+    )
+    assert a == b
+    serial = _sampled_path_distances(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=1,
+    )
+    parallel = _sampled_path_distances(
+        topology, sample_count=8, rng=np.random.default_rng(19),
+        workers=3,
+    )
+    np.testing.assert_array_equal(serial, parallel)
+
+
+def test_parallel_graphlet_features_are_byte_identical() -> None:
+    from semmap_haken.wishart_metrics import graphlet_features
+
+    graph = _tiny_graph()
+    candidates = extract_ego_candidates(
+        graph.adjacency, {"RelatedTo": graph.adjacency},
+        radius=1, max_ego_nodes=3, candidate_limit=8, seed=7,
+    )
+    one = graphlet_features(
+        candidates, graphlet_size=3, samples=4,
+        dimension=128, seed=7, workers=1,
+    )
+    many = graphlet_features(
+        candidates, graphlet_size=3, samples=4,
+        dimension=128, seed=7, workers=2,
+    )
+    np.testing.assert_array_equal(one.indptr, many.indptr)
+    np.testing.assert_array_equal(one.indices, many.indices)
+    np.testing.assert_array_equal(one.data, many.data)
+
+
+def test_runner_records_per_level_phase_timing(tmp_path: Path) -> None:
+    from semmap_haken.wishart_hierarchy import run_wishart_hierarchy
+
+    output = tmp_path / "timed"
+    run_wishart_hierarchy(
+        _tiny_graph(), directed=False,
+        options=_options(),
+        dictionary_options=DictionaryOptions(
+            boundary_sensitive=False, min_support=2,
+            frequency_scan_batch_size=3,
+        ),
+        output_dir=output,
+    )
+    hierarchy = json.loads((output / "hierarchy.json").read_text(encoding="utf-8"))
+    first_level = hierarchy["levels_detail"][0]
+    timings = first_level["phase_timing_seconds"]
+    assert timings["dynamic_snapshot"] >= 0
+    assert timings["discovery"] >= 0
+    assert timings["full_scan"] >= 0
+    assert timings["wishart_knn_clustering"] >= 0
+    assert timings["mdl_scoring"] >= 0
+
+
+def test_sampled_brandes_spawn_matches_serial_bit_for_bit() -> None:
+    from semmap_haken.wishart_dynamics import (
+        _binary_topology, _sampled_betweenness_unweighted,
+    )
+    topology = _binary_topology(_tiny_graph().adjacency)
+    serial = _sampled_betweenness_unweighted(
+        topology, sample_count=6, rng=np.random.default_rng(47), workers=1,
+    )
+    process_pool = _sampled_betweenness_unweighted(
+        topology, sample_count=6, rng=np.random.default_rng(47), workers=2,
+    )
+    np.testing.assert_array_equal(serial, process_pool)
+
+
+def test_auto_gpu_knn_prefers_cuda_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from semmap_haken import wishart_gpu
+    from semmap_haken.wishart_metrics import _knn_from_features
+
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        wishart_gpu, "resolve_device",
+        lambda requested: "cuda",
+    )
+
+    def fake_cuda(features, *, k: int, query_batch_size: int):
+        observed.update(k=k, batch=query_batch_size)
+        return (
+            np.array([[1], [0], [0]], dtype=np.int64),
+            np.array([[0.5], [0.5], [1.0]], dtype=np.float64),
+            {"backend": "torch_cuda", "device": "cuda"},
+        )
+
+    monkeypatch.setattr(wishart_gpu, "cuda_cosine_neighbors", fake_cuda)
+    result = _knn_from_features(
+        np.eye(3), k=1, metric="cosine",
+        device="auto", gpu_batch_size=7, min_gpu_types=2,
+    )
+    assert result.metadata["backend"] == "torch_cuda"
+    assert observed == {"k": 1, "batch": 7}
+
+
+def test_cuda_oom_fallback_is_visible_and_recomputes_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from semmap_haken import wishart_gpu
+    from semmap_haken.wishart_metrics import _knn_from_features
+
+    monkeypatch.setattr(
+        wishart_gpu, "resolve_device", lambda requested: "cuda",
+    )
+
+    def fail_cuda(features, *, k: int, query_batch_size: int):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(wishart_gpu, "cuda_cosine_neighbors", fail_cuda)
+    with pytest.warns(RuntimeWarning, match="out of GPU memory"):
+        result = _knn_from_features(
+            np.eye(3), k=1, metric="cosine",
+            device="auto", gpu_batch_size=7, min_gpu_types=2,
+        )
+    assert result.metadata["backend"] == "sklearn_cpu"
+    assert result.metadata["fallback_reason"] == "cuda_out_of_memory"
+
+
+def test_complete_cpu_experiment_matches_across_worker_counts(
+    tmp_path: Path,
+) -> None:
+    from semmap_haken.wishart_config import ColabExecutionOptions
+    from semmap_haken.wishart_hierarchy import run_wishart_hierarchy
+
+    outputs = []
+    for workers in (1, 2):
+        target = tmp_path / f"workers-{workers}"
+        run_wishart_hierarchy(
+            _tiny_graph(), directed=False, options=_options(),
+            dictionary_options=DictionaryOptions(
+                boundary_sensitive=False, min_support=2,
+                frequency_scan_batch_size=3,
+            ),
+            execution_options=ColabExecutionOptions(
+                device="cpu", cpu_workers=workers,
+            ),
+            output_dir=target,
+        )
+        outputs.append(target)
+
+    names = ("dictionary/graph_types.jsonl", "dictionary/grammar.jsonl")
+    for name in names:
+        assert (outputs[0] / name).read_bytes() == (outputs[1] / name).read_bytes()
+    first = sorted(outputs[0].glob("transition_*/figure_occurrences.jsonl"))
+    second = sorted(outputs[1].glob("transition_*/figure_occurrences.jsonl"))
+    assert [p.name for p in first] == [p.name for p in second]
+    assert [p.read_bytes() for p in first] == [p.read_bytes() for p in second]

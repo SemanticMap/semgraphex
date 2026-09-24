@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import gc
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import hashlib
 import json
 import math
 import re
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -18,6 +21,10 @@ from scipy import sparse
 
 from .graph_build import PreparedGraph
 from .graph_dictionary import GraphDictionary, WishartFamilyRegistry
+from .wishart_gpu import resolve_device
+from .wishart_parallel import (
+    initialize_match_worker, match_chunk, ordered_fingerprints, spawn_pool,
+)
 from .graph_mdl import (
     MdlOccurrence,
     build_canonical_huffman_codes,
@@ -136,8 +143,9 @@ def _contract_matrix(
     assignment: np.ndarray,
     *,
     aggregation: str,
+    membership: sparse.csr_matrix | None = None,
 ) -> sparse.csr_matrix:
-    p = membership_matrix(assignment)
+    p = membership if membership is not None else membership_matrix(assignment)
     coarse = (p.T @ matrix.tocsr() @ p).tocsr()
     if aggregation == "mean_density":
         sizes = np.asarray(p.sum(axis=0)).ravel()
@@ -146,6 +154,32 @@ def _contract_matrix(
         coarse.data = coarse.data / scale
     coarse.eliminate_zeros()
     return coarse
+
+
+def _contract_relation_layers(
+    layers: Mapping[str, sparse.csr_matrix],
+    assignment: np.ndarray,
+    *,
+    aggregation: str,
+    workers: int = 1,
+    membership: sparse.csr_matrix | None = None,
+) -> dict[str, sparse.csr_matrix]:
+    """Contract independent relation layers using one shared membership CSR."""
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    p = membership if membership is not None else membership_matrix(assignment)
+    items = sorted(layers.items())
+
+    def contract(item: tuple[str, sparse.csr_matrix]) -> tuple[str, sparse.csr_matrix]:
+        relation, layer = item
+        return relation, _contract_matrix(
+            layer, assignment, aggregation=aggregation, membership=p,
+        )
+
+    if workers == 1 or len(items) < 2:
+        return dict(contract(item) for item in items)
+    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+        return dict(pool.map(contract, items))
 
 
 def _compose_memberships(
@@ -192,6 +226,7 @@ def _write_level(
     memberships: Mapping[int, Sequence[str]],
     symbol_types: Mapping[int, str],
     options: WishartOptions,
+    cpu_workers: int = 1,
 ) -> tuple[dict[str, object], np.ndarray]:
     level_dir = directory / f"level_{level:03d}"
     level_dir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +280,7 @@ def _write_level(
         clustering_samples=options.clustering_samples,
         distance_samples=options.distance_samples,
         seed=options.random_seed + 1009 * level,
+        cpu_workers=cpu_workers,
     )
     (level_dir / "dynamic_metrics.json").write_text(
         json.dumps(snapshot.to_dict(), indent=2, sort_keys=True) + "\n",
@@ -266,11 +302,20 @@ def _discover_types(
     dictionary: GraphDictionary,
     *,
     level: int,
+    cpu_workers: int = 1,
 ) -> tuple[tuple[str, ...], Counter[str]]:
+    """Parallel pure WL fingerprints; allocate persistent type IDs serially."""
+    fingerprints = ordered_fingerprints(
+        candidates,
+        boundary_sensitive=dictionary.boundary_sensitive,
+        workers=cpu_workers,
+    )
     type_ids: list[str] = []
     counts: Counter[str] = Counter()
-    for candidate in candidates:
-        graph_type = dictionary.resolve_or_create(candidate, level=level)
+    for candidate, fingerprint in zip(candidates, fingerprints, strict=True):
+        graph_type = dictionary.resolve_or_create(
+            candidate, level=level, fingerprint=fingerprint,
+        )
         type_ids.append(graph_type.type_id)
         counts[graph_type.type_id] += 1
     return tuple(type_ids), counts
@@ -314,22 +359,18 @@ def _scan_known_types(
         next_index = 0
         batch_size = dictionary_options.frequency_scan_batch_size
         extractor = EgoExtractor(adjacency, relation_layers)
-        for start in range(0, adjacency.shape[0], batch_size):
-            stop = min(adjacency.shape[0], start + batch_size)
-            candidates = extractor.extract_centers(
-                range(start, stop),
-                radius=wishart_options.radius,
-                max_ego_nodes=wishart_options.max_ego_nodes,
-                symbol_types=symbol_types,
-                workers=cpu_workers,
-            )
-            for candidate in candidates:
-                matched = dictionary.match_with_mapping(candidate)
+
+        def consume(
+            batch: Sequence[EgoCandidate],
+            matches: Sequence[tuple[str, tuple[int, ...]] | None],
+        ) -> None:
+            nonlocal next_index
+            for candidate, matched in zip(batch, matches, strict=True):
                 if matched is None:
                     continue
-                graph_type = matched.graph_type
+                type_id, mapping = matched
                 nodes = tuple(int(x) for x in candidate.nodes)
-                key = (graph_type.type_id, nodes)
+                key = (type_id, nodes)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -339,14 +380,54 @@ def _scan_known_types(
                         center=int(candidate.center),
                         nodes=nodes,
                         prototype_to_fine_nodes=tuple(
-                            int(candidate.nodes[local_index])
-                            for local_index in matched.prototype_to_candidate
+                            int(candidate.nodes[local_index]) for local_index in mapping
                         ),
-                        dictionary_type_id=graph_type.type_id,
+                        dictionary_type_id=type_id,
                     )
                 )
                 next_index += 1
-            del candidates
+
+        # Only matching is GIL-bound. The parent extracts CSR candidates and
+        # consumes results in center order; worker dictionary snapshots never
+        # mutate the live registry. At most 2*workers batches are in flight.
+        process_pool = (
+            spawn_pool(
+                workers=cpu_workers,
+                initializer=initialize_match_worker,
+                initargs=(dictionary,),
+            )
+            if cpu_workers > 1 else nullcontext(None)
+        )
+        pending = deque()
+        with process_pool as pool:
+            for start in range(0, adjacency.shape[0], batch_size):
+                stop = min(adjacency.shape[0], start + batch_size)
+                candidates = extractor.extract_centers(
+                    range(start, stop),
+                    radius=wishart_options.radius,
+                    max_ego_nodes=wishart_options.max_ego_nodes,
+                    symbol_types=symbol_types,
+                    workers=1 if pool is not None else cpu_workers,
+                )
+                if pool is None:
+                    matches = []
+                    for candidate in candidates:
+                        match = dictionary.match_with_mapping(candidate)
+                        matches.append(
+                            (match.graph_type.type_id, match.prototype_to_candidate)
+                            if match is not None else None
+                        )
+                    consume(candidates, matches)
+                else:
+                    pending.append(
+                        (candidates, pool.submit(match_chunk, tuple(candidates)))
+                    )
+                    if len(pending) >= 2 * cpu_workers:
+                        first_batch, future = pending.popleft()
+                        consume(first_batch, future.result())
+            while pending:
+                first_batch, future = pending.popleft()
+                consume(first_batch, future.result())
         scanned = tuple(rows)
 
     counts: Counter[str] = Counter(item.dictionary_type_id for item in scanned)
@@ -408,6 +489,7 @@ def _cluster_dictionary_types(
         device=execution_options.device,
         gpu_batch_size=execution_options.gpu_batch_size,
         min_gpu_types=execution_options.min_gpu_types,
+        cpu_workers=execution_options.cpu_workers,
     )
     if options.density_weight == "occurrence_frequency":
         sample_weights = np.array([counts[type_id] for type_id in type_ids], dtype=float)
@@ -483,6 +565,7 @@ def _score_and_select_occurrences(
     fallback_bits = max(1.0, math.log2(max(2, len(eligible_counts))))
     scored: list[MdlOccurrence] = []
     payload_by_index: dict[int, tuple[_ScannedOccurrence, float, float]] = {}
+    cost_cache: dict[str, tuple[float, float]] = {}
 
     for item in scanned:
         if len(item.nodes) < min_figure_nodes:
@@ -490,23 +573,23 @@ def _score_and_select_occurrences(
         support = eligible_counts.get(item.dictionary_type_id, 0)
         if support <= 0:
             continue
-        representative = dictionary.representative(item.dictionary_type_id)
-        prototype_bits = estimate_dictionary_prototype_bits(
-            representative,
-            relation_count=relation_count,
-        )
-        type_code_bits = float(
-            len(huffman[item.dictionary_type_id])
-            if item.dictionary_type_id in huffman
-            else fallback_bits
-        )
-        raw_bits, encoded_bits = estimated_occurrence_cost(
-            representative,
-            graph_node_count=graph_node_count,
-            relation_count=relation_count,
-            type_code_bits=type_code_bits,
-            dictionary_amortized_bits=prototype_bits / support,
-        )
+        if item.dictionary_type_id not in cost_cache:
+            representative = dictionary.representative(item.dictionary_type_id)
+            prototype_bits = estimate_dictionary_prototype_bits(
+                representative, relation_count=relation_count,
+            )
+            type_code_bits = float(
+                len(huffman[item.dictionary_type_id])
+                if item.dictionary_type_id in huffman else fallback_bits
+            )
+            cost_cache[item.dictionary_type_id] = estimated_occurrence_cost(
+                representative,
+                graph_node_count=graph_node_count,
+                relation_count=relation_count,
+                type_code_bits=type_code_bits,
+                dictionary_amortized_bits=prototype_bits / support,
+            )
+        raw_bits, encoded_bits = cost_cache[item.dictionary_type_id]
         if raw_bits - encoded_bits <= dictionary_options.min_mdl_gain_bits:
             continue
         mdl = MdlOccurrence(
@@ -744,7 +827,16 @@ def run_wishart_hierarchy(
 
     execution_options = execution_options or ColabExecutionOptions()
     execution_options.validate()
-    from .wishart_resume import config_sha256  # keeps checkpoint format isolated
+    selected_backend = resolve_device(execution_options.device)
+    if options.metric not in {"typed_wl", "graphlet"} and selected_backend == "cuda":
+        if execution_options.device == "cuda":
+            raise ValueError(
+                f"metric={options.metric} has no CUDA backend; use CPU for this metric"
+            )
+        selected_backend = "cpu"
+    # A run uses one fixed numerical backend on every level, including after
+    # restoring a checkpoint. GPU OOM is fatal rather than mixing backends.
+    execution_options = replace(execution_options, device=selected_backend)
 
     if checkpoint_config_hash is None:
         serialized = json.dumps(
@@ -832,6 +924,17 @@ def run_wishart_hierarchy(
             )
 
     for level in range(start_level, options.max_levels + 1):
+        phase_times = {
+            "dynamic_snapshot": 0.0,
+            "discovery": 0.0,
+            "full_scan": 0.0,
+            "wishart_knn_clustering": 0.0,
+            "mdl_scoring": 0.0,
+            "transition_metrics": 0.0,
+            "contraction": 0.0,
+            "checkpoint_sync": 0.0,
+        }
+        phase_started = time.perf_counter()
         dynamic_summary, stationary_mass = _write_level(
             destination,
             level=level,
@@ -840,7 +943,9 @@ def run_wishart_hierarchy(
             memberships=memberships,
             symbol_types=symbol_types,
             options=options,
+            cpu_workers=execution_options.cpu_workers,
         )
+        phase_times["dynamic_snapshot"] = time.perf_counter() - phase_started
         level_summaries.append(
             {
                 "level": level,
@@ -851,6 +956,7 @@ def run_wishart_hierarchy(
                     sum(bool(item.child_types) for item in dictionary.types.values())
                 ),
                 "dynamic_metrics": dynamic_summary,
+                "phase_timing_seconds": phase_times,
             }
         )
         if checkpoint_hook is not None:
@@ -873,6 +979,7 @@ def run_wishart_hierarchy(
             break
 
         dictionary_size_before = len(dictionary.types)
+        phase_started = time.perf_counter()
         candidates = extract_ego_candidates(
             current,
             relation_layers,
@@ -888,14 +995,15 @@ def run_wishart_hierarchy(
             break
 
         discovery_type_ids, _ = _discover_types(
-            candidates,
-            dictionary,
-            level=level,
+            candidates, dictionary, level=level,
+            cpu_workers=execution_options.cpu_workers,
         )
+        phase_times["discovery"] = time.perf_counter() - phase_started
         if len(dictionary.types) > dictionary_options.max_dictionary_size:
             stop_reason = "max_dictionary_size"
             break
 
+        phase_started = time.perf_counter()
         scanned, full_counts = _scan_known_types(
             current,
             relation_layers,
@@ -909,6 +1017,8 @@ def run_wishart_hierarchy(
             cpu_workers=execution_options.cpu_workers,
         )
 
+        phase_times["full_scan"] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         type_ids, clustering, type_info, metric_metadata = _cluster_dictionary_types(
             dictionary,
             family_registry,
@@ -919,6 +1029,8 @@ def run_wishart_hierarchy(
             execution_options=execution_options,
         )
 
+        phase_times["wishart_knn_clustering"] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         occurrences, mdl_metrics, selection_huffman = _score_and_select_occurrences(
             scanned,
             dictionary,
@@ -931,6 +1043,7 @@ def run_wishart_hierarchy(
             min_figure_nodes=options.min_figure_nodes,
             max_figures=options.max_figures_per_level,
         )
+        phase_times["mdl_scoring"] = time.perf_counter() - phase_started
         current_huffman = (
             build_canonical_huffman_codes(
                 dictionary.frequency_counts(accepted=True)
@@ -997,13 +1110,16 @@ def run_wishart_hierarchy(
             stop_reason = "no_reduction"
             break
 
+        phase_started = time.perf_counter()
         cluster_rows = cluster_transition_metrics(
             current,
             plan.fine_to_coarse,
             relation_layers=relation_layers,
             stationary_mass=stationary_mass,
             memberships=memberships,
+            cpu_workers=execution_options.cpu_workers,
         )
+        phase_times["transition_metrics"] = time.perf_counter() - phase_started
         _write_transition(
             destination,
             level=level,
@@ -1030,23 +1146,23 @@ def run_wishart_hierarchy(
                 },
             )
 
+        phase_started = time.perf_counter()
         old_count = current.shape[0]
         previous_symbol_types = symbol_types
+        membership = membership_matrix(plan.fine_to_coarse)
         current = _contract_matrix(
-            current,
-            plan.fine_to_coarse,
-            aggregation=options.aggregation,
+            current, plan.fine_to_coarse,
+            aggregation=options.aggregation, membership=membership,
         )
-        relation_layers = {
-            relation: _contract_matrix(
-                layer,
-                plan.fine_to_coarse,
-                aggregation=options.aggregation,
-            )
-            for relation, layer in relation_layers.items()
-        }
+        relation_layers = _contract_relation_layers(
+            relation_layers, plan.fine_to_coarse,
+            aggregation=options.aggregation,
+            workers=execution_options.cpu_workers,
+            membership=membership,
+        )
         memberships = _compose_memberships(memberships, plan.fine_to_coarse)
         symbol_types = _compose_symbol_types(previous_symbol_types, plan)
+        phase_times["contraction"] = time.perf_counter() - phase_started
 
         transition_summaries.append(
             {
@@ -1064,6 +1180,7 @@ def run_wishart_hierarchy(
 
         # Checkpoint only after graph, dictionary, family registry, symbol types,
         # transition summaries and all provenance have advanced together.
+        phase_started = time.perf_counter()
         write_level_checkpoint(
             destination, next_level=level + 1, current=current,
             relation_layers=relation_layers, memberships=memberships,
@@ -1086,6 +1203,7 @@ def run_wishart_hierarchy(
                 },
             )
 
+        phase_times["checkpoint_sync"] = time.perf_counter() - phase_started
         del candidates, discovery_type_ids, scanned, occurrences, plan, cluster_rows
         gc.collect()
 

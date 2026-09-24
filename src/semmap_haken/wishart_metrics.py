@@ -15,6 +15,7 @@ from scipy.sparse.csgraph import shortest_path
 from scipy.spatial.distance import cdist
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
+import warnings
 
 from .graph_build import PreparedGraph
 
@@ -260,8 +261,18 @@ def typed_wl_features(
     *,
     iterations: int,
     dimension: int,
+    workers: int = 1,
 ) -> sparse.csr_matrix:
-    """Hashed edge-type-aware WL subtree features, without concept labels."""
+    """Hashed typed WL features; parallel rows use spawn and ordered concatenation."""
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if workers > 1 and len(candidates) > 1:
+        from .wishart_parallel import ordered_feature_matrix
+        return ordered_feature_matrix(
+            "typed_wl", candidates, workers=workers,
+            options={"iterations": iterations, "dimension": dimension},
+            batch_size=max(1, min(64, (len(candidates) + workers * 2 - 1) // (workers * 2))),
+        )
     rows: list[int] = []
     cols: list[int] = []
     data: list[float] = []
@@ -329,8 +340,21 @@ def graphlet_features(
     samples: int,
     dimension: int,
     seed: int,
+    workers: int = 1,
 ) -> sparse.csr_matrix:
-    """Pre-sampled typed induced graphlet histogram using stable feature hashing."""
+    """Typed graphlet histograms; spawn workers preserve per-center RNG streams."""
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if workers > 1 and len(candidates) > 1:
+        from .wishart_parallel import ordered_feature_matrix
+        return ordered_feature_matrix(
+            "graphlet", candidates, workers=workers,
+            options={
+                "graphlet_size": graphlet_size, "samples": samples,
+                "dimension": dimension, "seed": seed,
+            },
+            batch_size=max(1, min(64, (len(candidates) + workers * 2 - 1) // (workers * 2))),
+        )
     rows: list[int] = []
     cols: list[int] = []
     data: list[float] = []
@@ -398,9 +422,20 @@ def _knn_from_features(
             # Retry the entire neighbor graph on CPU; never silently mix
             # results from GPU and CPU after a partial GPU failure.
             fallback = "cuda_out_of_memory"
+            warnings.warn(
+                "CUDA cosine kNN ran out of GPU memory; "
+                "recomputing the full neighbor graph on CPU",
+                RuntimeWarning, stacklevel=2,
+            )
 
     else:
         fallback = "small_type_space" if actual == "cuda" else None
+        if fallback is not None:
+            warnings.warn(
+                f"CUDA available but type_count={count} < min_gpu_types="
+                f"{min_gpu_types}; using sklearn CPU for this level",
+                RuntimeWarning, stacklevel=2,
+            )
 
     model = NearestNeighbors(n_neighbors=k + 1, metric=metric, algorithm="brute")
     model.fit(features)
@@ -674,11 +709,15 @@ def build_neighbor_graph(
     device: str = "cpu",
     gpu_batch_size: int = 128,
     min_gpu_types: int = 128,
+    cpu_workers: int = 1,
 ) -> NeighborGraph:
     if len(candidates) <= 1:
         return NeighborGraph(np.empty((len(candidates), 0), dtype=np.int64), np.empty((len(candidates), 0)), {"metric": metric})
     if metric == "typed_wl":
-        features = typed_wl_features(candidates, iterations=wl_iterations, dimension=feature_dim)
+        features = typed_wl_features(
+            candidates, iterations=wl_iterations, dimension=feature_dim,
+            workers=cpu_workers,
+        )
         result = _knn_from_features(
             features, k, "cosine", device=device,
             gpu_batch_size=gpu_batch_size, min_gpu_types=min_gpu_types,
@@ -686,9 +725,12 @@ def build_neighbor_graph(
     elif metric == "graphlet":
         features = graphlet_features(
             candidates, graphlet_size=graphlet_size, samples=graphlet_samples,
-            dimension=feature_dim, seed=seed,
+            dimension=feature_dim, seed=seed, workers=cpu_workers,
         )
-        result = _knn_from_features(features, k, "cosine")
+        result = _knn_from_features(
+            features, k, "cosine", device=device,
+            gpu_batch_size=gpu_batch_size, min_gpu_types=min_gpu_types,
+        )
     elif metric == "relation_js":
         if device == "cuda":
             raise ValueError("CUDA is supported for typed_wl and graphlet only")

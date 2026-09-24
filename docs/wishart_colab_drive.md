@@ -29,7 +29,7 @@ local recursive Wishart compute
 incremental checkpoint sync
         |
         v
-/content/drive/MyDrive/SemanticMap/semgraphex/runs/<run-name>
+/content/drive/MyDrive/SemanticMap/colab/wishart/runs/<run-name>
 ```
 
 `COMPLETED` is synchronized only after the final files have been copied.
@@ -39,7 +39,7 @@ incremental checkpoint sync
 From the checked-out repository:
 
 ```bash
-pip install -c requirements/constraints.txt -e '.[wishart,notebook]'
+pip install -c requirements/constraints-colab.txt -e '.[wishart,notebook,gpu]'
 ```
 
 Mount Drive in a notebook cell:
@@ -54,15 +54,18 @@ drive.mount('/content/drive')
 ```text
 MyDrive/
   SemanticMap/
-    semgraphex/
-      data/
-        conceptnet_en_100k.tsv
-      prepared/
+    colab/
+      wishart/
+        config/
+          experiment.yaml
+        data/
+          conceptnet_en_100k.tsv
+        prepared/
         prepare-xxxxxxxxxxxx/
           adjacency.npz
           ...
           COMPLETED
-      runs/
+        runs/
 ```
 
 ## Run from a prepared graph on Drive
@@ -72,7 +75,7 @@ This is the preferred path because the ConceptNet parse/build stage is reused:
 ```bash
 semmap-wishart-colab \
   --config configs/wishart_conceptnet_colab.yaml \
-  --drive-root /content/drive/MyDrive/SemanticMap/semgraphex \
+  --drive-root /content/drive/MyDrive/SemanticMap/colab/wishart \
   --prepared-drive prepared/prepare-xxxxxxxxxxxx \
   --run-name wishart-typed-wl-01
 ```
@@ -120,9 +123,12 @@ runs/wishart-typed-wl-01/
 If the run raises an exception, the runner writes `FAILED.json` locally and
 syncs all completed partial artifacts without a `COMPLETED` marker.
 
-The current branch checkpoints partial evidence but does not automatically
-resume a partially completed hierarchy. Restart with a new run name or use
-`--overwrite` to restart the same name cleanly.
+The graph-dictionary runner additionally saves a checksummed, immutable
+`checkpoints/level_XXX/state.pkl.gz` and `manifest.json` after each fully
+contracted level. Re-run with the same `--run-name` plus `--resume` to restore
+the latest verified state. The CLI checks the original input SHA256, YAML SHA256,
+Git revision, and CPU/CUDA device family. Never combine `--resume` and
+`--overwrite`; never load a pickle checkpoint from an untrusted source.
 
 ## Scratch cleanup
 
@@ -262,3 +268,98 @@ notebooks/04_wishart_colab_drive.ipynb
 
 It mounts Drive explicitly, installs the package and constructs the
 `semmap-wishart-colab` command from editable variables.
+
+
+## GPU-first execution (Wishart graph dictionary)
+
+Use `notebooks/05_wishart_graph_dictionary_colab.ipynb` from
+`feature/wishart-gpu-first-parallel`. In Colab select **Runtime → Change
+runtime type → GPU**. The notebook installs the explicit Torch extra with
+`constraints-colab.txt` and probes CUDA before building any graph. The local
+scientific/CI constraints (`requirements/constraints.txt`) are not used on
+Colab: they can force an incompatible downgrade of the preinstalled NumPy
+stack. Project `pyproject.toml` bounds were relaxed accordingly.
+
+The default YAML remains:
+
+```yaml
+colab:
+  device: auto
+  cpu_workers: 4
+  gpu_batch_size: 128
+  min_gpu_types: 128
+  checkpoint_every_levels: 1
+```
+
+`auto` selects and **freezes** CUDA when available for `typed_wl` and
+`graphlet` neighbor search. No scientific parameters are altered. VF2,
+recursive dictionary registration, CSR extraction and dynamics still use CPU.
+CUDA nearest-neighbor search is float32; CPU sklearn search uses float64.
+To preserve one numerical backend throughout a run, an unrecoverable GPU OOM
+fails the current run rather than silently switching all later levels to CPU.
+CUDA tiles are automatically reduced before failure; tune the GPU batch size
+and start a **new** run if it remains too large.
+
+The CLI always prints `{"stage":"device_selected", ...}` to stdout, with
+requested/selected device, GPU model/memory when available, and effective
+`cpu_workers`. If auto cannot access CUDA, it warns on stderr with
+`cuda_diagnostics()` and proceeds on CPU. Explicit `--device cuda` fails
+if unavailable. For type spaces below `min_gpu_types`, the ordinary
+`auto` search helper may elect CPU and writes a visible
+`small_type_space` reason; the Colab CLI freezes the resolved CUDA device
+for the complete experiment, so a CUDA-selected Colab run always uses CUDA
+for eligible kNN levels with at least two types.
+
+The notebook uses `wishart-dictionary-100k-gpu` and
+`wishart-dictionary-100k-cpu` run-name suffixes. This prevents an
+interrupted float64 CPU experiment from being resumed with float32 CUDA.
+Inspect `runs/<name>/input.json` and
+`transition_XXX_YYY/wishart.json` for requested device,
+`metric.backend` (`torch_cuda` or `sklearn_cpu`) and any
+`fallback_reason`.
+
+To run directly with a Drive YAML:
+
+```bash
+semmap-wishart-colab \
+  --drive-root /content/drive/MyDrive/SemanticMap/colab/wishart \
+  --config-drive config/experiment.yaml \
+  --prepared-drive prepared/<prepared-id> \
+  --run-name wishart-dictionary-100k-gpu \
+  --device auto --blas-threads 1
+```
+
+## Maximum safe Python parallelism
+
+`colab.cpu_workers` is the bounded worker budget. The CLI clamps this to
+the currently visible CPU count rather than oversubscribing a small Colab
+VM; `--blas-threads 1` avoids nested OpenMP/BLAS pools.
+
+- **Threads:** independent SciPy CSR ego extraction, relation contractions,
+  transition relation blocks, sampled local clustering and sampled shortest
+  paths. These return results in deterministic input order.
+- **Spawn processes:** independent WL fingerprints, read-only exact
+  dictionary/VF2 full-scan matches, typed-WL/graphlet feature batches and
+  sampled Brandes source contributions. Use `spawn` exclusively after CUDA
+  initialization; shared dictionary snapshots are loaded once per worker,
+  in-flight full-scan batches are bounded and all counters/type IDs are
+  modified only by the parent process.
+- **Caching:** prototype NetworkX graph LRU is transient (excluded from
+  checkpoint pickle); per-type MDL prototype costs are memoized; relation
+  degrees and CSR views are reused across scan batches.
+- **Serial by design:** density-ordered Wishart merging, order-dependent MDL
+  set packing, Huffman code generation and contraction levels themselves.
+  MFPT retains its original sequential RNG stream unless a separately
+  validated, explicitly opt-in seed-splitting experiment is introduced.
+
+`hierarchy.json.levels_detail[*].phase_timing_seconds` records the
+per-level cost of dynamic diagnostics, discovery, full-scan matching,
+feature/kNN/Wishart, MDL scoring, transition metrics, contraction, and
+checkpoint I/O. Compare these profiles and overall wall time on the **same
+100k input** with CPU worker counts 1, 2, and 4 before claiming speedups.
+The CPU-only GitHub Actions suite tests scientific equality and checkpoint
+behavior; a clean Colab GPU run, OOM handling and actual T4/L4 performance
+must still be validated on the chosen Colab hardware.
+
+See `docs/wishart_gpu_first_parallelization.md` for the phase-by-phase
+implementation ledger and remaining profiling-gated candidates.

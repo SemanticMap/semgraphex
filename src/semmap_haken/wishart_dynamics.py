@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+
 from dataclasses import asdict, dataclass
 from typing import Mapping, Sequence
 
@@ -116,57 +119,92 @@ def _binary_topology(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
     return topology
 
 
+_BRANDES_TOPOLOGY: sparse.csr_matrix | None = None
+
+
+def _brandes_source(topology: sparse.csr_matrix, source: int) -> np.ndarray:
+    """Per-source dependency vector, independent of every other sampled source."""
+    n = topology.shape[0]
+    stack: list[int] = []
+    predecessors: list[list[int]] = [[] for _ in range(n)]
+    sigma = np.zeros(n, dtype=np.float64)
+    sigma[source] = 1.0
+    distance = np.full(n, -1, dtype=np.int64)
+    distance[source] = 0
+    queue = [source]
+    head = 0
+    while head < len(queue):
+        vertex = queue[head]
+        head += 1
+        stack.append(vertex)
+        start, stop = topology.indptr[vertex], topology.indptr[vertex + 1]
+        for neighbor in topology.indices[start:stop]:
+            neighbor = int(neighbor)
+            if distance[neighbor] < 0:
+                distance[neighbor] = distance[vertex] + 1
+                queue.append(neighbor)
+            if distance[neighbor] == distance[vertex] + 1:
+                sigma[neighbor] += sigma[vertex]
+                predecessors[neighbor].append(vertex)
+
+    contribution = np.zeros(n, dtype=np.float64)
+    dependency = np.zeros(n, dtype=np.float64)
+    while stack:
+        node = stack.pop()
+        if sigma[node] > 0:
+            coefficient = (1.0 + dependency[node]) / sigma[node]
+            for predecessor in predecessors[node]:
+                dependency[predecessor] += sigma[predecessor] * coefficient
+        if node != source:
+            contribution[node] = dependency[node]
+    return contribution
+
+
+def _brandes_worker_init(topology: sparse.csr_matrix) -> None:
+    global _BRANDES_TOPOLOGY
+    _BRANDES_TOPOLOGY = topology
+
+
+def _brandes_worker_source(source: int) -> np.ndarray:
+    if _BRANDES_TOPOLOGY is None:
+        raise RuntimeError("sampled Brandes worker not initialized")
+    return _brandes_source(_BRANDES_TOPOLOGY, int(source))
+
+
 def _sampled_betweenness_unweighted(
     topology: sparse.csr_matrix,
     *,
     sample_count: int,
     rng: np.random.Generator,
+    workers: int = 1,
 ) -> np.ndarray:
-    """Approximate unnormalized undirected betweenness using sampled Brandes sources.
-
-    This avoids materializing a NetworkX graph, which is expensive in Colab.
-    The n/k scaling matches the standard source-sampling idea; the final 1/2
-    corrects double counting for undirected paths.
-    """
+    """Source-sampled Brandes; spawn workers with deterministic ordered sum."""
     n = topology.shape[0]
     result = np.zeros(n, dtype=np.float64)
     if n < 2 or topology.nnz == 0:
         return result
     sources = _sample_nodes(n, min(sample_count, n), rng)
-    for source in sources:
-        source = int(source)
-        stack: list[int] = []
-        predecessors: list[list[int]] = [[] for _ in range(n)]
-        sigma = np.zeros(n, dtype=np.float64)
-        sigma[source] = 1.0
-        distance = np.full(n, -1, dtype=np.int64)
-        distance[source] = 0
-        queue = [source]
-        head = 0
-        while head < len(queue):
-            vertex = queue[head]
-            head += 1
-            stack.append(vertex)
-            start, stop = topology.indptr[vertex], topology.indptr[vertex + 1]
-            for neighbor in topology.indices[start:stop]:
-                neighbor = int(neighbor)
-                if distance[neighbor] < 0:
-                    distance[neighbor] = distance[vertex] + 1
-                    queue.append(neighbor)
-                if distance[neighbor] == distance[vertex] + 1:
-                    sigma[neighbor] += sigma[vertex]
-                    predecessors[neighbor].append(vertex)
-
-        dependency = np.zeros(n, dtype=np.float64)
-        while stack:
-            node = stack.pop()
-            if sigma[node] > 0:
-                coefficient = (1.0 + dependency[node]) / sigma[node]
-                for predecessor in predecessors[node]:
-                    dependency[predecessor] += sigma[predecessor] * coefficient
-            if node != source:
-                result[node] += dependency[node]
-
+    if workers <= 1 or len(sources) <= 1:
+        for source in sources:
+            result += _brandes_source(topology, int(source))
+    else:
+        from .wishart_parallel import spawn_pool
+        pending = deque()
+        # Never fork after CUDA initialization. Share the immutable topology
+        # once per worker via the initializer, not once per source.
+        with spawn_pool(
+            workers=workers,
+            initializer=_brandes_worker_init,
+            initargs=(topology,),
+        ) as pool:
+            for source in sources:
+                pending.append(
+                    pool.submit(_brandes_worker_source, int(source))
+                )
+                if len(pending) >= 2 * workers:
+                    result += pending.popleft().result()
+            while pending:
+                result += pending.popleft().result()
     scale = (n / float(len(sources))) * 0.5
     return result * scale
 
@@ -176,23 +214,28 @@ def _sampled_clustering(
     *,
     sample_count: int,
     rng: np.random.Generator,
+    workers: int = 1,
 ) -> float | None:
+    """Parallel independent SciPy slices; consume values in sample order."""
     n = topology.shape[0]
     if n == 0:
         return None
     sample = _sample_nodes(n, sample_count, rng)
-    values: list[float] = []
-    for node in sample:
-        start, stop = topology.indptr[int(node)], topology.indptr[int(node) + 1]
+
+    def one_node(node: int) -> float:
+        start, stop = topology.indptr[node], topology.indptr[node + 1]
         neighbors = topology.indices[start:stop]
         degree = len(neighbors)
         if degree < 2:
-            values.append(0.0)
-            continue
-        # For symmetric topology nnz of the neighbor-induced subgraph counts
-        # each undirected edge twice, exactly the numerator 2*T.
-        neighbor_edges_twice = topology[neighbors][:, neighbors].nnz
-        values.append(float(neighbor_edges_twice / (degree * (degree - 1))))
+            return 0.0
+        edge_count = topology[neighbors][:, neighbors].nnz
+        return float(edge_count / (degree * (degree - 1)))
+
+    if workers <= 1 or len(sample) <= 1:
+        values = [one_node(int(node)) for node in sample]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            values = list(pool.map(one_node, (int(node) for node in sample)))
     return float(np.mean(values)) if values else None
 
 
@@ -201,25 +244,47 @@ def _sampled_path_distances(
     *,
     sample_count: int,
     rng: np.random.Generator,
+    workers: int = 1,
 ) -> np.ndarray:
+    """Thread independent SciPy shortest paths; retain the serial RNG stream."""
     n = topology.shape[0]
     if n < 2 or topology.nnz == 0:
         return np.empty((0, 3), dtype=np.float64)
     sources = _sample_nodes(n, min(sample_count, n), rng)
     rows: list[tuple[float, float, float]] = []
-    for source in sources:
-        distances = shortest_path(
-            topology,
-            directed=False,
-            unweighted=True,
-            indices=int(source),
+
+    def distances_from(source: int) -> np.ndarray:
+        return shortest_path(
+            topology, directed=False, unweighted=True, indices=int(source),
         )
+
+    def record(source: int, distances: np.ndarray) -> None:
         reachable = np.flatnonzero(np.isfinite(distances))
-        reachable = reachable[reachable != int(source)]
+        reachable = reachable[reachable != source]
         if reachable.size == 0:
-            continue
+            return
         target = int(rng.choice(reachable))
         rows.append((float(source), float(target), float(distances[target])))
+
+    if workers <= 1 or len(sources) <= 1:
+        for source in sources:
+            source_id = int(source)
+            record(source_id, distances_from(source_id))
+    else:
+        # Bound in-flight distance arrays to 2*workers (not all sampled nodes).
+        pending = deque()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for source in sources:
+                source_id = int(source)
+                pending.append(
+                    (source_id, pool.submit(distances_from, source_id))
+                )
+                if len(pending) >= 2 * workers:
+                    first, future = pending.popleft()
+                    record(first, future.result())
+            while pending:
+                first, future = pending.popleft()
+                record(first, future.result())
     return np.asarray(rows, dtype=np.float64).reshape((-1, 3))
 
 
@@ -282,6 +347,7 @@ def compute_dynamic_snapshot(
     clustering_samples: int,
     distance_samples: int,
     seed: int,
+    cpu_workers: int = 1,
 ) -> tuple[DynamicSnapshot, DynamicVectors]:
     """Compute sparse-safe/controlled-cost diagnostics on a symmetrized graph."""
     matrix = _undirected_nonnegative(adjacency)
@@ -316,6 +382,7 @@ def compute_dynamic_snapshot(
         topology,
         sample_count=betweenness_samples,
         rng=rng,
+        workers=cpu_workers,
     )
     max_b = float(betweenness.max(initial=0.0)) if betweenness.size else None
     congestion = (
@@ -328,12 +395,14 @@ def compute_dynamic_snapshot(
         topology,
         sample_count=clustering_samples,
         rng=rng,
+        workers=cpu_workers,
     )
 
     sampled_pairs = _sampled_path_distances(
         topology,
         sample_count=distance_samples,
         rng=rng,
+        workers=cpu_workers,
     )
     distance_values = sampled_pairs[:, 2] if sampled_pairs.size else np.empty(0)
     mean_distance = float(distance_values.mean()) if distance_values.size else None
@@ -384,16 +453,23 @@ def cluster_transition_metrics(
     relation_layers: Mapping[str, sparse.spmatrix],
     stationary_mass: np.ndarray,
     memberships: Mapping[int, Sequence[str]],
+    cpu_workers: int = 1,
 ) -> list[dict[str, object]]:
     """Per-supernode flow, stationary mass and sparse exit-probability profile."""
     matrix = adjacency.tocsr()
     assignment = np.asarray(fine_to_coarse, dtype=np.int64)
     p = membership_matrix(assignment)
     block = (p.T @ matrix @ p).tocsr()
-    relation_blocks = {
-        relation: (p.T @ layer.tocsr() @ p).tocsr()
-        for relation, layer in relation_layers.items()
-    }
+    items = sorted(relation_layers.items())
+    def block_for(item: tuple[str, sparse.spmatrix]) -> tuple[str, sparse.csr_matrix]:
+        relation, layer = item
+        return relation, (p.T @ layer.tocsr() @ p).tocsr()
+
+    if cpu_workers > 1 and len(items) > 1:
+        with ThreadPoolExecutor(max_workers=min(cpu_workers, len(items))) as pool:
+            relation_blocks = dict(pool.map(block_for, items))
+    else:
+        relation_blocks = dict(block_for(item) for item in items)
     rows: list[dict[str, object]] = []
     coarse_count = block.shape[0]
     for coarse in range(coarse_count):

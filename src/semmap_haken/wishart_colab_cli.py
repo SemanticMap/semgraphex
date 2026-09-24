@@ -197,6 +197,18 @@ def _device_details(selected: str, requested: str) -> dict[str, object]:
     return details
 
 
+def _assert_resume_device_consistent(previous: object, selected: str) -> None:
+    """Keep one run's CPU float64 or GPU float32 nearest-neighbor lineage."""
+    if previous == selected:
+        return
+    raise ValueError(
+        f"resume compute device changed from {previous} to {selected}; "
+        "CPU (float64 sklearn) and CUDA (float32 torch) kNN numerics differ. "
+        "Use a new run name for the other device (recommended -gpu / -cpu), "
+        "or finish this run on its original device."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.blas_threads < 1:
@@ -239,8 +251,58 @@ def main(argv: list[str] | None = None) -> int:
             execution_options, cpu_workers=args.cpu_workers,
         )
     execution_options.validate()
-    selected_device = resolve_device(execution_options.device)
-    device = _device_details(selected_device, execution_options.device)
+    available_cores = max(1, os.cpu_count() or 1)
+    if execution_options.cpu_workers > available_cores:
+        print(
+            f"WARNING: requested {execution_options.cpu_workers} CPU workers but "
+            f"this runtime exposes only {available_cores}; clamping to "
+            f"{available_cores} to avoid oversubscription.",
+            file=sys.stderr, flush=True,
+        )
+        execution_options = replace(
+            execution_options, cpu_workers=available_cores,
+        )
+    requested_device = execution_options.device
+    selected_device = resolve_device(requested_device)
+    device = _device_details(selected_device, requested_device)
+    # Resolve auto exactly once: no accidental CPU/GPU backend change between
+    # hierarchy levels after a CUDA driver or resource-state change.
+    if options.metric in {"typed_wl", "graphlet"}:
+        execution_options = replace(execution_options, device=selected_device)
+    elif selected_device == "cuda" and requested_device == "cuda":
+        raise ValueError(
+            f"metric={options.metric} has no CUDA backend; select --device cpu "
+            "or choose typed_wl/graphlet"
+        )
+    elif requested_device == "auto" and selected_device == "cuda":
+        execution_options = replace(execution_options, device="cpu")
+        device["selected"] = "cpu"
+        selected_device = "cpu"
+    device["cpu_workers"] = execution_options.cpu_workers
+    device["gpu_eligible"] = options.metric in {"typed_wl", "graphlet"}
+    print(json.dumps(
+        {"stage": "device_selected", "device": device}, sort_keys=True,
+    ), flush=True)
+    if not device["gpu_eligible"] and requested_device == "auto":
+        print(
+            f"WARNING: metric={options.metric} does not support GPU kNN; "
+            "using CPU for this scientific metric.",
+            file=sys.stderr, flush=True,
+        )
+    elif requested_device == "auto" and selected_device == "cpu":
+        from .wishart_gpu import cuda_diagnostics
+        print(
+            "WARNING: colab.device=auto resolved to CPU; GPU kNN will not be "
+            f"used. Diagnostics: {json.dumps(cuda_diagnostics(), sort_keys=True)}. "
+            "Select a Colab GPU runtime and install the [gpu] extra.",
+            file=sys.stderr, flush=True,
+        )
+    elif selected_device == "cuda" and options.metric not in {"typed_wl", "graphlet"}:
+        print(
+            f"WARNING: metric={options.metric} has no CUDA kNN backend; "
+            "this experiment will use CPU for metric computation.",
+            file=sys.stderr, flush=True,
+        )
     code_revision = _git_revision()
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -336,11 +398,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"resume {field} mismatch: keep the exact config, input and Git revision"
                 )
         previous_device = original.get("device", {}).get("selected")
-        if previous_device != selected_device:
-            raise ValueError(
-                f"resume compute device changed from {previous_device} to "
-                f"{selected_device}; use the same CPU/CUDA backend"
-            )
+        _assert_resume_device_consistent(previous_device, selected_device)
         if (drive_run / "COMPLETED").is_file():
             print(json.dumps({
                 "status": "already_completed",
