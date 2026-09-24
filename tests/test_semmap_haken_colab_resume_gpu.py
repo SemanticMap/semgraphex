@@ -411,3 +411,17 @@ def test_runner_records_per_level_phase_timing(tmp_path: Path) -> None:
     assert timings["full_scan"] >= 0
     assert timings["wishart_knn_clustering"] >= 0
     assert timings["mdl_scoring"] >= 0
+
+
+def test_sampled_brandes_spawn_matches_serial_bit_for_bit() -> None:
+    from semmap_haken.wishart_dynamics import (
+        _binary_topology, _sampled_betweenness_unweighted,
+    )
+    topology = _binary_topology(_tiny_graph().adjacency)
+    serial = _sampled_betweenness_unweighted(
+        topology, sample_count=6, rng=np.random.default_rng(47), workers=1,
+    )
+    process_pool = _sampled_betweenness_unweighted(
+        topology, sample_count=6, rng=np.random.default_rng(47), workers=2,
+    )
+    np.testing.assert_array_equal(serial, process_pool)
