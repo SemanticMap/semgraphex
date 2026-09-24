@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import gc
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -18,6 +21,9 @@ from scipy import sparse
 
 from .graph_build import PreparedGraph
 from .graph_dictionary import GraphDictionary, WishartFamilyRegistry
+from .wishart_parallel import (
+    initialize_match_worker, match_chunk, ordered_fingerprints, spawn_pool,
+)
 from .graph_mdl import (
     MdlOccurrence,
     build_canonical_huffman_codes,
@@ -266,11 +272,20 @@ def _discover_types(
     dictionary: GraphDictionary,
     *,
     level: int,
+    cpu_workers: int = 1,
 ) -> tuple[tuple[str, ...], Counter[str]]:
+    """Parallel pure WL fingerprints; allocate persistent type IDs serially."""
+    fingerprints = ordered_fingerprints(
+        candidates,
+        boundary_sensitive=dictionary.boundary_sensitive,
+        workers=cpu_workers,
+    )
     type_ids: list[str] = []
     counts: Counter[str] = Counter()
-    for candidate in candidates:
-        graph_type = dictionary.resolve_or_create(candidate, level=level)
+    for candidate, fingerprint in zip(candidates, fingerprints, strict=True):
+        graph_type = dictionary.resolve_or_create(
+            candidate, level=level, fingerprint=fingerprint,
+        )
         type_ids.append(graph_type.type_id)
         counts[graph_type.type_id] += 1
     return tuple(type_ids), counts
@@ -314,22 +329,18 @@ def _scan_known_types(
         next_index = 0
         batch_size = dictionary_options.frequency_scan_batch_size
         extractor = EgoExtractor(adjacency, relation_layers)
-        for start in range(0, adjacency.shape[0], batch_size):
-            stop = min(adjacency.shape[0], start + batch_size)
-            candidates = extractor.extract_centers(
-                range(start, stop),
-                radius=wishart_options.radius,
-                max_ego_nodes=wishart_options.max_ego_nodes,
-                symbol_types=symbol_types,
-                workers=cpu_workers,
-            )
-            for candidate in candidates:
-                matched = dictionary.match_with_mapping(candidate)
+
+        def consume(
+            batch: Sequence[EgoCandidate],
+            matches: Sequence[tuple[str, tuple[int, ...]] | None],
+        ) -> None:
+            nonlocal next_index
+            for candidate, matched in zip(batch, matches, strict=True):
                 if matched is None:
                     continue
-                graph_type = matched.graph_type
+                type_id, mapping = matched
                 nodes = tuple(int(x) for x in candidate.nodes)
-                key = (graph_type.type_id, nodes)
+                key = (type_id, nodes)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -339,14 +350,54 @@ def _scan_known_types(
                         center=int(candidate.center),
                         nodes=nodes,
                         prototype_to_fine_nodes=tuple(
-                            int(candidate.nodes[local_index])
-                            for local_index in matched.prototype_to_candidate
+                            int(candidate.nodes[local_index]) for local_index in mapping
                         ),
-                        dictionary_type_id=graph_type.type_id,
+                        dictionary_type_id=type_id,
                     )
                 )
                 next_index += 1
-            del candidates
+
+        # Only matching is GIL-bound. The parent extracts CSR candidates and
+        # consumes results in center order; worker dictionary snapshots never
+        # mutate the live registry. At most 2*workers batches are in flight.
+        process_pool = (
+            spawn_pool(
+                workers=cpu_workers,
+                initializer=initialize_match_worker,
+                initargs=(dictionary,),
+            )
+            if cpu_workers > 1 else nullcontext(None)
+        )
+        pending = deque()
+        with process_pool as pool:
+            for start in range(0, adjacency.shape[0], batch_size):
+                stop = min(adjacency.shape[0], start + batch_size)
+                candidates = extractor.extract_centers(
+                    range(start, stop),
+                    radius=wishart_options.radius,
+                    max_ego_nodes=wishart_options.max_ego_nodes,
+                    symbol_types=symbol_types,
+                    workers=1 if pool is not None else cpu_workers,
+                )
+                if pool is None:
+                    matches = []
+                    for candidate in candidates:
+                        match = dictionary.match_with_mapping(candidate)
+                        matches.append(
+                            (match.graph_type.type_id, match.prototype_to_candidate)
+                            if match is not None else None
+                        )
+                    consume(candidates, matches)
+                else:
+                    pending.append(
+                        (candidates, pool.submit(match_chunk, tuple(candidates)))
+                    )
+                    if len(pending) >= 2 * cpu_workers:
+                        first_batch, future = pending.popleft()
+                        consume(first_batch, future.result())
+            while pending:
+                first_batch, future = pending.popleft()
+                consume(first_batch, future.result())
         scanned = tuple(rows)
 
     counts: Counter[str] = Counter(item.dictionary_type_id for item in scanned)
@@ -483,6 +534,7 @@ def _score_and_select_occurrences(
     fallback_bits = max(1.0, math.log2(max(2, len(eligible_counts))))
     scored: list[MdlOccurrence] = []
     payload_by_index: dict[int, tuple[_ScannedOccurrence, float, float]] = {}
+    cost_cache: dict[str, tuple[float, float]] = {}
 
     for item in scanned:
         if len(item.nodes) < min_figure_nodes:
@@ -490,23 +542,23 @@ def _score_and_select_occurrences(
         support = eligible_counts.get(item.dictionary_type_id, 0)
         if support <= 0:
             continue
-        representative = dictionary.representative(item.dictionary_type_id)
-        prototype_bits = estimate_dictionary_prototype_bits(
-            representative,
-            relation_count=relation_count,
-        )
-        type_code_bits = float(
-            len(huffman[item.dictionary_type_id])
-            if item.dictionary_type_id in huffman
-            else fallback_bits
-        )
-        raw_bits, encoded_bits = estimated_occurrence_cost(
-            representative,
-            graph_node_count=graph_node_count,
-            relation_count=relation_count,
-            type_code_bits=type_code_bits,
-            dictionary_amortized_bits=prototype_bits / support,
-        )
+        if item.dictionary_type_id not in cost_cache:
+            representative = dictionary.representative(item.dictionary_type_id)
+            prototype_bits = estimate_dictionary_prototype_bits(
+                representative, relation_count=relation_count,
+            )
+            type_code_bits = float(
+                len(huffman[item.dictionary_type_id])
+                if item.dictionary_type_id in huffman else fallback_bits
+            )
+            cost_cache[item.dictionary_type_id] = estimated_occurrence_cost(
+                representative,
+                graph_node_count=graph_node_count,
+                relation_count=relation_count,
+                type_code_bits=type_code_bits,
+                dictionary_amortized_bits=prototype_bits / support,
+            )
+        raw_bits, encoded_bits = cost_cache[item.dictionary_type_id]
         if raw_bits - encoded_bits <= dictionary_options.min_mdl_gain_bits:
             continue
         mdl = MdlOccurrence(
