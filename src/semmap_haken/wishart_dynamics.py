@@ -119,57 +119,92 @@ def _binary_topology(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
     return topology
 
 
+_BRANDES_TOPOLOGY: sparse.csr_matrix | None = None
+
+
+def _brandes_source(topology: sparse.csr_matrix, source: int) -> np.ndarray:
+    """Per-source dependency vector, independent of every other sampled source."""
+    n = topology.shape[0]
+    stack: list[int] = []
+    predecessors: list[list[int]] = [[] for _ in range(n)]
+    sigma = np.zeros(n, dtype=np.float64)
+    sigma[source] = 1.0
+    distance = np.full(n, -1, dtype=np.int64)
+    distance[source] = 0
+    queue = [source]
+    head = 0
+    while head < len(queue):
+        vertex = queue[head]
+        head += 1
+        stack.append(vertex)
+        start, stop = topology.indptr[vertex], topology.indptr[vertex + 1]
+        for neighbor in topology.indices[start:stop]:
+            neighbor = int(neighbor)
+            if distance[neighbor] < 0:
+                distance[neighbor] = distance[vertex] + 1
+                queue.append(neighbor)
+            if distance[neighbor] == distance[vertex] + 1:
+                sigma[neighbor] += sigma[vertex]
+                predecessors[neighbor].append(vertex)
+
+    contribution = np.zeros(n, dtype=np.float64)
+    dependency = np.zeros(n, dtype=np.float64)
+    while stack:
+        node = stack.pop()
+        if sigma[node] > 0:
+            coefficient = (1.0 + dependency[node]) / sigma[node]
+            for predecessor in predecessors[node]:
+                dependency[predecessor] += sigma[predecessor] * coefficient
+        if node != source:
+            contribution[node] = dependency[node]
+    return contribution
+
+
+def _brandes_worker_init(topology: sparse.csr_matrix) -> None:
+    global _BRANDES_TOPOLOGY
+    _BRANDES_TOPOLOGY = topology
+
+
+def _brandes_worker_source(source: int) -> np.ndarray:
+    if _BRANDES_TOPOLOGY is None:
+        raise RuntimeError("sampled Brandes worker not initialized")
+    return _brandes_source(_BRANDES_TOPOLOGY, int(source))
+
+
 def _sampled_betweenness_unweighted(
     topology: sparse.csr_matrix,
     *,
     sample_count: int,
     rng: np.random.Generator,
+    workers: int = 1,
 ) -> np.ndarray:
-    """Approximate unnormalized undirected betweenness using sampled Brandes sources.
-
-    This avoids materializing a NetworkX graph, which is expensive in Colab.
-    The n/k scaling matches the standard source-sampling idea; the final 1/2
-    corrects double counting for undirected paths.
-    """
+    """Source-sampled Brandes; spawn workers with deterministic ordered sum."""
     n = topology.shape[0]
     result = np.zeros(n, dtype=np.float64)
     if n < 2 or topology.nnz == 0:
         return result
     sources = _sample_nodes(n, min(sample_count, n), rng)
-    for source in sources:
-        source = int(source)
-        stack: list[int] = []
-        predecessors: list[list[int]] = [[] for _ in range(n)]
-        sigma = np.zeros(n, dtype=np.float64)
-        sigma[source] = 1.0
-        distance = np.full(n, -1, dtype=np.int64)
-        distance[source] = 0
-        queue = [source]
-        head = 0
-        while head < len(queue):
-            vertex = queue[head]
-            head += 1
-            stack.append(vertex)
-            start, stop = topology.indptr[vertex], topology.indptr[vertex + 1]
-            for neighbor in topology.indices[start:stop]:
-                neighbor = int(neighbor)
-                if distance[neighbor] < 0:
-                    distance[neighbor] = distance[vertex] + 1
-                    queue.append(neighbor)
-                if distance[neighbor] == distance[vertex] + 1:
-                    sigma[neighbor] += sigma[vertex]
-                    predecessors[neighbor].append(vertex)
-
-        dependency = np.zeros(n, dtype=np.float64)
-        while stack:
-            node = stack.pop()
-            if sigma[node] > 0:
-                coefficient = (1.0 + dependency[node]) / sigma[node]
-                for predecessor in predecessors[node]:
-                    dependency[predecessor] += sigma[predecessor] * coefficient
-            if node != source:
-                result[node] += dependency[node]
-
+    if workers <= 1 or len(sources) <= 1:
+        for source in sources:
+            result += _brandes_source(topology, int(source))
+    else:
+        from .wishart_parallel import spawn_pool
+        pending = deque()
+        # Never fork after CUDA initialization. Share the immutable topology
+        # once per worker via the initializer, not once per source.
+        with spawn_pool(
+            workers=workers,
+            initializer=_brandes_worker_init,
+            initargs=(topology,),
+        ) as pool:
+            for source in sources:
+                pending.append(
+                    pool.submit(_brandes_worker_source, int(source))
+                )
+                if len(pending) >= 2 * workers:
+                    result += pending.popleft().result()
+            while pending:
+                result += pending.popleft().result()
     scale = (n / float(len(sources))) * 0.5
     return result * scale
 
@@ -347,6 +382,7 @@ def compute_dynamic_snapshot(
         topology,
         sample_count=betweenness_samples,
         rng=rng,
+        workers=cpu_workers,
     )
     max_b = float(betweenness.max(initial=0.0)) if betweenness.size else None
     congestion = (
