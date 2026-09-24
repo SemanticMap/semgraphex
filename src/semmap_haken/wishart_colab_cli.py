@@ -269,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
     # hierarchy levels after a CUDA driver or resource-state change.
     if options.metric in {"typed_wl", "graphlet"}:
         execution_options = replace(execution_options, device=selected_device)
+    elif selected_device == "cuda" and requested_device == "cuda":
+        raise ValueError(
+            f"metric={options.metric} has no CUDA backend; select --device cpu "
+            "or choose typed_wl/graphlet"
+        )
     elif requested_device == "auto" and selected_device == "cuda":
         execution_options = replace(execution_options, device="cpu")
         device["selected"] = "cpu"
@@ -278,7 +283,13 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(
         {"stage": "device_selected", "device": device}, sort_keys=True,
     ), flush=True)
-    if execution_options.device == "auto" and selected_device == "cpu":
+    if not device["gpu_eligible"] and requested_device == "auto":
+        print(
+            f"WARNING: metric={options.metric} does not support GPU kNN; "
+            "using CPU for this scientific metric.",
+            file=sys.stderr, flush=True,
+        )
+    elif requested_device == "auto" and selected_device == "cpu":
         from .wishart_gpu import cuda_diagnostics
         print(
             "WARNING: colab.device=auto resolved to CPU; GPU kNN will not be "
