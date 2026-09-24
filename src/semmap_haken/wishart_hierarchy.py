@@ -142,8 +142,9 @@ def _contract_matrix(
     assignment: np.ndarray,
     *,
     aggregation: str,
+    membership: sparse.csr_matrix | None = None,
 ) -> sparse.csr_matrix:
-    p = membership_matrix(assignment)
+    p = membership if membership is not None else membership_matrix(assignment)
     coarse = (p.T @ matrix.tocsr() @ p).tocsr()
     if aggregation == "mean_density":
         sizes = np.asarray(p.sum(axis=0)).ravel()
@@ -152,6 +153,32 @@ def _contract_matrix(
         coarse.data = coarse.data / scale
     coarse.eliminate_zeros()
     return coarse
+
+
+def _contract_relation_layers(
+    layers: Mapping[str, sparse.csr_matrix],
+    assignment: np.ndarray,
+    *,
+    aggregation: str,
+    workers: int = 1,
+    membership: sparse.csr_matrix | None = None,
+) -> dict[str, sparse.csr_matrix]:
+    """Contract independent relation layers using one shared membership CSR."""
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    p = membership if membership is not None else membership_matrix(assignment)
+    items = sorted(layers.items())
+
+    def contract(item: tuple[str, sparse.csr_matrix]) -> tuple[str, sparse.csr_matrix]:
+        relation, layer = item
+        return relation, _contract_matrix(
+            layer, assignment, aggregation=aggregation, membership=p,
+        )
+
+    if workers == 1 or len(items) < 2:
+        return dict(contract(item) for item in items)
+    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+        return dict(pool.map(contract, items))
 
 
 def _compose_memberships(
@@ -459,6 +486,7 @@ def _cluster_dictionary_types(
         device=execution_options.device,
         gpu_batch_size=execution_options.gpu_batch_size,
         min_gpu_types=execution_options.min_gpu_types,
+        cpu_workers=execution_options.cpu_workers,
     )
     if options.density_weight == "occurrence_frequency":
         sample_weights = np.array([counts[type_id] for type_id in type_ids], dtype=float)
@@ -940,9 +968,8 @@ def run_wishart_hierarchy(
             break
 
         discovery_type_ids, _ = _discover_types(
-            candidates,
-            dictionary,
-            level=level,
+            candidates, dictionary, level=level,
+            cpu_workers=execution_options.cpu_workers,
         )
         if len(dictionary.types) > dictionary_options.max_dictionary_size:
             stop_reason = "max_dictionary_size"
@@ -1084,19 +1111,17 @@ def run_wishart_hierarchy(
 
         old_count = current.shape[0]
         previous_symbol_types = symbol_types
+        membership = membership_matrix(plan.fine_to_coarse)
         current = _contract_matrix(
-            current,
-            plan.fine_to_coarse,
-            aggregation=options.aggregation,
+            current, plan.fine_to_coarse,
+            aggregation=options.aggregation, membership=membership,
         )
-        relation_layers = {
-            relation: _contract_matrix(
-                layer,
-                plan.fine_to_coarse,
-                aggregation=options.aggregation,
-            )
-            for relation, layer in relation_layers.items()
-        }
+        relation_layers = _contract_relation_layers(
+            relation_layers, plan.fine_to_coarse,
+            aggregation=options.aggregation,
+            workers=execution_options.cpu_workers,
+            membership=membership,
+        )
         memberships = _compose_memberships(memberships, plan.fine_to_coarse)
         symbol_types = _compose_symbol_types(previous_symbol_types, plan)
 
