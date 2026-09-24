@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import math
 import re
@@ -26,10 +27,12 @@ from .graph_mdl import (
 )
 from .quotient import membership_matrix
 from .wishart_cluster import WishartClustering, wishart_cluster
-from .wishart_config import DictionaryOptions, WishartOptions
+from .wishart_config import ColabExecutionOptions, DictionaryOptions, WishartOptions
+from .wishart_resume import load_latest_checkpoint, truncate_after_checkpoint, write_level_checkpoint
 from .wishart_dynamics import cluster_transition_metrics, compute_dynamic_snapshot
 from .wishart_metrics import (
     EgoCandidate,
+    EgoExtractor,
     build_neighbor_graph,
     extract_ego_candidates,
     relation_layers_from_prepared,
@@ -284,6 +287,7 @@ def _scan_known_types(
     symbol_types: Mapping[int, str],
     wishart_options: WishartOptions,
     dictionary_options: DictionaryOptions,
+    cpu_workers: int = 1,
 ) -> tuple[tuple[_ScannedOccurrence, ...], Counter[str]]:
     if dictionary_options.frequency_scan == "discovery":
         rows: list[_ScannedOccurrence] = []
@@ -309,17 +313,15 @@ def _scan_known_types(
         seen: set[tuple[str, tuple[int, ...]]] = set()
         next_index = 0
         batch_size = dictionary_options.frequency_scan_batch_size
+        extractor = EgoExtractor(adjacency, relation_layers)
         for start in range(0, adjacency.shape[0], batch_size):
             stop = min(adjacency.shape[0], start + batch_size)
-            candidates = extract_ego_candidates(
-                adjacency,
-                relation_layers,
+            candidates = extractor.extract_centers(
+                range(start, stop),
                 radius=wishart_options.radius,
                 max_ego_nodes=wishart_options.max_ego_nodes,
-                candidate_limit=stop - start,
-                seed=wishart_options.random_seed + 4001 * level + start,
                 symbol_types=symbol_types,
-                candidate_centers=range(start, stop),
+                workers=cpu_workers,
             )
             for candidate in candidates:
                 matched = dictionary.match_with_mapping(candidate)
@@ -360,6 +362,7 @@ def _cluster_dictionary_types(
     counts: Mapping[str, int],
     options: WishartOptions,
     dictionary_options: DictionaryOptions,
+    execution_options: ColabExecutionOptions,
 ) -> tuple[
     tuple[str, ...],
     WishartClustering,
@@ -402,6 +405,9 @@ def _cluster_dictionary_types(
         fgw_alpha=options.fgw_alpha,
         relation_js_block_size=options.relation_js_block_size,
         seed=options.random_seed + 3001 * level,
+        device=execution_options.device,
+        gpu_batch_size=execution_options.gpu_batch_size,
+        min_gpu_types=execution_options.min_gpu_types,
     )
     if options.density_weight == "occurrence_frequency":
         sample_weights = np.array([counts[type_id] for type_id in type_ids], dtype=float)
