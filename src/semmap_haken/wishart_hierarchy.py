@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import math
 import re
@@ -26,10 +27,12 @@ from .graph_mdl import (
 )
 from .quotient import membership_matrix
 from .wishart_cluster import WishartClustering, wishart_cluster
-from .wishart_config import DictionaryOptions, WishartOptions
+from .wishart_config import ColabExecutionOptions, DictionaryOptions, WishartOptions
+from .wishart_resume import load_latest_checkpoint, truncate_after_checkpoint, write_level_checkpoint
 from .wishart_dynamics import cluster_transition_metrics, compute_dynamic_snapshot
 from .wishart_metrics import (
     EgoCandidate,
+    EgoExtractor,
     build_neighbor_graph,
     extract_ego_candidates,
     relation_layers_from_prepared,
@@ -284,6 +287,7 @@ def _scan_known_types(
     symbol_types: Mapping[int, str],
     wishart_options: WishartOptions,
     dictionary_options: DictionaryOptions,
+    cpu_workers: int = 1,
 ) -> tuple[tuple[_ScannedOccurrence, ...], Counter[str]]:
     if dictionary_options.frequency_scan == "discovery":
         rows: list[_ScannedOccurrence] = []
@@ -309,17 +313,15 @@ def _scan_known_types(
         seen: set[tuple[str, tuple[int, ...]]] = set()
         next_index = 0
         batch_size = dictionary_options.frequency_scan_batch_size
+        extractor = EgoExtractor(adjacency, relation_layers)
         for start in range(0, adjacency.shape[0], batch_size):
             stop = min(adjacency.shape[0], start + batch_size)
-            candidates = extract_ego_candidates(
-                adjacency,
-                relation_layers,
+            candidates = extractor.extract_centers(
+                range(start, stop),
                 radius=wishart_options.radius,
                 max_ego_nodes=wishart_options.max_ego_nodes,
-                candidate_limit=stop - start,
-                seed=wishart_options.random_seed + 4001 * level + start,
                 symbol_types=symbol_types,
-                candidate_centers=range(start, stop),
+                workers=cpu_workers,
             )
             for candidate in candidates:
                 matched = dictionary.match_with_mapping(candidate)
@@ -360,6 +362,7 @@ def _cluster_dictionary_types(
     counts: Mapping[str, int],
     options: WishartOptions,
     dictionary_options: DictionaryOptions,
+    execution_options: ColabExecutionOptions,
 ) -> tuple[
     tuple[str, ...],
     WishartClustering,
@@ -402,6 +405,9 @@ def _cluster_dictionary_types(
         fgw_alpha=options.fgw_alpha,
         relation_js_block_size=options.relation_js_block_size,
         seed=options.random_seed + 3001 * level,
+        device=execution_options.device,
+        gpu_batch_size=execution_options.gpu_batch_size,
+        min_gpu_types=execution_options.min_gpu_types,
     )
     if options.density_weight == "occurrence_frequency":
         sample_weights = np.array([counts[type_id] for type_id in type_ids], dtype=float)
@@ -714,8 +720,13 @@ def run_wishart_hierarchy(
     directed: bool,
     options: WishartOptions,
     dictionary_options: DictionaryOptions | None = None,
+    execution_options: ColabExecutionOptions | None = None,
     output_dir: str | Path,
     checkpoint_hook: Callable[[Path, Mapping[str, object]], None] | None = None,
+    resume: bool = False,
+    checkpoint_config_hash: str | None = None,
+    checkpoint_input_hash: str | None = None,
+    checkpoint_code_revision: str = "unknown",
 ) -> WishartRunSummary:
     """Learn persistent graph symbols, contract profitable instances, and repeat."""
     started = time.perf_counter()
@@ -731,26 +742,96 @@ def run_wishart_hierarchy(
             "for the legacy contraction-only experiment"
         )
 
-    current = graph.adjacency.tocsr().astype(np.float64, copy=False)
-    relation_layers = relation_layers_from_prepared(graph, directed=directed)
-    memberships: dict[int, tuple[str, ...]] = {
-        i: (node_id,) for i, node_id in enumerate(graph.node_ids)
-    }
-    symbol_types: dict[int, str] = {}
-    dictionary = GraphDictionary(
-        boundary_sensitive=dictionary_options.boundary_sensitive
-    )
-    family_registry = WishartFamilyRegistry(
-        match_jaccard=dictionary_options.family_match_jaccard
-    )
-    current_huffman: dict[str, str] = {}
+    execution_options = execution_options or ColabExecutionOptions()
+    execution_options.validate()
+    from .wishart_resume import config_sha256  # keeps checkpoint format isolated
 
-    initial_nodes = current.shape[0]
+    if checkpoint_config_hash is None:
+        serialized = json.dumps(
+            {
+                "wishart": asdict(options),
+                "dictionary": asdict(dictionary_options),
+                "execution": asdict(execution_options),
+                "directed": bool(directed),
+            }, sort_keys=True,
+        )
+        checkpoint_config_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    if checkpoint_input_hash is None:
+        source = graph.adjacency.tocsr()
+        digest = hashlib.sha256()
+        digest.update(source.indptr.tobytes())
+        digest.update(source.indices.tobytes())
+        digest.update(source.data.tobytes())
+        for node_id in graph.node_ids:
+            digest.update(node_id.encode("utf-8") + b"\\0")
+        for edge in graph.selected_edges:
+            digest.update(json.dumps(edge, sort_keys=True).encode("utf-8") + b"\\n")
+        checkpoint_input_hash = digest.hexdigest()
+
+    initial_nodes = int(graph.adjacency.shape[0])
     stop_reason = "max_levels"
-    level_summaries: list[dict[str, object]] = []
-    transition_summaries: list[dict[str, object]] = []
+    start_level = 0
+    if resume:
+        state = load_latest_checkpoint(
+            destination,
+            config_hash=checkpoint_config_hash,
+            input_hash=checkpoint_input_hash,
+            code_revision=checkpoint_code_revision,
+        )
+        if state is None:
+            raise ValueError("resume requested but no valid checkpoint exists")
+        start_level = int(state["next_level"])
+        truncate_after_checkpoint(destination, next_level=start_level)
+        current = state["current"]
+        relation_layers = state["relation_layers"]
+        memberships = state["memberships"]
+        symbol_types = state["symbol_types"]
+        dictionary = state["dictionary"]
+        family_registry = state["family_registry"]
+        current_huffman = state["current_huffman"]
+        level_summaries = state["level_summaries"]
+        transition_summaries = state["transition_summaries"]
+        if checkpoint_hook is not None:
+            checkpoint_hook(
+                destination,
+                {"stage": "resumed", "next_level": start_level,
+                 "dictionary_size": len(dictionary.types)},
+            )
+    else:
+        current = graph.adjacency.tocsr().astype(np.float64, copy=False)
+        relation_layers = relation_layers_from_prepared(graph, directed=directed)
+        memberships: dict[int, tuple[str, ...]] = {
+            i: (node_id,) for i, node_id in enumerate(graph.node_ids)
+        }
+        symbol_types: dict[int, str] = {}
+        dictionary = GraphDictionary(
+            boundary_sensitive=dictionary_options.boundary_sensitive
+        )
+        family_registry = WishartFamilyRegistry(
+            match_jaccard=dictionary_options.family_match_jaccard
+        )
+        current_huffman: dict[str, str] = {}
+        level_summaries: list[dict[str, object]] = []
+        transition_summaries: list[dict[str, object]] = []
+        write_level_checkpoint(
+            destination, next_level=0, current=current,
+            relation_layers=relation_layers, memberships=memberships,
+            symbol_types=symbol_types, dictionary=dictionary,
+            family_registry=family_registry, current_huffman=current_huffman,
+            level_summaries=level_summaries,
+            transition_summaries=transition_summaries,
+            config_hash=checkpoint_config_hash,
+            input_hash=checkpoint_input_hash,
+            code_revision=checkpoint_code_revision,
+        )
+        if checkpoint_hook is not None:
+            checkpoint_hook(
+                destination,
+                {"stage": "checkpoint", "next_level": 0,
+                 "dictionary_size": len(dictionary.types)},
+            )
 
-    for level in range(options.max_levels + 1):
+    for level in range(start_level, options.max_levels + 1):
         dynamic_summary, stationary_mass = _write_level(
             destination,
             level=level,
@@ -800,6 +881,7 @@ def run_wishart_hierarchy(
             candidate_limit=options.candidate_limit,
             seed=options.random_seed + 2003 * level,
             symbol_types=symbol_types,
+            workers=execution_options.cpu_workers,
         )
         if not candidates:
             stop_reason = "no_candidates"
@@ -824,6 +906,7 @@ def run_wishart_hierarchy(
             symbol_types=symbol_types,
             wishart_options=options,
             dictionary_options=dictionary_options,
+            cpu_workers=execution_options.cpu_workers,
         )
 
         type_ids, clustering, type_info, metric_metadata = _cluster_dictionary_types(
@@ -833,6 +916,7 @@ def run_wishart_hierarchy(
             counts=full_counts,
             options=options,
             dictionary_options=dictionary_options,
+            execution_options=execution_options,
         )
 
         occurrences, mdl_metrics, selection_huffman = _score_and_select_occurrences(
@@ -978,6 +1062,30 @@ def run_wishart_hierarchy(
             }
         )
 
+        # Checkpoint only after graph, dictionary, family registry, symbol types,
+        # transition summaries and all provenance have advanced together.
+        write_level_checkpoint(
+            destination, next_level=level + 1, current=current,
+            relation_layers=relation_layers, memberships=memberships,
+            symbol_types=symbol_types, dictionary=dictionary,
+            family_registry=family_registry, current_huffman=current_huffman,
+            level_summaries=level_summaries,
+            transition_summaries=transition_summaries,
+            config_hash=checkpoint_config_hash,
+            input_hash=checkpoint_input_hash,
+            code_revision=checkpoint_code_revision,
+        )
+        if checkpoint_hook is not None:
+            checkpoint_hook(
+                destination,
+                {
+                    "stage": "checkpoint",
+                    "next_level": level + 1,
+                    "dictionary_size": len(dictionary.types),
+                    "accepted_occurrences": len(occurrences),
+                },
+            )
+
         del candidates, discovery_type_ids, scanned, occurrences, plan, cluster_rows
         gc.collect()
 
@@ -1002,6 +1110,8 @@ def run_wishart_hierarchy(
                 **summary.to_dict(),
                 "options": asdict(options),
                 "dictionary_options": asdict(dictionary_options),
+                "execution_options": asdict(execution_options),
+                "resumed_from_level": start_level if resume else None,
                 "dictionary_size": len(dictionary.types),
                 "wishart_family_count": len(family_registry.families),
                 "levels_detail": level_summaries,

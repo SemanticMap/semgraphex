@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Mapping, Sequence
@@ -94,6 +95,119 @@ def _ego_nodes(adjacency: sparse.csr_matrix, center: int, radius: int, cap: int)
     return np.array(sorted(seen), dtype=np.int64)
 
 
+class EgoExtractor:
+    """Reuse one read-only CSR view of the graph across bounded center batches.
+
+    SciPy CSR slicing releases the GIL for the expensive native operations.
+    Threads avoid copying large CSR graphs to worker processes (and avoid
+    CUDA/fork hazards after initializing the accelerator).
+    """
+
+    def __init__(
+        self,
+        adjacency: sparse.spmatrix,
+        relation_layers: Mapping[str, sparse.spmatrix],
+    ) -> None:
+        self.graph = adjacency.tocsr()
+        self.typed = {name: layer.tocsr() for name, layer in relation_layers.items()}
+        self.incoming = {name: layer.T.tocsr() for name, layer in self.typed.items()}
+        # Calculated once, not 100k times inside the per-center loop.
+        self.out_degree = {
+            name: np.diff(matrix.indptr)
+            for name, matrix in self.typed.items()
+        }
+        self.in_degree = {
+            name: np.diff(matrix.indptr)
+            for name, matrix in self.incoming.items()
+        }
+
+    def _candidate(
+        self,
+        center: int,
+        *,
+        radius: int,
+        max_ego_nodes: int,
+        symbol_types: Mapping[int, str],
+    ) -> EgoCandidate | None:
+        nodes = _ego_nodes(self.graph, center, radius, max_ego_nodes)
+        if nodes.size < 2:
+            return None
+        sub = self.graph[nodes][:, nodes].tocsr()
+        layers: dict[str, sparse.csr_matrix] = {}
+        boundary: list[tuple[int, str, str, int]] = []
+        for name, matrix in self.typed.items():
+            local = matrix[nodes][:, nodes].tocsr()
+            if local.nnz:
+                layers[name] = local
+            incoming = self.incoming[name]
+            internal_out = np.diff(local.indptr)
+            internal_in = np.bincount(
+                local.indices, minlength=len(nodes)
+            )
+            external_out = self.out_degree[name][nodes] - internal_out
+            external_in = self.in_degree[name][nodes] - internal_in
+            for index in range(len(nodes)):
+                if external_out[index] > 0:
+                    boundary.append((index, name, "out", int(external_out[index])))
+                if external_in[index] > 0:
+                    boundary.append((index, name, "in", int(external_in[index])))
+        local_types = tuple(symbol_types.get(int(node)) for node in nodes)
+        return EgoCandidate(
+            int(center),
+            nodes,
+            sub,
+            layers,
+            boundary_signature=tuple(sorted(boundary)),
+            node_types=local_types,
+        )
+
+    def extract_centers(
+        self,
+        centers: Sequence[int],
+        *,
+        radius: int,
+        max_ego_nodes: int,
+        symbol_types: Mapping[int, str] | None = None,
+        workers: int = 1,
+        work_batch_size: int = 64,
+    ) -> tuple[EgoCandidate, ...]:
+        if workers < 1 or work_batch_size < 1:
+            raise ValueError("workers and work_batch_size must be positive")
+        selected = np.asarray(centers, dtype=np.int64)
+        if selected.ndim != 1:
+            raise ValueError("candidate_centers must be one-dimensional")
+        if np.any(selected < 0) or np.any(selected >= self.graph.shape[0]):
+            raise ValueError("candidate_centers contain out-of-range node indices")
+        symbols = symbol_types or {}
+
+        def batch_extract(batch: np.ndarray) -> list[EgoCandidate]:
+            rows = (
+                self._candidate(
+                    int(center),
+                    radius=radius,
+                    max_ego_nodes=max_ego_nodes,
+                    symbol_types=symbols,
+                )
+                for center in batch
+            )
+            return [candidate for candidate in rows if candidate is not None]
+
+        batches = (
+            selected[index:index + work_batch_size]
+            for index in range(0, len(selected), work_batch_size)
+        )
+        if workers == 1:
+            return tuple(item for batch in batches for item in batch_extract(batch))
+        # executor.map returns batches in submission order: seeded experiments
+        # have the same candidate ordering regardless of thread scheduling.
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return tuple(
+                item
+                for completed in executor.map(batch_extract, batches)
+                for item in completed
+            )
+
+
 def extract_ego_candidates(
     adjacency: sparse.spmatrix,
     relation_layers: Mapping[str, sparse.spmatrix],
@@ -104,7 +218,9 @@ def extract_ego_candidates(
     seed: int,
     symbol_types: Mapping[int, str] | None = None,
     candidate_centers: Sequence[int] | None = None,
+    workers: int = 1,
 ) -> tuple[EgoCandidate, ...]:
+    """Extract deterministic ego candidates, optionally with bounded threads."""
     graph = adjacency.tocsr()
     n = graph.shape[0]
     if n == 0:
@@ -116,47 +232,14 @@ def extract_ego_candidates(
             centers = np.sort(rng.choice(centers, size=candidate_limit, replace=False))
     else:
         centers = np.asarray(candidate_centers, dtype=np.int64)
-        if centers.ndim != 1:
-            raise ValueError("candidate_centers must be one-dimensional")
-        if np.any(centers < 0) or np.any(centers >= n):
-            raise ValueError("candidate_centers contain out-of-range node indices")
-    candidates: list[EgoCandidate] = []
-    typed = {name: matrix.tocsr() for name, matrix in relation_layers.items()}
-    typed_incoming = {name: matrix.T.tocsr() for name, matrix in typed.items()}
-    symbol_types = symbol_types or {}
-    for center in centers:
-        nodes = _ego_nodes(graph, int(center), radius, max_ego_nodes)
-        if nodes.size < 2:
-            continue
-        sub = graph[nodes][:, nodes].tocsr()
-        layers: dict[str, sparse.csr_matrix] = {}
-        boundary: list[tuple[int, str, str, int]] = []
-        for name, matrix in typed.items():
-            local = matrix[nodes][:, nodes].tocsr()
-            if local.nnz:
-                layers[name] = local
-            incoming = typed_incoming[name]
-            for local_node, global_node in enumerate(nodes):
-                internal_out = int(local.getrow(local_node).nnz)
-                internal_in = int(local.getcol(local_node).nnz)
-                external_out = int(matrix.getrow(int(global_node)).nnz) - internal_out
-                external_in = int(incoming.getrow(int(global_node)).nnz) - internal_in
-                if external_out > 0:
-                    boundary.append((local_node, name, "out", external_out))
-                if external_in > 0:
-                    boundary.append((local_node, name, "in", external_in))
-        local_types = tuple(symbol_types.get(int(node)) for node in nodes)
-        candidates.append(
-            EgoCandidate(
-                int(center),
-                nodes,
-                sub,
-                layers,
-                boundary_signature=tuple(sorted(boundary)),
-                node_types=local_types,
-            )
-        )
-    return tuple(candidates)
+    extractor = EgoExtractor(graph, relation_layers)
+    return extractor.extract_centers(
+        centers,
+        radius=radius,
+        max_ego_nodes=max_ego_nodes,
+        symbol_types=symbol_types,
+        workers=workers,
+    )
 
 
 def relation_histogram_features(candidates: Sequence[EgoCandidate]) -> tuple[np.ndarray, tuple[str, ...]]:
@@ -281,15 +364,75 @@ def graphlet_features(
     return normalize(matrix, norm="l2", copy=False)
 
 
-def _knn_from_features(features: sparse.spmatrix | np.ndarray, k: int, metric: str) -> NeighborGraph:
+def _knn_from_features(
+    features: sparse.spmatrix | np.ndarray,
+    k: int,
+    metric: str,
+    *,
+    device: str = "cpu",
+    gpu_batch_size: int = 128,
+    min_gpu_types: int = 128,
+) -> NeighborGraph:
     count = features.shape[0]
     if count <= 1:
-        return NeighborGraph(np.empty((count, 0), dtype=np.int64), np.empty((count, 0)), {"backend": "features"})
+        return NeighborGraph(
+            np.empty((count, 0), dtype=np.int64),
+            np.empty((count, 0), dtype=np.float64),
+            {"backend": "features", "device": "cpu"},
+        )
     k = min(k, count - 1)
+    from .wishart_gpu import cuda_cosine_neighbors, resolve_device
+
+    actual = resolve_device(device)
+    if actual == "cuda" and (device == "cuda" or count >= min_gpu_types):
+        if metric != "cosine":
+            raise ValueError("CUDA feature search currently supports cosine only")
+        try:
+            indices, distances, metadata = cuda_cosine_neighbors(
+                features, k=k, query_batch_size=gpu_batch_size,
+            )
+            return NeighborGraph(indices, distances, metadata)
+        except RuntimeError as error:
+            if device != "auto" or "out of memory" not in str(error).lower():
+                raise
+            # Retry the entire neighbor graph on CPU; never silently mix
+            # results from GPU and CPU after a partial GPU failure.
+            fallback = "cuda_out_of_memory"
+
+    else:
+        fallback = "small_type_space" if actual == "cuda" else None
+
     model = NearestNeighbors(n_neighbors=k + 1, metric=metric, algorithm="brute")
     model.fit(features)
     distances, indices = model.kneighbors(features)
-    return NeighborGraph(indices[:, 1:].astype(np.int64), distances[:, 1:].astype(np.float64), {"backend": "features", "metric": metric})
+    # Duplicate feature vectors can make sklearn return a different identical
+    # point before 'self'; explicitly exclude the query index in every row.
+    output_indices = np.empty((count, k), dtype=np.int64)
+    output_distances = np.empty((count, k), dtype=np.float64)
+    for row in range(count):
+        retained = [(int(index), float(distance))
+                    for index, distance in zip(indices[row], distances[row])
+                    if int(index) != row]
+        if len(retained) < k:
+            additional = model.kneighbors(
+                features[row], n_neighbors=min(count, k + 2),
+            )
+            retained = [
+                (int(index), float(distance))
+                for index, distance in zip(additional[1][0], additional[0][0])
+                if int(index) != row
+            ]
+        retained = sorted(retained, key=lambda item: (item[1], item[0]))[:k]
+        output_indices[row] = [item[0] for item in retained]
+        output_distances[row] = [item[1] for item in retained]
+    metadata: dict[str, object] = {
+        "backend": "sklearn_cpu",
+        "metric": metric,
+        "device": "cpu",
+    }
+    if fallback is not None:
+        metadata["fallback_reason"] = fallback
+    return NeighborGraph(output_indices, output_distances, metadata)
 
 
 def _knn_from_distance_matrix(matrix: np.ndarray, k: int, metadata: dict[str, object]) -> NeighborGraph:
@@ -528,12 +671,18 @@ def build_neighbor_graph(
     fgw_alpha: float,
     relation_js_block_size: int,
     seed: int,
+    device: str = "cpu",
+    gpu_batch_size: int = 128,
+    min_gpu_types: int = 128,
 ) -> NeighborGraph:
     if len(candidates) <= 1:
         return NeighborGraph(np.empty((len(candidates), 0), dtype=np.int64), np.empty((len(candidates), 0)), {"metric": metric})
     if metric == "typed_wl":
         features = typed_wl_features(candidates, iterations=wl_iterations, dimension=feature_dim)
-        result = _knn_from_features(features, k, "cosine")
+        result = _knn_from_features(
+            features, k, "cosine", device=device,
+            gpu_batch_size=gpu_batch_size, min_gpu_types=min_gpu_types,
+        )
     elif metric == "graphlet":
         features = graphlet_features(
             candidates, graphlet_size=graphlet_size, samples=graphlet_samples,
@@ -541,10 +690,14 @@ def build_neighbor_graph(
         )
         result = _knn_from_features(features, k, "cosine")
     elif metric == "relation_js":
+        if device == "cuda":
+            raise ValueError("CUDA is supported for typed_wl and graphlet only")
         result = relation_js_neighbors(
             candidates, k=k, block_size=relation_js_block_size
         )
     elif metric in {"lowrank_gw", "fgw"}:
+        if device == "cuda":
+            raise ValueError("CUDA is supported for typed_wl and graphlet only")
         result = transport_neighbors(
             candidates, k=k, metric=metric, rank=transport_rank,
             max_candidates=transport_max_candidates, fgw_alpha=fgw_alpha,

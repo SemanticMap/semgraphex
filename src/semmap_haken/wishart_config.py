@@ -225,3 +225,48 @@ def load_dictionary_options(path: str | Path) -> DictionaryOptions:
     if not isinstance(raw, Mapping):
         raise ValueError("dictionary must be a mapping")
     return DictionaryOptions.from_mapping(raw)
+
+
+@dataclass(frozen=True)
+class ColabExecutionOptions:
+    """Resource settings; scientific Wishart parameters remain unchanged."""
+
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    cpu_workers: int = 2
+    gpu_batch_size: int = 128
+    min_gpu_types: int = 128
+    checkpoint_every_levels: int = 1
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "ColabExecutionOptions":
+        result = cls(
+            device=str(raw.get("device", "auto")),
+            cpu_workers=int(raw.get("cpu_workers", 2)),
+            gpu_batch_size=int(raw.get("gpu_batch_size", 128)),
+            min_gpu_types=int(raw.get("min_gpu_types", 128)),
+            checkpoint_every_levels=int(raw.get("checkpoint_every_levels", 1)),
+        )
+        result.validate()
+        return result
+
+    def validate(self) -> None:
+        if self.device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("colab.device must be auto, cpu or cuda")
+        if self.cpu_workers < 1 or self.gpu_batch_size < 1 or self.min_gpu_types < 1:
+            raise ValueError("colab workers and GPU batch/type limits must be positive")
+        if self.checkpoint_every_levels != 1:
+            raise ValueError(
+                "colab.checkpoint_every_levels must be 1: checkpoints occur "
+                "after each complete contraction for safe interruption recovery"
+            )
+
+
+def load_colab_options(path: str | Path) -> ColabExecutionOptions:
+    source = Path(path)
+    document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    if not isinstance(document, Mapping):
+        raise ValueError("config must be a mapping")
+    raw = document.get("colab", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("colab must be a mapping")
+    return ColabExecutionOptions.from_mapping(raw)

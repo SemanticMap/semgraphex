@@ -123,3 +123,12 @@ dictionary:
 
   limits:
     max_dictionary_size: 20000
+
+# Editable copy lives on Drive: <DRIVE_ROOT>/config/experiment.yaml.
+# Only the kNN step (typed_wl / graphlet) is CUDA-accelerated.
+colab:
+  device: auto
+  cpu_workers: 4
+  gpu_batch_size: 128
+  min_gpu_types: 128
+  checkpoint_every_levels: 1

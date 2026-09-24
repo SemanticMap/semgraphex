@@ -6,9 +6,12 @@ on:
       - 'src/semmap_haken/wishart_*.py'
       - 'src/semmap_haken/graph_dictionary.py'
       - 'src/semmap_haken/graph_mdl.py'
+      - 'src/semmap_haken/wishart_resume.py'
+      - 'src/semmap_haken/wishart_gpu.py'
       - 'scripts/run_wishart_coarsening.py'
       - 'tests/test_semmap_haken_wishart.py'
       - 'tests/test_semmap_haken_wishart_colab.py'
+      - 'tests/test_semmap_haken_colab_resume_gpu.py'
       - 'notebooks/04_wishart_colab_drive.ipynb'
       - 'notebooks/05_wishart_graph_dictionary_colab.ipynb'
       - 'configs/wishart_conceptnet_colab.yaml'
@@ -34,4 +37,5 @@ jobs:
         run: |
           pytest -q \
             tests/test_semmap_haken_wishart.py \
-            tests/test_semmap_haken_wishart_colab.py
+            tests/test_semmap_haken_wishart_colab.py \
+            tests/test_semmap_haken_colab_resume_gpu.py
