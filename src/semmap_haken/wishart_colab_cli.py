@@ -251,8 +251,28 @@ def main(argv: list[str] | None = None) -> int:
             execution_options, cpu_workers=args.cpu_workers,
         )
     execution_options.validate()
-    selected_device = resolve_device(execution_options.device)
-    device = _device_details(selected_device, execution_options.device)
+    available_cores = max(1, os.cpu_count() or 1)
+    if execution_options.cpu_workers > available_cores:
+        print(
+            f"WARNING: requested {execution_options.cpu_workers} CPU workers but "
+            f"this runtime exposes only {available_cores}; clamping to "
+            f"{available_cores} to avoid oversubscription.",
+            file=sys.stderr, flush=True,
+        )
+        execution_options = replace(
+            execution_options, cpu_workers=available_cores,
+        )
+    requested_device = execution_options.device
+    selected_device = resolve_device(requested_device)
+    device = _device_details(selected_device, requested_device)
+    # Resolve auto exactly once: no accidental CPU/GPU backend change between
+    # hierarchy levels after a CUDA driver or resource-state change.
+    if options.metric in {"typed_wl", "graphlet"}:
+        execution_options = replace(execution_options, device=selected_device)
+    elif requested_device == "auto" and selected_device == "cuda":
+        execution_options = replace(execution_options, device="cpu")
+        device["selected"] = "cpu"
+        selected_device = "cpu"
     device["cpu_workers"] = execution_options.cpu_workers
     device["gpu_eligible"] = options.metric in {"typed_wl", "graphlet"}
     print(json.dumps(
