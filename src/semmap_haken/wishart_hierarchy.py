@@ -12,7 +12,7 @@ import math
 import re
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -21,6 +21,7 @@ from scipy import sparse
 
 from .graph_build import PreparedGraph
 from .graph_dictionary import GraphDictionary, WishartFamilyRegistry
+from .wishart_gpu import resolve_device
 from .wishart_parallel import (
     initialize_match_worker, match_chunk, ordered_fingerprints, spawn_pool,
 )
@@ -826,7 +827,16 @@ def run_wishart_hierarchy(
 
     execution_options = execution_options or ColabExecutionOptions()
     execution_options.validate()
-    from .wishart_resume import config_sha256  # keeps checkpoint format isolated
+    selected_backend = resolve_device(execution_options.device)
+    if options.metric not in {"typed_wl", "graphlet"} and selected_backend == "cuda":
+        if execution_options.device == "cuda":
+            raise ValueError(
+                f"metric={options.metric} has no CUDA backend; use CPU for this metric"
+            )
+        selected_backend = "cpu"
+    # A run uses one fixed numerical backend on every level, including after
+    # restoring a checkpoint. GPU OOM is fatal rather than mixing backends.
+    execution_options = replace(execution_options, device=selected_backend)
 
     if checkpoint_config_hash is None:
         serialized = json.dumps(
