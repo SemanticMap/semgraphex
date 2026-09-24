@@ -225,6 +225,7 @@ def _write_level(
     memberships: Mapping[int, Sequence[str]],
     symbol_types: Mapping[int, str],
     options: WishartOptions,
+    cpu_workers: int = 1,
 ) -> tuple[dict[str, object], np.ndarray]:
     level_dir = directory / f"level_{level:03d}"
     level_dir.mkdir(parents=True, exist_ok=True)
@@ -278,6 +279,7 @@ def _write_level(
         clustering_samples=options.clustering_samples,
         distance_samples=options.distance_samples,
         seed=options.random_seed + 1009 * level,
+        cpu_workers=cpu_workers,
     )
     (level_dir / "dynamic_metrics.json").write_text(
         json.dumps(snapshot.to_dict(), indent=2, sort_keys=True) + "\n",
@@ -912,6 +914,17 @@ def run_wishart_hierarchy(
             )
 
     for level in range(start_level, options.max_levels + 1):
+        phase_times = {
+            "dynamic_snapshot": 0.0,
+            "discovery": 0.0,
+            "full_scan": 0.0,
+            "wishart_knn_clustering": 0.0,
+            "mdl_scoring": 0.0,
+            "transition_metrics": 0.0,
+            "contraction": 0.0,
+            "checkpoint_sync": 0.0,
+        }
+        phase_started = time.perf_counter()
         dynamic_summary, stationary_mass = _write_level(
             destination,
             level=level,
@@ -920,7 +933,9 @@ def run_wishart_hierarchy(
             memberships=memberships,
             symbol_types=symbol_types,
             options=options,
+            cpu_workers=execution_options.cpu_workers,
         )
+        phase_times["dynamic_snapshot"] = time.perf_counter() - phase_started
         level_summaries.append(
             {
                 "level": level,
@@ -931,6 +946,7 @@ def run_wishart_hierarchy(
                     sum(bool(item.child_types) for item in dictionary.types.values())
                 ),
                 "dynamic_metrics": dynamic_summary,
+                "phase_timing_seconds": phase_times,
             }
         )
         if checkpoint_hook is not None:
@@ -953,6 +969,7 @@ def run_wishart_hierarchy(
             break
 
         dictionary_size_before = len(dictionary.types)
+        phase_started = time.perf_counter()
         candidates = extract_ego_candidates(
             current,
             relation_layers,
@@ -971,10 +988,12 @@ def run_wishart_hierarchy(
             candidates, dictionary, level=level,
             cpu_workers=execution_options.cpu_workers,
         )
+        phase_times["discovery"] = time.perf_counter() - phase_started
         if len(dictionary.types) > dictionary_options.max_dictionary_size:
             stop_reason = "max_dictionary_size"
             break
 
+        phase_started = time.perf_counter()
         scanned, full_counts = _scan_known_types(
             current,
             relation_layers,
@@ -988,6 +1007,8 @@ def run_wishart_hierarchy(
             cpu_workers=execution_options.cpu_workers,
         )
 
+        phase_times["full_scan"] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         type_ids, clustering, type_info, metric_metadata = _cluster_dictionary_types(
             dictionary,
             family_registry,
@@ -998,6 +1019,8 @@ def run_wishart_hierarchy(
             execution_options=execution_options,
         )
 
+        phase_times["wishart_knn_clustering"] = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         occurrences, mdl_metrics, selection_huffman = _score_and_select_occurrences(
             scanned,
             dictionary,
@@ -1010,6 +1033,7 @@ def run_wishart_hierarchy(
             min_figure_nodes=options.min_figure_nodes,
             max_figures=options.max_figures_per_level,
         )
+        phase_times["mdl_scoring"] = time.perf_counter() - phase_started
         current_huffman = (
             build_canonical_huffman_codes(
                 dictionary.frequency_counts(accepted=True)
@@ -1076,13 +1100,16 @@ def run_wishart_hierarchy(
             stop_reason = "no_reduction"
             break
 
+        phase_started = time.perf_counter()
         cluster_rows = cluster_transition_metrics(
             current,
             plan.fine_to_coarse,
             relation_layers=relation_layers,
             stationary_mass=stationary_mass,
             memberships=memberships,
+            cpu_workers=execution_options.cpu_workers,
         )
+        phase_times["transition_metrics"] = time.perf_counter() - phase_started
         _write_transition(
             destination,
             level=level,
@@ -1109,6 +1136,7 @@ def run_wishart_hierarchy(
                 },
             )
 
+        phase_started = time.perf_counter()
         old_count = current.shape[0]
         previous_symbol_types = symbol_types
         membership = membership_matrix(plan.fine_to_coarse)
@@ -1124,6 +1152,7 @@ def run_wishart_hierarchy(
         )
         memberships = _compose_memberships(memberships, plan.fine_to_coarse)
         symbol_types = _compose_symbol_types(previous_symbol_types, plan)
+        phase_times["contraction"] = time.perf_counter() - phase_started
 
         transition_summaries.append(
             {
@@ -1141,6 +1170,7 @@ def run_wishart_hierarchy(
 
         # Checkpoint only after graph, dictionary, family registry, symbol types,
         # transition summaries and all provenance have advanced together.
+        phase_started = time.perf_counter()
         write_level_checkpoint(
             destination, next_level=level + 1, current=current,
             relation_layers=relation_layers, memberships=memberships,
@@ -1163,6 +1193,7 @@ def run_wishart_hierarchy(
                 },
             )
 
+        phase_times["checkpoint_sync"] = time.perf_counter() - phase_started
         del candidates, discovery_type_ids, scanned, occurrences, plan, cluster_rows
         gc.collect()
 
