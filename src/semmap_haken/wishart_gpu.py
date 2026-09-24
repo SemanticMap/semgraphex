@@ -15,6 +15,42 @@ from scipy import sparse
 DeviceChoice = Literal["auto", "cpu", "cuda"]
 
 
+def cuda_diagnostics() -> dict[str, object]:
+    """Explain CUDA availability without silently swallowing import/driver errors."""
+    try:
+        import torch
+    except Exception as error:
+        return {
+            "torch_importable": False,
+            "cuda_available": False,
+            "reason": f"torch import failed: {type(error).__name__}: {error}",
+        }
+    try:
+        available = bool(torch.cuda.is_available())
+        result: dict[str, object] = {
+            "torch_importable": True,
+            "torch_version": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "cuda_available": available,
+            "device_count": int(torch.cuda.device_count()) if available else 0,
+        }
+        if available:
+            result["gpu_name"] = torch.cuda.get_device_name(0)
+        else:
+            result["reason"] = (
+                "torch.cuda.is_available() is false: select a Colab GPU runtime, "
+                "then verify the NVIDIA driver and CUDA-enabled PyTorch"
+            )
+        return result
+    except Exception as error:
+        return {
+            "torch_importable": True,
+            "torch_version": torch.__version__,
+            "cuda_available": False,
+            "reason": f"CUDA probe failed: {type(error).__name__}: {error}",
+        }
+
+
 def resolve_device(
     requested: DeviceChoice,
     *,
@@ -25,13 +61,13 @@ def resolve_device(
     if requested == "cpu":
         return "cpu"
     if cuda_available is None:
-        try:
-            import torch
-            cuda_available = bool(torch.cuda.is_available())
-        except ImportError:
-            cuda_available = False
+        diagnostics = cuda_diagnostics()
+        cuda_available = bool(diagnostics["cuda_available"])
     if requested == "cuda" and not cuda_available:
-        raise RuntimeError("CUDA requested but PyTorch/CUDA is not available")
+        raise RuntimeError(
+            "CUDA requested but PyTorch/CUDA is not available; "
+            "inspect cuda_diagnostics() and select a GPU runtime"
+        )
     return "cuda" if cuda_available else "cpu"
 
 
