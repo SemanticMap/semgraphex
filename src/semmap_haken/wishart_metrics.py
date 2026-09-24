@@ -111,6 +111,15 @@ class EgoExtractor:
         self.graph = adjacency.tocsr()
         self.typed = {name: layer.tocsr() for name, layer in relation_layers.items()}
         self.incoming = {name: layer.T.tocsr() for name, layer in self.typed.items()}
+        # Calculated once, not 100k times inside the per-center loop.
+        self.out_degree = {
+            name: np.diff(matrix.indptr)
+            for name, matrix in self.typed.items()
+        }
+        self.in_degree = {
+            name: np.diff(matrix.indptr)
+            for name, matrix in self.incoming.items()
+        }
 
     def _candidate(
         self,
@@ -135,8 +144,8 @@ class EgoExtractor:
             internal_in = np.bincount(
                 local.indices, minlength=len(nodes)
             )
-            external_out = np.diff(matrix.indptr)[nodes] - internal_out
-            external_in = np.diff(incoming.indptr)[nodes] - internal_in
+            external_out = self.out_degree[name][nodes] - internal_out
+            external_in = self.in_degree[name][nodes] - internal_in
             for index in range(len(nodes)):
                 if external_out[index] > 0:
                     boundary.append((index, name, "out", int(external_out[index])))
