@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Mapping, Sequence
@@ -94,6 +95,110 @@ def _ego_nodes(adjacency: sparse.csr_matrix, center: int, radius: int, cap: int)
     return np.array(sorted(seen), dtype=np.int64)
 
 
+class EgoExtractor:
+    """Reuse one read-only CSR view of the graph across bounded center batches.
+
+    SciPy CSR slicing releases the GIL for the expensive native operations.
+    Threads avoid copying large CSR graphs to worker processes (and avoid
+    CUDA/fork hazards after initializing the accelerator).
+    """
+
+    def __init__(
+        self,
+        adjacency: sparse.spmatrix,
+        relation_layers: Mapping[str, sparse.spmatrix],
+    ) -> None:
+        self.graph = adjacency.tocsr()
+        self.typed = {name: layer.tocsr() for name, layer in relation_layers.items()}
+        self.incoming = {name: layer.T.tocsr() for name, layer in self.typed.items()}
+
+    def _candidate(
+        self,
+        center: int,
+        *,
+        radius: int,
+        max_ego_nodes: int,
+        symbol_types: Mapping[int, str],
+    ) -> EgoCandidate | None:
+        nodes = _ego_nodes(self.graph, center, radius, max_ego_nodes)
+        if nodes.size < 2:
+            return None
+        sub = self.graph[nodes][:, nodes].tocsr()
+        layers: dict[str, sparse.csr_matrix] = {}
+        boundary: list[tuple[int, str, str, int]] = []
+        for name, matrix in self.typed.items():
+            local = matrix[nodes][:, nodes].tocsr()
+            if local.nnz:
+                layers[name] = local
+            incoming = self.incoming[name]
+            internal_out = np.diff(local.indptr)
+            internal_in = np.bincount(
+                local.indices, minlength=len(nodes)
+            )
+            external_out = np.diff(matrix.indptr)[nodes] - internal_out
+            external_in = np.diff(incoming.indptr)[nodes] - internal_in
+            for index in range(len(nodes)):
+                if external_out[index] > 0:
+                    boundary.append((index, name, "out", int(external_out[index])))
+                if external_in[index] > 0:
+                    boundary.append((index, name, "in", int(external_in[index])))
+        local_types = tuple(symbol_types.get(int(node)) for node in nodes)
+        return EgoCandidate(
+            int(center),
+            nodes,
+            sub,
+            layers,
+            boundary_signature=tuple(sorted(boundary)),
+            node_types=local_types,
+        )
+
+    def extract_centers(
+        self,
+        centers: Sequence[int],
+        *,
+        radius: int,
+        max_ego_nodes: int,
+        symbol_types: Mapping[int, str] | None = None,
+        workers: int = 1,
+        work_batch_size: int = 64,
+    ) -> tuple[EgoCandidate, ...]:
+        if workers < 1 or work_batch_size < 1:
+            raise ValueError("workers and work_batch_size must be positive")
+        selected = np.asarray(centers, dtype=np.int64)
+        if selected.ndim != 1:
+            raise ValueError("candidate_centers must be one-dimensional")
+        if np.any(selected < 0) or np.any(selected >= self.graph.shape[0]):
+            raise ValueError("candidate_centers contain out-of-range node indices")
+        symbols = symbol_types or {}
+
+        def batch_extract(batch: np.ndarray) -> list[EgoCandidate]:
+            rows = (
+                self._candidate(
+                    int(center),
+                    radius=radius,
+                    max_ego_nodes=max_ego_nodes,
+                    symbol_types=symbols,
+                )
+                for center in batch
+            )
+            return [candidate for candidate in rows if candidate is not None]
+
+        batches = (
+            selected[index:index + work_batch_size]
+            for index in range(0, len(selected), work_batch_size)
+        )
+        if workers == 1:
+            return tuple(item for batch in batches for item in batch_extract(batch))
+        # executor.map returns batches in submission order: seeded experiments
+        # have the same candidate ordering regardless of thread scheduling.
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return tuple(
+                item
+                for completed in executor.map(batch_extract, batches)
+                for item in completed
+            )
+
+
 def extract_ego_candidates(
     adjacency: sparse.spmatrix,
     relation_layers: Mapping[str, sparse.spmatrix],
@@ -104,7 +209,9 @@ def extract_ego_candidates(
     seed: int,
     symbol_types: Mapping[int, str] | None = None,
     candidate_centers: Sequence[int] | None = None,
+    workers: int = 1,
 ) -> tuple[EgoCandidate, ...]:
+    """Extract deterministic ego candidates, optionally with bounded threads."""
     graph = adjacency.tocsr()
     n = graph.shape[0]
     if n == 0:
@@ -116,47 +223,14 @@ def extract_ego_candidates(
             centers = np.sort(rng.choice(centers, size=candidate_limit, replace=False))
     else:
         centers = np.asarray(candidate_centers, dtype=np.int64)
-        if centers.ndim != 1:
-            raise ValueError("candidate_centers must be one-dimensional")
-        if np.any(centers < 0) or np.any(centers >= n):
-            raise ValueError("candidate_centers contain out-of-range node indices")
-    candidates: list[EgoCandidate] = []
-    typed = {name: matrix.tocsr() for name, matrix in relation_layers.items()}
-    typed_incoming = {name: matrix.T.tocsr() for name, matrix in typed.items()}
-    symbol_types = symbol_types or {}
-    for center in centers:
-        nodes = _ego_nodes(graph, int(center), radius, max_ego_nodes)
-        if nodes.size < 2:
-            continue
-        sub = graph[nodes][:, nodes].tocsr()
-        layers: dict[str, sparse.csr_matrix] = {}
-        boundary: list[tuple[int, str, str, int]] = []
-        for name, matrix in typed.items():
-            local = matrix[nodes][:, nodes].tocsr()
-            if local.nnz:
-                layers[name] = local
-            incoming = typed_incoming[name]
-            for local_node, global_node in enumerate(nodes):
-                internal_out = int(local.getrow(local_node).nnz)
-                internal_in = int(local.getcol(local_node).nnz)
-                external_out = int(matrix.getrow(int(global_node)).nnz) - internal_out
-                external_in = int(incoming.getrow(int(global_node)).nnz) - internal_in
-                if external_out > 0:
-                    boundary.append((local_node, name, "out", external_out))
-                if external_in > 0:
-                    boundary.append((local_node, name, "in", external_in))
-        local_types = tuple(symbol_types.get(int(node)) for node in nodes)
-        candidates.append(
-            EgoCandidate(
-                int(center),
-                nodes,
-                sub,
-                layers,
-                boundary_signature=tuple(sorted(boundary)),
-                node_types=local_types,
-            )
-        )
-    return tuple(candidates)
+    extractor = EgoExtractor(graph, relation_layers)
+    return extractor.extract_centers(
+        centers,
+        radius=radius,
+        max_ego_nodes=max_ego_nodes,
+        symbol_types=symbol_types,
+        workers=workers,
+    )
 
 
 def relation_histogram_features(candidates: Sequence[EgoCandidate]) -> tuple[np.ndarray, tuple[str, ...]]:
