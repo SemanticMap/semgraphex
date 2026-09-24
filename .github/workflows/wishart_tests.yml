@@ -12,8 +12,10 @@ on:
       - 'tests/test_semmap_haken_wishart.py'
       - 'tests/test_semmap_haken_wishart_colab.py'
       - 'tests/test_semmap_haken_colab_resume_gpu.py'
+      - 'tests/test_semmap_haken_wishart_sweep.py'
       - 'notebooks/04_wishart_colab_drive.ipynb'
       - 'notebooks/05_wishart_graph_dictionary_colab.ipynb'
+      - 'notebooks/06_wishart_knn_replay_colab.ipynb'
       - 'configs/wishart_conceptnet_colab.yaml'
       - 'configs/wishart_conceptnet_dictionary.yaml'
       - 'pyproject.toml'
@@ -38,4 +40,5 @@ jobs:
           pytest -q \
             tests/test_semmap_haken_wishart.py \
             tests/test_semmap_haken_wishart_colab.py \
-            tests/test_semmap_haken_colab_resume_gpu.py
+            tests/test_semmap_haken_colab_resume_gpu.py \
+            tests/test_semmap_haken_wishart_sweep.py
