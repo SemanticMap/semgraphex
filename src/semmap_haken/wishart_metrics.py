@@ -15,6 +15,7 @@ from scipy.sparse.csgraph import shortest_path
 from scipy.spatial.distance import cdist
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
+import warnings
 
 from .graph_build import PreparedGraph
 
@@ -398,9 +399,20 @@ def _knn_from_features(
             # Retry the entire neighbor graph on CPU; never silently mix
             # results from GPU and CPU after a partial GPU failure.
             fallback = "cuda_out_of_memory"
+            warnings.warn(
+                "CUDA cosine kNN ran out of GPU memory; "
+                "recomputing the full neighbor graph on CPU",
+                RuntimeWarning, stacklevel=2,
+            )
 
     else:
         fallback = "small_type_space" if actual == "cuda" else None
+        if fallback is not None:
+            warnings.warn(
+                f"CUDA available but type_count={count} < min_gpu_types="
+                f"{min_gpu_types}; using sklearn CPU for this level",
+                RuntimeWarning, stacklevel=2,
+            )
 
     model = NearestNeighbors(n_neighbors=k + 1, metric=metric, algorithm="brute")
     model.fit(features)
@@ -688,7 +700,10 @@ def build_neighbor_graph(
             candidates, graphlet_size=graphlet_size, samples=graphlet_samples,
             dimension=feature_dim, seed=seed,
         )
-        result = _knn_from_features(features, k, "cosine")
+        result = _knn_from_features(
+            features, k, "cosine", device=device,
+            gpu_batch_size=gpu_batch_size, min_gpu_types=min_gpu_types,
+        )
     elif metric == "relation_js":
         if device == "cuda":
             raise ValueError("CUDA is supported for typed_wl and graphlet only")
