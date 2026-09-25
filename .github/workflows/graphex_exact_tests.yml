@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/semmap_haken/graphex_*.py'
       - 'tests/test_graphex_exact_codec.py'
+      - 'notebooks/07_graphex_exact_v1_colab_gpu.ipynb'
       - '.github/workflows/graphex_exact_tests.yml'
   workflow_dispatch:
 
