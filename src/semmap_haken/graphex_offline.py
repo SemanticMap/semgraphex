@@ -18,7 +18,8 @@ from .graphex_components import EdgeRecord
 
 
 def encode_saved_level(run: str | Path, level: int,
-                       output: str | Path) -> dict[str, object]:
+                       output: str | Path, *, device: str = "auto",
+                       gpu_batch_size: int = 500_000) -> dict[str, object]:
     root = Path(run)
     if not (root / "COMPLETED").is_file():
         raise ValueError("offline input must be a COMPLETED run")
@@ -47,13 +48,17 @@ def encode_saved_level(run: str | Path, level: int,
         if layer.shape != adjacency.shape:
             raise ValueError("relation layer/adjacency dimensions disagree")
         layer.sort_indices()
-        for src in range(vertex_count):
-            for pos in range(layer.indptr[src], layer.indptr[src + 1]):
-                records.append(EdgeRecord(
-                    len(records), src, int(layer.indices[pos]), relation,
-                    float(layer.data[pos])))
+        # Vectorized CSR row addressing; avoid an interpreted loop per row.
+        rows = np.repeat(np.arange(vertex_count, dtype=np.int64),
+                         np.diff(layer.indptr))
+        records.extend(EdgeRecord(offset, int(src), int(dst), relation,
+                                  float(weight))
+                       for offset, src, dst, weight in zip(
+                           range(len(records), len(records) + len(rows)),
+                           rows, layer.indices, layer.data, strict=True))
     report = encode_graph(vertex_count, records, groups, output,
-                          source_type_ids=source_types)
+                          source_type_ids=source_types, device=device,
+                          gpu_batch_size=gpu_batch_size)
     report.update({"run": str(root), "level": level,
                    "exactness_scope": "directed relation-layer CSR entries",
                    "raw_parallel_edges": "unavailable if merged during preparation",
@@ -66,8 +71,12 @@ def main() -> None:
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--level", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--gpu-batch-size", type=int, default=500_000)
     args = parser.parse_args()
-    print(json.dumps(encode_saved_level(args.run, args.level, args.output),
+    print(json.dumps(encode_saved_level(args.run, args.level, args.output,
+                                        device=args.device,
+                                        gpu_batch_size=args.gpu_batch_size),
                      indent=2, sort_keys=True))
 
 
