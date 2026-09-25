@@ -223,7 +223,15 @@ def encode_graph(
                 [e.edge_id, e.source, e.target, e.relation, e.weight])
     if any(remaining for group in slots.values() for remaining in group.values()):
         raise ValueError("shape prototype has extra internal edges")
-    data["record_order"] = [e.edge_id for e in records]
+    # A sorted sequence of edge IDs is reconstructible from the payloads.
+    # The old JSON array of >1M consecutive IDs cost >2 MB DEFLATE on CN100k.
+    # Keep an explicit array only for nonmonotonic input order.
+    ids = [e.edge_id for e in records]
+    data["record_order"] = (
+        "ascending_ids"
+        if all(first < second for first, second in zip(ids, ids[1:]))
+        else ids
+    )
     payload = [[e.edge_id, e.source, e.target, e.relation, e.weight]
                for e in records]
     target = Path(output)
@@ -303,7 +311,13 @@ def decode_graph(archive_path: str | Path) -> tuple[int, tuple[EdgeRecord, ...]]
                 derived[e.edge_id] = "I:" + e.relation
             else:
                 derived[e.edge_id] = "R"
-    order = meta["record_order"]
+    encoded_order = meta["record_order"]
+    if encoded_order == "ascending_ids":
+        order = sorted(restored)
+    elif isinstance(encoded_order, list):
+        order = encoded_order  # legacy archives and arbitrary input permutations
+    else:
+        raise ValueError("unsupported edge ordering")
     if len(order) != meta["edge_count"] or len(set(order)) != len(order):
         raise ValueError("invalid edge order")
     try:
