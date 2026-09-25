@@ -41,8 +41,10 @@ def classify_edges(
     I: an isolated two-vertex connected component with exactly one
        non-loop edge record and neither endpoint in a figure.
     R: all remaining records, including figure-to-figure boundaries.
-    Self-loops never become S or I. Degree is counted by *edge records*,
-    so parallel or reciprocal edges do not masquerade as isolated pairs.
+    Self-loops never become S or I. Leaf degree is the number of distinct
+    structural neighbors (ignoring direction, relation and multiplicity);
+    each directed/typed/weighted edge record remains separately preserved.
+    Thus reciprocal rows in a symmetric CSR layer cannot hide a real leaf.
     """
     if vertex_count < 0:
         raise ValueError("vertex_count must be nonnegative")
@@ -60,13 +62,23 @@ def classify_edges(
             if node in owner:
                 raise ValueError("overlapping accepted figures")
             owner[node] = number
-    degree: Counter[int] = Counter()
+    # Structural degree counts *distinct neighbors*, not CSR records.
+    # Both (u,v) and (v,u), parallel rows and relation layers denote the
+    # same undirected support pair for the S/I eligibility test only.
+    unique_pairs: set[tuple[int, int]] = set()
+    loop_vertices: set[int] = set()
     for edge in records:
         if not (0 <= edge.source < vertex_count and 0 <= edge.target < vertex_count):
             raise ValueError("edge endpoint outside graph")
-        # A loop is incident twice; it cannot count as a leaf.
-        degree[edge.source] += 1
-        degree[edge.target] += 1
+        if edge.source == edge.target:
+            loop_vertices.add(edge.source)
+        else:
+            unique_pairs.add((min(edge.source, edge.target),
+                              max(edge.source, edge.target)))
+    degree: Counter[int] = Counter()
+    for source, target in unique_pairs:
+        degree[source] += 1
+        degree[target] += 1
     result: list[AssignedEdge] = []
     for edge in records:
         a, b = edge.source, edge.target
@@ -75,12 +87,13 @@ def classify_edges(
         assigned_owner: int | None = None
         if fa is not None and fa == fb:
             part, assigned_owner = "W", fa
-        elif a != b and fa is not None and fb is None and degree[b] == 1:
+        elif a != b and fa is not None and fb is None and degree[b] == 1 and b not in loop_vertices:
             part, assigned_owner = "S", fa
-        elif a != b and fb is not None and fa is None and degree[a] == 1:
+        elif a != b and fb is not None and fa is None and degree[a] == 1 and a not in loop_vertices:
             part, assigned_owner = "S", fb
         elif (a != b and fa is None and fb is None
-              and degree[a] == degree[b] == 1):
+              and degree[a] == degree[b] == 1
+              and a not in loop_vertices and b not in loop_vertices):
             part = "I"
         result.append(AssignedEdge(edge, part, assigned_owner))
     if len(result) != len(records):
