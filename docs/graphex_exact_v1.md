@@ -23,9 +23,16 @@ old checkpoints or declare older checkpoint formats to be graphex mode.
   are matched with relation- and node-type-aware VF2, not merely by degree.
   A deterministic port profile selects an isomorphism on symmetries.
 * `S`: directed and typed records with a true leaf outside all figures.
-  Cross-figure boundaries are **never** silently relabeled as stars.
-* `I`: exactly one non-loop edge record forming an isolated pair in the
-  graph of the saved level. Rarity alone never makes an edge dust.
+  The leaf has exactly **one distinct structural neighbor** (not one CSR
+  record); reciprocal directed rows, multiple relation labels and weights
+  remain separately encoded. Cross-figure boundaries are **never** silently
+  relabeled as stars.
+* `I`: all exact stored edge records in an isolated two-vertex component
+  of the underlying simple, undirected support graph at the saved level.
+  A reciprocal CSR pair counts as one structural connection, but both records
+  survive decoding. An isolated pair with several relation records is a typed
+  finite-codec pattern, **not** automatically a classical simple-graphex
+  dust realization. Rarity alone never makes an edge dust.
 * `R`: every other record, including connections between figures.
   Every record is assigned exactly once. Parallel records have distinct IDs.
 
@@ -73,3 +80,24 @@ hierarchical code. Levels above zero represent the stored coarse graph.
 
 The online `graph_mdl.py` `bits_proxy` is **unchanged** in this pilot and
 must not be described as an actual encoded length.
+
+## Structural-degree diagnostic (Wishart CN100k k4)
+
+The previous first offline run produced `S=0` on every level because the
+classifier counted **records** rather than structural neighbors. In the saved
+`level_000` all six relation-layer CSR matrices are symmetric. An undirected
+leaf therefore has two directed records and never passed `record_degree==1`.
+Direct inspection of that level found 4,021 degree-one vertices and 426 eligible
+figure-to-leaf structural pairs, represented by **852 directed relation records**.
+The underlying graph had no isolated two-vertex components at level zero.
+
+The CPU and CUDA classifiers now deduplicate unordered neighbor pairs for
+*eligibility* without deduplicating any records in the encoded payload. The
+encoder's roundtrip assertion is unchanged. For a corrected experiment use a
+**new RUN_ID**, e.g. `wishart-cn100k-k4-graphex-exact-v1-structural-degree-v2`;
+existing archives are not migrated or overwritten.
+
+Note that symmetry was introduced by the saved graph representation: one
+cannot reconstruct original ConceptNet row orientation merely by decoding
+the symmetric relation-layer CSR matrices. To make a raw ConceptNet lossless
+claim, preserve row provenance before this symmetrization.
