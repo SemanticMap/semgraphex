@@ -75,7 +75,7 @@ def test_fgw_shortlist_and_pair_cache_resume(tmp_path):
     completed = []
     kwargs = dict(
         k=1, rank=3, max_candidates=4, alpha=0.5,
-        exact_types=2, shortlist=2, epsilon=0.08,
+        exact_types=2, shortlist=1, epsilon=0.08,
         outer_iterations=10, sinkhorn_iterations=60,
         pair_batch_size=2, cache_pairs=2, cpu_workers=2,
         device="cpu", type_ids=["A", "B", "C", "D"],
