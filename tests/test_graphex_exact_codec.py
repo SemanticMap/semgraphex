@@ -155,3 +155,46 @@ def test_colab_bootstrap_handles_python_313_without_legacy_numpy_constraints():
     assert "sys.version_info" in bootstrap
     assert "numpy.typing" in bootstrap
     assert "pip" in bootstrap
+
+
+def test_symmetric_csr_records_count_one_structural_neighbor():
+    """Reciprocal rows are two records but only one structural neighbor."""
+    edges = (
+        EdgeRecord(0, 0, 1, "r", 1.0),
+        EdgeRecord(1, 1, 0, "r", 1.0),
+        EdgeRecord(2, 0, 2, "r", 0.5),
+        EdgeRecord(3, 2, 0, "r", 0.5),
+        EdgeRecord(4, 3, 4, "r", 0.75),
+        EdgeRecord(5, 4, 3, "r", 0.75),
+    )
+    expected = ["W", "W", "S", "S", "I", "I"]
+    actual = classify_edges(5, edges, ((0, 1),))
+    assert [row.part for row in actual] == expected
+    from semmap_haken.graphex_components_gpu import classify_edges_accelerated
+    assert [row.part for row in classify_edges_accelerated(
+        5, edges, ((0, 1),), device="cpu")] == expected
+
+
+def test_multiple_relations_to_one_neighbor_are_star_not_multiple_neighbors():
+    edges = (
+        EdgeRecord(0, 0, 1, "r", 1.0),
+        EdgeRecord(1, 1, 0, "r", 1.0),
+        EdgeRecord(2, 0, 2, "r", 0.5),
+        EdgeRecord(3, 2, 0, "r", 0.5),
+        EdgeRecord(4, 0, 2, "other", 0.25),
+        EdgeRecord(5, 2, 0, "other", 0.25),
+    )
+    assert [item.part for item in classify_edges(3, edges, ((0, 1),))] == [
+        "W", "W", "S", "S", "S", "S"]
+
+
+def test_self_loop_blocks_star_or_dust_at_that_vertex():
+    edges = (
+        EdgeRecord(0, 0, 1, "r", 1.0),
+        EdgeRecord(1, 1, 0, "r", 1.0),
+        EdgeRecord(2, 0, 2, "r", 0.5),
+        EdgeRecord(3, 2, 0, "r", 0.5),
+        EdgeRecord(4, 2, 2, "loop", 1.0),
+    )
+    assert [item.part for item in classify_edges(3, edges, ((0, 1),))] == [
+        "W", "W", "R", "R", "R"]
