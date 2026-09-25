@@ -145,6 +145,8 @@ def encode_graph(
     *,
     node_types: Mapping[int, str] | None = None,
     source_type_ids: Mapping[int, str] | None = None,
+    device: str = "cpu",
+    gpu_batch_size: int = 500_000,
 ) -> dict[str, object]:
     """Write a complete decodable archive and return measured byte counts.
 
@@ -153,7 +155,15 @@ def encode_graph(
     """
     records = tuple(edges)
     groups = tuple(tuple(sorted(int(v) for v in group)) for group in figures)
-    assigned = classify_edges(vertex_count, records, groups)
+    if device == "cpu":
+        assigned = classify_edges(vertex_count, records, groups)
+        actual_device = "cpu"
+    else:
+        from .graphex_components_gpu import classify_edges_accelerated
+        assigned = classify_edges_accelerated(vertex_count, records, groups,
+                                              device=device, batch_size=gpu_batch_size)
+        import torch
+        actual_device = "cuda" if torch.cuda.is_available() and records else "cpu"
     validate_partition(records, assigned)
     shapes, occurrences = _canonical_shapes(groups, records, assigned,
                                             node_types or {})
@@ -236,7 +246,8 @@ def encode_graph(
     if recovered_n != vertex_count or recovered != records:
         target.unlink(missing_ok=True)
         raise AssertionError("graphex codec failed exact roundtrip")
-    return {"format": FORMAT, "archive_bytes": target.stat().st_size,
+    return {"format": FORMAT, "classification_device": actual_device,
+            "archive_bytes": target.stat().st_size,
             "baseline_bytes": len(baseline_buffer.getvalue()),
             "net_saved_bytes": len(baseline_buffer.getvalue()) - target.stat().st_size,
             "shapes": len(shapes), "occurrences": len(occurrences),
