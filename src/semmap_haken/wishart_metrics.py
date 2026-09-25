@@ -583,8 +583,10 @@ def _transport_support(candidate: EgoCandidate, rank: int) -> tuple[np.ndarray, 
     degree = np.asarray((adjacency != 0).sum(axis=1)).ravel()
     order = np.lexsort((np.arange(n), -degree))
     keep = np.sort(order[: min(rank, n)])
-    binary = (adjacency[keep][:, keep] != 0).astype(float)
-    distances = shortest_path(binary, directed=False, unweighted=True)
+    binary = (adjacency != 0).astype(float)
+    # Paths may cross non-landmark vertices: compute on the full ego graph
+    # before restricting distances to the selected landmarks.
+    distances = shortest_path(binary, directed=False, unweighted=True, indices=keep)[:, keep]
     finite = distances[np.isfinite(distances)]
     replacement = float(finite.max() + 1.0) if finite.size else 1.0
     distances[~np.isfinite(distances)] = replacement
@@ -688,6 +690,8 @@ def transport_neighbors(
             "landmark_rank": rank,
             "relations": relations,
             "fgw_alpha": fgw_alpha,
+            "feature_source": "directed relation frequency profiles (no text embeddings)",
+            "structural_cost": "full-ego shortest paths between degree landmarks",
         }
     return _knn_from_distance_matrix(matrix, k, metadata)
 
