@@ -52,6 +52,12 @@ class WishartOptions:
     transport_rank: int = 24
     transport_max_candidates: int = 256
     fgw_alpha: float = 0.5
+    fgw_exact_types: int = 128
+    fgw_shortlist: int = 32
+    fgw_epsilon: float = 0.08
+    fgw_outer_iterations: int = 20
+    fgw_sinkhorn_iterations: int = 60
+    fgw_cache_pairs: int = 2048
 
     slow_modes: int = 8
     mfpt_pairs: int = 24
@@ -93,6 +99,12 @@ class WishartOptions:
             transport_rank=int(raw.get("transport_rank", 24)),
             transport_max_candidates=int(raw.get("transport_max_candidates", 256)),
             fgw_alpha=float(raw.get("fgw_alpha", 0.5)),
+            fgw_exact_types=int(raw.get("fgw_exact_types", 128)),
+            fgw_shortlist=int(raw.get("fgw_shortlist", 32)),
+            fgw_epsilon=float(raw.get("fgw_epsilon", 0.08)),
+            fgw_outer_iterations=int(raw.get("fgw_outer_iterations", 20)),
+            fgw_sinkhorn_iterations=int(raw.get("fgw_sinkhorn_iterations", 60)),
+            fgw_cache_pairs=int(raw.get("fgw_cache_pairs", 2048)),
             slow_modes=int(raw.get("slow_modes", 8)),
             mfpt_pairs=int(raw.get("mfpt_pairs", 24)),
             mfpt_walks_per_pair=int(raw.get("mfpt_walks_per_pair", 8)),
@@ -123,6 +135,11 @@ class WishartOptions:
             "relation_js_block_size": self.relation_js_block_size,
             "transport_rank": self.transport_rank,
             "transport_max_candidates": self.transport_max_candidates,
+            "fgw_exact_types": self.fgw_exact_types,
+            "fgw_shortlist": self.fgw_shortlist,
+            "fgw_outer_iterations": self.fgw_outer_iterations,
+            "fgw_sinkhorn_iterations": self.fgw_sinkhorn_iterations,
+            "fgw_cache_pairs": self.fgw_cache_pairs,
             "slow_modes": self.slow_modes,
             "mfpt_pairs": self.mfpt_pairs,
             "mfpt_walks_per_pair": self.mfpt_walks_per_pair,
@@ -150,6 +167,10 @@ class WishartOptions:
             )
         if not 0 <= self.fgw_alpha <= 1:
             raise ValueError("wishart.fgw_alpha must be in [0, 1]")
+        if self.fgw_epsilon <= 0:
+            raise ValueError("wishart.fgw_epsilon must be positive")
+        if self.metric == "fgw" and self.fgw_shortlist < self.k_neighbors:
+            raise ValueError("wishart.fgw_shortlist must be >= k_neighbors")
         if self.graphlet_size not in {3, 4}:
             raise ValueError("wishart.graphlet_size must be 3 or 4")
 
