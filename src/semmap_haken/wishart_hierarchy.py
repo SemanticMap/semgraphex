@@ -444,6 +444,8 @@ def _cluster_dictionary_types(
     options: WishartOptions,
     dictionary_options: DictionaryOptions,
     execution_options: ColabExecutionOptions,
+    fgw_cache_dir: Path | None = None,
+    fgw_checkpoint_hook: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[
     tuple[str, ...],
     WishartClustering,
@@ -490,6 +492,15 @@ def _cluster_dictionary_types(
         gpu_batch_size=execution_options.gpu_batch_size,
         min_gpu_types=execution_options.min_gpu_types,
         cpu_workers=execution_options.cpu_workers,
+        fgw_exact_types=options.fgw_exact_types,
+        fgw_shortlist=options.fgw_shortlist,
+        fgw_epsilon=options.fgw_epsilon,
+        fgw_outer_iterations=options.fgw_outer_iterations,
+        fgw_sinkhorn_iterations=options.fgw_sinkhorn_iterations,
+        fgw_cache_pairs=options.fgw_cache_pairs,
+        fgw_type_ids=type_ids,
+        fgw_cache_dir=str(fgw_cache_dir) if fgw_cache_dir is not None else None,
+        fgw_checkpoint_hook=fgw_checkpoint_hook,
     )
     if options.density_weight == "occurrence_frequency":
         sample_weights = np.array([counts[type_id] for type_id in type_ids], dtype=float)
@@ -828,7 +839,7 @@ def run_wishart_hierarchy(
     execution_options = execution_options or ColabExecutionOptions()
     execution_options.validate()
     selected_backend = resolve_device(execution_options.device)
-    if options.metric not in {"typed_wl", "graphlet"} and selected_backend == "cuda":
+    if options.metric not in {"typed_wl", "graphlet", "fgw"} and selected_backend == "cuda":
         if execution_options.device == "cuda":
             raise ValueError(
                 f"metric={options.metric} has no CUDA backend; use CPU for this metric"
@@ -1027,6 +1038,15 @@ def run_wishart_hierarchy(
             options=options,
             dictionary_options=dictionary_options,
             execution_options=execution_options,
+            fgw_cache_dir=(
+                destination / "_fgw_cache" / f"level_{level:03d}"
+                if options.metric == "fgw" and selected_backend == "cuda" else None
+            ),
+            fgw_checkpoint_hook=(
+                (lambda progress: checkpoint_hook(
+                    destination, {"stage": "fgw_pair_checkpoint", "level": level, **progress}
+                )) if checkpoint_hook is not None and options.metric == "fgw" else None
+            ),
         )
 
         phase_times["wishart_knn_clustering"] = time.perf_counter() - phase_started

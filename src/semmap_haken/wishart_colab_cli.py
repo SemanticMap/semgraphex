@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--device", choices=("auto", "cpu", "cuda"),
-        help="Override colab.device from the YAML. CUDA applies to feature kNN.",
+        help="Override colab.device from the YAML. CUDA supports feature kNN and entropic FGW.",
     )
     parser.add_argument(
         "--cpu-workers", type=int,
@@ -267,19 +267,19 @@ def main(argv: list[str] | None = None) -> int:
     device = _device_details(selected_device, requested_device)
     # Resolve auto exactly once: no accidental CPU/GPU backend change between
     # hierarchy levels after a CUDA driver or resource-state change.
-    if options.metric in {"typed_wl", "graphlet"}:
+    if options.metric in {"typed_wl", "graphlet", "fgw"}:
         execution_options = replace(execution_options, device=selected_device)
     elif selected_device == "cuda" and requested_device == "cuda":
         raise ValueError(
             f"metric={options.metric} has no CUDA backend; select --device cpu "
-            "or choose typed_wl/graphlet"
+            "or choose typed_wl/graphlet/fgw"
         )
     elif requested_device == "auto" and selected_device == "cuda":
         execution_options = replace(execution_options, device="cpu")
         device["selected"] = "cpu"
         selected_device = "cpu"
     device["cpu_workers"] = execution_options.cpu_workers
-    device["gpu_eligible"] = options.metric in {"typed_wl", "graphlet"}
+    device["gpu_eligible"] = options.metric in {"typed_wl", "graphlet", "fgw"}
     print(json.dumps(
         {"stage": "device_selected", "device": device}, sort_keys=True,
     ), flush=True)
@@ -297,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
             "Select a Colab GPU runtime and install the [gpu] extra.",
             file=sys.stderr, flush=True,
         )
-    elif selected_device == "cuda" and options.metric not in {"typed_wl", "graphlet"}:
+    elif selected_device == "cuda" and options.metric not in {"typed_wl", "graphlet", "fgw"}:
         print(
             f"WARNING: metric={options.metric} has no CUDA kNN backend; "
             "this experiment will use CPU for metric computation.",
@@ -459,6 +459,30 @@ def main(argv: list[str] | None = None) -> int:
     resolved_config = load_config(config_path)
     _, graph, source_meta = _load_or_build(
         config_path, local_prepared, dataset_path=local_dataset,
+    )
+    if config.dataset.component == "largest_connected_sample":
+        from scipy.sparse.csgraph import connected_components
+
+        if graph.adjacency.shape[0] != config.dataset.max_nodes:
+            raise ValueError(
+                f"requested {config.dataset.max_nodes} connected nodes, but input "
+                f"provides only {graph.adjacency.shape[0]}; choose a larger dataset"
+            )
+        components, _ = connected_components(
+            graph.adjacency, directed=False, return_labels=True
+        )
+        if components != 1:
+            raise RuntimeError(
+                f"largest_connected_sample is not connected: {components} components"
+            )
+    (local_run / "input_graph_report.json").write_text(
+        json.dumps({
+            "node_count": int(graph.adjacency.shape[0]),
+            "adjacency_nnz": int(graph.adjacency.nnz),
+            "graph_report": graph.report,
+            "source_mode": source_meta.get("mode"),
+        }, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
 
     checkpoint = DriveCheckpointSync(

@@ -583,8 +583,10 @@ def _transport_support(candidate: EgoCandidate, rank: int) -> tuple[np.ndarray, 
     degree = np.asarray((adjacency != 0).sum(axis=1)).ravel()
     order = np.lexsort((np.arange(n), -degree))
     keep = np.sort(order[: min(rank, n)])
-    binary = (adjacency[keep][:, keep] != 0).astype(float)
-    distances = shortest_path(binary, directed=False, unweighted=True)
+    binary = (adjacency != 0).astype(float)
+    # Paths may cross non-landmark vertices: compute on the full ego graph
+    # before restricting distances to the selected landmarks.
+    distances = shortest_path(binary, directed=False, unweighted=True, indices=keep)[:, keep]
     finite = distances[np.isfinite(distances)]
     replacement = float(finite.max() + 1.0) if finite.size else 1.0
     distances[~np.isfinite(distances)] = replacement
@@ -688,6 +690,8 @@ def transport_neighbors(
             "landmark_rank": rank,
             "relations": relations,
             "fgw_alpha": fgw_alpha,
+            "feature_source": "directed relation frequency profiles (no text embeddings)",
+            "structural_cost": "full-ego shortest paths between degree landmarks",
         }
     return _knn_from_distance_matrix(matrix, k, metadata)
 
@@ -710,6 +714,15 @@ def build_neighbor_graph(
     gpu_batch_size: int = 128,
     min_gpu_types: int = 128,
     cpu_workers: int = 1,
+    fgw_exact_types: int = 128,
+    fgw_shortlist: int = 32,
+    fgw_epsilon: float = 0.08,
+    fgw_outer_iterations: int = 20,
+    fgw_sinkhorn_iterations: int = 60,
+    fgw_cache_pairs: int = 2048,
+    fgw_type_ids: Sequence[str] | None = None,
+    fgw_cache_dir: str | None = None,
+    fgw_checkpoint_hook=None,
 ) -> NeighborGraph:
     if len(candidates) <= 1:
         return NeighborGraph(np.empty((len(candidates), 0), dtype=np.int64), np.empty((len(candidates), 0)), {"metric": metric})
@@ -737,9 +750,33 @@ def build_neighbor_graph(
         result = relation_js_neighbors(
             candidates, k=k, block_size=relation_js_block_size
         )
+    elif metric == "fgw" and device == "cuda":
+        # Real CUDA computation: batched torch entropic FGW, not POT/CPU EMD.
+        from .wishart_fgw_accel import accelerated_fgw_neighbors
+
+        result = accelerated_fgw_neighbors(
+            candidates, k=k, rank=transport_rank,
+            max_candidates=transport_max_candidates, alpha=fgw_alpha,
+            exact_types=fgw_exact_types, shortlist=fgw_shortlist,
+            epsilon=fgw_epsilon, outer_iterations=fgw_outer_iterations,
+            sinkhorn_iterations=fgw_sinkhorn_iterations,
+            pair_batch_size=gpu_batch_size, cache_pairs=fgw_cache_pairs,
+            cpu_workers=cpu_workers, device="cuda", type_ids=fgw_type_ids,
+            cache_dir=fgw_cache_dir, checkpoint_hook=fgw_checkpoint_hook,
+        )
     elif metric in {"lowrank_gw", "fgw"}:
         if device == "cuda":
-            raise ValueError("CUDA is supported for typed_wl and graphlet only")
+            raise ValueError("CUDA is not supported for lowrank_gw")
+        if metric == "fgw" and len(candidates) > transport_max_candidates:
+            raise ValueError(
+                f"fgw canonical types={len(candidates)} > "
+                f"transport_max_candidates={transport_max_candidates}"
+            )
+        if metric == "fgw" and len(candidates) > fgw_exact_types:
+            raise ValueError(
+                "Large FGW canonical-type sets require --device cuda; "
+                "CPU POT all-pairs is intentionally capped by fgw_exact_types"
+            )
         result = transport_neighbors(
             candidates, k=k, metric=metric, rank=transport_rank,
             max_candidates=transport_max_candidates, fgw_alpha=fgw_alpha,
