@@ -132,8 +132,17 @@ def export_transition(run: Path, level: int, target: Path) -> dict:
     source_level = run / f"level_{level:03d}"
     target_level = run / f"level_{level+1:03d}"
     occurrences = [json.loads(line) for line in (transition / "figure_occurrences.jsonl").read_text(encoding="utf-8").splitlines() if line]
-    cluster_rows = {int(row["coarse_node"]): row for row in (json.loads(line) for line in (transition / "cluster_dynamics.jsonl").read_text(encoding="utf-8").splitlines() if line)}
     fine_to_coarse = np.load(transition / "fine_to_coarse.npy", allow_pickle=False)
+    wanted_coarse = {int(fine_to_coarse[int(occ["fine_nodes"][0])]) for occ in occurrences}
+    cluster_rows = {}
+    with (transition / "cluster_dynamics.jsonl").open(encoding="utf-8") as stream:
+        for line in stream:
+            row = json.loads(line)
+            coarse = int(row["coarse_node"])
+            if coarse in wanted_coarse:
+                cluster_rows[coarse] = row
+    if len(cluster_rows) != len(wanted_coarse):
+        raise ValueError("Missing cluster diagnostics for accepted figures")
     source_metrics = json.loads((source_level / "dynamic_metrics.json").read_text(encoding="utf-8"))
     target_metrics = json.loads((target_level / "dynamic_metrics.json").read_text(encoding="utf-8"))
     with np.load(target_level / "dynamic_vectors.npz", allow_pickle=False) as vectors:
