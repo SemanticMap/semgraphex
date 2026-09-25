@@ -117,3 +117,41 @@ def test_colab_notebook_is_valid_python_and_uses_real_gpu_path():
     ast.parse(code)
     assert "--device" in code and "gpu_batch_size" in code
     assert "sha256" in code and "COMPLETED" in code
+
+
+
+def test_colab_report_cell_works_without_pandas():
+    """The summary must work even if NumPy/pandas imports are damaged."""
+    import ast
+    import contextlib
+    import io
+    from pathlib import Path
+
+    notebook = json.loads((Path(__file__).parents[1] /
+        "notebooks/07_graphex_exact_v1_colab_gpu.ipynb").read_text(encoding="utf-8"))
+    summary = "".join(notebook["cells"][16]["source"])
+    tree = ast.parse(summary)
+    assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) and
+                   any(alias.name == "pandas" for alias in node.names)
+                   for node in ast.walk(tree))
+    report = {"level": 0, "classification_device": "cpu", "edge_records": 3,
+              "partition": {"W": 1, "S": 1, "I": 0, "R": 1},
+              "shapes": 1, "archive_bytes": 100, "baseline_bytes": 150,
+              "net_saved_bytes": 50, "stream_bits": 16,
+              "roundtrip_exact": True}
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(compile(summary, "colab-summary", "exec"),
+             {"reports": [report], "run_folder_id": "test-folder"})
+    assert "All tested levels" in stream.getvalue()
+    assert "50" in stream.getvalue()
+
+
+def test_colab_bootstrap_handles_python_313_without_legacy_numpy_constraints():
+    from pathlib import Path
+    notebook = json.loads((Path(__file__).parents[1] /
+        "notebooks/07_graphex_exact_v1_colab_gpu.ipynb").read_text(encoding="utf-8"))
+    bootstrap = "".join(notebook["cells"][6]["source"])
+    assert "sys.version_info" in bootstrap
+    assert "numpy.typing" in bootstrap
+    assert "pip" in bootstrap
