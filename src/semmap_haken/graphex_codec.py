@@ -79,7 +79,7 @@ def _canonical_shapes(
     assigned: tuple,
     node_types: Mapping[int, str],
 ) -> tuple[list[dict], list[dict]]:
-    """WL bucket + exact VF2; choose symmetry mapping by external port cost."""
+    """Degree/relation bucket + exact VF2; select cheapest port symmetry."""
     shapes: list[dict] = []
     graphs: list[nx.MultiDiGraph] = []
     buckets: dict[tuple, list[int]] = defaultdict(list)
@@ -187,9 +187,33 @@ def encode_graph(
                       for i in range(vertex_count)],
             "edge_count": len(records), "symbol_bits": bit_count,
             "codes": codes}
-    # Record IDs and exact weight bit patterns are retained in the payload.
-    # JSON float roundtrip preserves Python binary64 values; nonfinite
-    # weights are rejected by allow_nan=False.
+    # W topology is reconstructed from the shared prototype and its
+    # occurrence mapping. Only edge IDs and exact binary64 weights are stored
+    # per W edge; S/I/R retain their exact directed payload.
+    shape_lookup = {shape["shape_id"]: shape for shape in shapes}
+    occurrences_by_owner = {occ["figure_index"]: occ for occ in occurrences}
+    slots: dict[int, dict[tuple[int, int, str], list[int]]] = {}
+    for occ in occurrences:
+        shape = shape_lookup[occ["shape_id"]]
+        fine = occ["shape_to_fine_nodes"]
+        available: dict[tuple[int, int, str], list[int]] = defaultdict(list)
+        for pos, (u, v, relation) in enumerate(shape["edges"]):
+            available[(fine[u], fine[v], relation)].append(pos)
+        slots[occ["figure_index"]] = available
+    payloads: dict[str, list[list]] = {"W": [], "S": [], "I": [], "R": []}
+    for item in assigned:
+        e = item.edge
+        if item.part == "W":
+            matches = slots[item.owner].get((e.source, e.target, e.relation), [])
+            if not matches:
+                raise ValueError("shape prototype does not cover an internal edge")
+            payloads["W"].append([e.edge_id, e.weight, item.owner, matches.pop(0)])
+        else:
+            payloads[item.part].append(
+                [e.edge_id, e.source, e.target, e.relation, e.weight])
+    if any(remaining for group in slots.values() for remaining in group.values()):
+        raise ValueError("shape prototype has extra internal edges")
+    data["record_order"] = [e.edge_id for e in records]
     payload = [[e.edge_id, e.source, e.target, e.relation, e.weight]
                for e in records]
     target = Path(output)
@@ -199,7 +223,7 @@ def encode_graph(
         archive.writestr("manifest.json", _json(data))
         archive.writestr("w_shapes.json", _json(shapes))
         archive.writestr("occurrences.json", _json(occurrences))
-        archive.writestr("records.json", _json(payload))
+        archive.writestr("payloads.json", _json(payloads))
         archive.writestr("symbols.bin", packed)
     # The raw baseline has the same vertex metadata and exact edge payload.
     baseline_buffer = io.BytesIO()
@@ -224,26 +248,65 @@ def encode_graph(
 
 
 def decode_graph(archive_path: str | Path) -> tuple[int, tuple[EdgeRecord, ...]]:
+    """Reconstruct W from shape topology, all other records from payloads."""
     with zipfile.ZipFile(archive_path) as archive:
         meta = json.loads(archive.read("manifest.json"))
         if meta.get("format") != FORMAT:
             raise ValueError("unsupported archive format")
-        raw = json.loads(archive.read("records.json"))
+        payloads = json.loads(archive.read("payloads.json"))
         tokens = _unpack(archive.read("symbols.bin"), meta["symbol_bits"],
                          meta["edge_count"], meta["codes"])
         shapes = json.loads(archive.read("w_shapes.json"))
         occurrences = json.loads(archive.read("occurrences.json"))
-    if len(raw) != len(tokens):
-        raise ValueError("truncated record payload")
-    valid_shapes = {str(item["shape_id"]) for item in shapes}
-    for token in tokens:
-        if token.startswith("W:") and token[2:] not in valid_shapes:
-            raise ValueError("unknown W shape")
-        if not (token == "R" or token.startswith(("W:", "S:", "I:"))):
-            raise ValueError("invalid component symbol")
-    if len({item["figure_index"] for item in occurrences}) != len(occurrences):
-        raise ValueError("duplicate figure")
-    records = tuple(EdgeRecord(*record) for record in raw)
-    if len({edge.edge_id for edge in records}) != len(records):
-        raise ValueError("duplicate edge ID")
+    valid_shapes = {shape["shape_id"]: shape for shape in shapes}
+    placements = {occ["figure_index"]: occ for occ in occurrences}
+    if len(placements) != len(occurrences):
+        raise ValueError("duplicate figure index")
+    restored: dict[int, EdgeRecord] = {}
+    derived: dict[int, str] = {}
+    for edge_id, weight, owner, position in payloads["W"]:
+        occurrence = placements[owner]
+        shape = valid_shapes[occurrence["shape_id"]]
+        fine = occurrence["shape_to_fine_nodes"]
+        u, v, relation = shape["edges"][position]
+        e = EdgeRecord(edge_id, fine[u], fine[v], relation, weight)
+        if edge_id in restored:
+            raise ValueError("duplicate edge ID")
+        restored[edge_id], derived[edge_id] = e, "W:" + str(occurrence["shape_id"])
+    for part in ("S", "I", "R"):
+        for payload in payloads[part]:
+            e = EdgeRecord(*payload)
+            if e.edge_id in restored:
+                raise ValueError("duplicate edge ID")
+            restored[e.edge_id] = e
+            if part == "S":
+                owner = next((index for index, occ in placements.items()
+                              if e.source in occ["shape_to_fine_nodes"]
+                              or e.target in occ["shape_to_fine_nodes"]), None)
+                if owner is None:
+                    raise ValueError("S has no figure endpoint")
+                nodes = set(placements[owner]["shape_to_fine_nodes"])
+                direction = "out" if e.source in nodes else "in"
+                derived[e.edge_id] = "S:" + _json([direction, e.relation]).decode("utf-8")
+            elif part == "I":
+                derived[e.edge_id] = "I:" + e.relation
+            else:
+                derived[e.edge_id] = "R"
+    order = meta["record_order"]
+    if len(order) != meta["edge_count"] or len(set(order)) != len(order):
+        raise ValueError("invalid edge order")
+    try:
+        records = tuple(restored[edge_id] for edge_id in order)
+        original_symbols = [derived[edge_id] for edge_id in order]
+    except KeyError as exc:
+        raise ValueError("missing edge from component payload") from exc
+    if len(restored) != len(order) or original_symbols != tokens:
+        raise ValueError("component payload and Huffman stream disagree")
+    if any(not 0 <= e.source < meta["vertex_count"] or
+           not 0 <= e.target < meta["vertex_count"] for e in records):
+        raise ValueError("decoded edge endpoint outside graph")
+    groups = [placements[i]["shape_to_fine_nodes"] for i in sorted(placements)]
+    assigned = classify_edges(meta["vertex_count"], records, groups)
+    if any(assigned[i].part != token[0] for i, token in enumerate(tokens)):
+        raise ValueError("invalid W/S/I/R classification in archive")
     return int(meta["vertex_count"]), records
