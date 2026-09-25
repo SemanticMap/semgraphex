@@ -157,7 +157,7 @@ def test_colab_bootstrap_handles_python_313_without_legacy_numpy_constraints():
     assert "pip" in bootstrap
 
 
-def test_symmetric_csr_records_count_one_structural_neighbor():
+def test_symmetric_csr_records_count_one_structural_neighbor(tmp_path):
     """Reciprocal rows are two records but only one structural neighbor."""
     edges = (
         EdgeRecord(0, 0, 1, "r", 1.0),
@@ -173,6 +173,10 @@ def test_symmetric_csr_records_count_one_structural_neighbor():
     from semmap_haken.graphex_components_gpu import classify_edges_accelerated
     assert [row.part for row in classify_edges_accelerated(
         5, edges, ((0, 1),), device="cpu")] == expected
+    archive = tmp_path / "reciprocal.zip"
+    report = encode_graph(5, edges, ((0, 1),), archive)
+    assert report["partition"] == {"W": 2, "S": 2, "I": 2}
+    assert decode_graph(archive) == (5, edges)
 
 
 def test_multiple_relations_to_one_neighbor_are_star_not_multiple_neighbors():
