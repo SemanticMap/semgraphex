@@ -38,9 +38,11 @@ weighted records; the encoder asserts equality with the original records.
 The report's `archive_bytes` is the actual on-disk size, including the ZIP
 container, codebook, shapes, placements and all payloads. `baseline_bytes`
 is an independently DEFLATE-compressed exact-graph container. A negative
-`net_saved_bytes` is a valid experimental result. The current pilot retains
-full edge addresses and labels even for W: it establishes a correctness and
-measurement baseline, **not** an optimized structure-eliding codec.
+`net_saved_bytes` is a valid experimental result. The pilot reconstructs W topology, orientation and relations from shared
+shape prototypes and occurrence maps; per-W-record payload contains record
+ID, weight and its prototype-edge position. S/I/R still retain their exact
+addresses and relation labels. It establishes a correctness and measurement
+baseline, **not** a fully optimized conditional/joint graph-word codec.
 
 **Losslessness scope:** saved *per-relation CSR entries*. If source ConceptNet
 rows were aggregated during preparation, their original multiplicities and
@@ -53,8 +55,8 @@ hierarchical code. Levels above zero represent the stored coarse graph.
 
 ## Required before enabling online MDL
 
-1. Replace redundant per-edge W payloads with canonical prototype topology
-   plus exact permutations, relation/weight payload and optional corrections.
+1. Optimize the W stream further with compact permutations, typed child
+   symbols and corrections for non-prototype records.
 2. Add explicit S patterns with leaf-target address coding and I pattern
    dictionaries, plus joint words, conditional S|W and marginal streams.
 3. Compare **complete serialized** lengths for exact-type, independent
