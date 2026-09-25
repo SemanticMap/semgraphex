@@ -78,6 +78,23 @@ hierarchical code. Levels above zero represent the stored coarse graph.
 7. Evaluate statistical graphex `(W,S,I)` separately using an appropriate
    sampling design, not two compression settings of the same ConceptNet.
 
+## Exact archive overhead audit
+
+The first saved level-0 experiment showed a 10,210,052-byte graphex ZIP versus
+a 7,888,379-byte DEFLATE exact-record baseline. Inspecting ZIP members showed
+that `manifest.json` alone used 2,495,030 compressed bytes; its redundant
+ascending `record_order` list accounted for approximately 2,256,000 bytes.
+The new encoder writes `"ascending_ids"` instead of a million-element list
+when record IDs are monotonically increasing; nonmonotonic input retains its
+explicit order, and the decoder still accepts legacy list manifests.
+
+A **manifest-only counterfactual ZIP repack** of the old archive, leaving
+old W/S/I/R classification and all payloads unchanged, measured 7,951,867
+bytes, 63,488 bytes above the old baseline. This is not the size of a newly
+encoded run: the corrected structural-neighbor classifier also changes the
+component payloads. Measure the new archive with a fresh run before making
+a compression-gain claim.
+
 The online `graph_mdl.py` `bits_proxy` is **unchanged** in this pilot and
 must not be described as an actual encoded length.
 
