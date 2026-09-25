@@ -87,3 +87,33 @@ def test_nonfinite_weight_is_not_silently_serialized(tmp_path):
     with pytest.raises(ValueError):
         encode_graph(2, (EdgeRecord(0, 0, 1, "r", float("nan")),),
                      (), tmp_path / "bad.zip")
+
+
+def test_accelerated_cpu_path_matches_exact_classifier():
+    from semmap_haken.graphex_components_gpu import classify_edges_accelerated
+    edges, figures = example()
+    assert classify_edges_accelerated(11, edges, figures, device="cpu",
+                                      batch_size=2) == classify_edges(11, edges, figures)
+
+
+def test_cuda_classifier_matches_cpu_when_available():
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CI runner does not provide a CUDA accelerator")
+    from semmap_haken.graphex_components_gpu import classify_edges_accelerated
+    edges, figures = example()
+    assert classify_edges_accelerated(11, edges, figures, device="cuda",
+                                      batch_size=2) == classify_edges(11, edges, figures)
+
+
+def test_colab_notebook_is_valid_python_and_uses_real_gpu_path():
+    import ast
+    from pathlib import Path
+    notebook_path = Path(__file__).parents[1] / "notebooks/07_graphex_exact_v1_colab_gpu.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    assert notebook["nbformat"] == 4
+    code = "\n".join("".join(cell["source"]) for cell in notebook["cells"]
+                     if cell["cell_type"] == "code")
+    ast.parse(code)
+    assert "--device" in code and "gpu_batch_size" in code
+    assert "sha256" in code and "COMPLETED" in code
