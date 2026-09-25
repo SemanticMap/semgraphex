@@ -64,16 +64,26 @@ def classify_edges_accelerated(
                          count=len(records))
     if np.any(source < 0) or np.any(target < 0) or np.any(source >= vertex_count) or np.any(target >= vertex_count):
         raise ValueError("edge endpoint outside graph")
+    # Deduplicate unordered structural pairs once with native NumPy sorting.
+    # The CUDA batches below still classify *every* original record, including
+    # reciprocal rows and distinct relation/weight payloads.
+    support_pairs = np.unique(
+        np.column_stack((np.minimum(source, target),
+                         np.maximum(source, target))),
+        axis=0,
+    )
+    nonloop = support_pairs[:, 0] != support_pairs[:, 1]
+    support_pairs = support_pairs[nonloop]
+    neighbors = np.concatenate((support_pairs[:, 0], support_pairs[:, 1]))
+    degree = np.bincount(neighbors, minlength=vertex_count)
+    loop_vertices = np.zeros(vertex_count, dtype=np.bool_)
+    loop_vertices[source[source == target]] = True
+
     d = torch.device("cuda")
     owner_gpu = torch.as_tensor(owners, device=d)
-    degree_gpu = torch.zeros(vertex_count, dtype=torch.int64, device=d)
+    degree_gpu = torch.as_tensor(degree, device=d)
+    loop_gpu = torch.as_tensor(loop_vertices, device=d)
     labels = np.empty(len(records), dtype=np.uint8)
-    for start in range(0, len(records), batch_size):
-        stop = min(len(records), start + batch_size)
-        u = torch.as_tensor(source[start:stop], device=d)
-        v = torch.as_tensor(target[start:stop], device=d)
-        degree_gpu.index_add_(0, u, torch.ones_like(u))
-        degree_gpu.index_add_(0, v, torch.ones_like(v))
     for start in range(0, len(records), batch_size):
         stop = min(len(records), start + batch_size)
         u = torch.as_tensor(source[start:stop], device=d)
@@ -81,9 +91,9 @@ def classify_edges_accelerated(
         fu, fv = owner_gpu[u], owner_gpu[v]
         different = u != v
         w = (fu >= 0) & (fu == fv)
-        s = different & (((fu >= 0) & (fv < 0) & (degree_gpu[v] == 1)) |
-                         ((fv >= 0) & (fu < 0) & (degree_gpu[u] == 1)))
-        i = different & (fu < 0) & (fv < 0) & (degree_gpu[u] == 1) & (degree_gpu[v] == 1)
+        s = different & (((fu >= 0) & (fv < 0) & (degree_gpu[v] == 1) & (~loop_gpu[v])) |
+                         ((fv >= 0) & (fu < 0) & (degree_gpu[u] == 1) & (~loop_gpu[u])))
+        i = different & (fu < 0) & (fv < 0) & (degree_gpu[u] == 1) & (degree_gpu[v] == 1) & (~loop_gpu[u]) & (~loop_gpu[v])
         local = torch.full_like(u, 3, dtype=torch.uint8)
         local[i] = 2
         local[s] = 1
