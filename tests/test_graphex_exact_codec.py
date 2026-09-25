@@ -202,3 +202,24 @@ def test_self_loop_blocks_star_or_dust_at_that_vertex():
     )
     assert [item.part for item in classify_edges(3, edges, ((0, 1),))] == [
         "W", "W", "R", "R", "R"]
+
+
+def test_sequential_record_ids_need_no_redundant_manifest_array(tmp_path):
+    edges, figures = example()
+    archive = tmp_path / "compact-order.zip"
+    encode_graph(11, edges, figures, archive)
+    with zipfile.ZipFile(archive) as container:
+        manifest = json.loads(container.read("manifest.json"))
+    assert manifest["record_order"] == "ascending_ids"
+    assert decode_graph(archive) == (11, edges)
+
+
+def test_nonmonotonic_record_ids_preserve_original_order(tmp_path):
+    edges = (EdgeRecord(10, 0, 1, "r", 0.4),
+             EdgeRecord(3, 1, 0, "r", 0.7))
+    archive = tmp_path / "explicit-order.zip"
+    encode_graph(2, edges, (), archive)
+    with zipfile.ZipFile(archive) as container:
+        manifest = json.loads(container.read("manifest.json"))
+    assert manifest["record_order"] == [10, 3]
+    assert decode_graph(archive) == (2, edges)
