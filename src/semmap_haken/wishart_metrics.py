@@ -767,7 +767,12 @@ def build_neighbor_graph(
     elif metric in {"lowrank_gw", "fgw"}:
         if device == "cuda":
             raise ValueError("CUDA is not supported for lowrank_gw")
-        if metric == "fgw" and len(candidates) > min(transport_max_candidates, fgw_exact_types):
+        if metric == "fgw" and len(candidates) > transport_max_candidates:
+            raise ValueError(
+                f"fgw canonical types={len(candidates)} > "
+                f"transport_max_candidates={transport_max_candidates}"
+            )
+        if metric == "fgw" and len(candidates) > fgw_exact_types:
             raise ValueError(
                 "Large FGW canonical-type sets require --device cuda; "
                 "CPU POT all-pairs is intentionally capped by fgw_exact_types"
