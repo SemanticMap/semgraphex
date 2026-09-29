@@ -1,0 +1,29 @@
+name: GloVe-Wishart Graphex exact 100k smoke
+on:
+  push:
+    branches:
+      - feature/glove-wishart-graphex-cn100k-lossless-l4
+  pull_request:
+  workflow_dispatch:
+jobs:
+  targeted-cpu-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e . pytest nbformat
+      - run: python -m pytest -q tests/test_semmap_glove_graphex_100k.py
+      - name: Check both Colab notebooks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import nbformat
+          for path in Path('notebooks').glob('1[01]_*100k*l4_colab.ipynb'):
+              nb = nbformat.read(path, as_version=4)
+              nbformat.validate(nb)
+              for i, cell in enumerate(nb.cells):
+                  if cell.cell_type == 'code': compile(cell.source, f'{path}:{i}', 'exec')
+              print('validated', path)
+          PY
