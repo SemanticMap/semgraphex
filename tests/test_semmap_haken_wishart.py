@@ -392,6 +392,17 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
         (output / "hierarchy_codec_report.json").read_text(encoding="utf-8")
     )
     assert hierarchy_report["roundtrip_exact"]
+    assert hierarchy_report["baseline_level0_binary_bundle_bytes"] > 0
+    analysis_path = output / "compression_analysis.json"
+    assert analysis_path.is_file()
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert analysis["summary"]["hierarchy_roundtrip_exact"] is True
+    published = json.loads(
+        (output / "hierarchy.json").read_text(encoding="utf-8")
+    )
+    assert published["compression_analysis"]["artifact"] == (
+        "compression_analysis.json"
+    )
 
 
 def test_incremental_prefill_matches_full_frequency_census() -> None:
