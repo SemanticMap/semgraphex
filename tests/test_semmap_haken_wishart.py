@@ -12,6 +12,7 @@ from semmap_haken.graph_mdl import MdlOccurrence, build_canonical_huffman_codes,
 from semmap_haken.wishart_cluster import wishart_cluster
 from semmap_haken.wishart_metrics import (
     EgoCandidate,
+    extract_ego_candidates,
     relation_js_neighbors,
     typed_wl_features,
 )
@@ -381,3 +382,97 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
     )
     assert decode_grammar(grammar_archive) == (n, expected_records)
     assert metrics["exact_transition_codec"]["roundtrip_exact"]
+
+
+def test_incremental_prefill_matches_full_frequency_census() -> None:
+    from semmap_haken.graph_dictionary import GraphDictionary
+    from semmap_haken.wishart_config import DictionaryOptions, WishartOptions
+    from semmap_haken.wishart_hierarchy import _discover_types, _scan_known_types
+
+    n = 7
+    rows = []
+    cols = []
+    for node in range(n - 1):
+        rows.extend((node, node + 1))
+        cols.extend((node + 1, node))
+    adjacency = sparse.csr_matrix(
+        (np.ones(len(rows)), (rows, cols)),
+        shape=(n, n),
+        dtype=float,
+    )
+    relation_layers = {"r": adjacency.copy()}
+    candidates = extract_ego_candidates(
+        adjacency,
+        relation_layers,
+        radius=1,
+        max_ego_nodes=3,
+        candidate_limit=n,
+        seed=3,
+        workers=1,
+    )
+    dictionary = GraphDictionary(boundary_sensitive=False)
+    discovery_type_ids, _ = _discover_types(
+        candidates, dictionary, level=0, cpu_workers=1
+    )
+    wishart_options = WishartOptions(
+        radius=1,
+        max_ego_nodes=3,
+        candidate_limit=n,
+        k_neighbors=2,
+        min_cluster_size=1,
+        min_cluster_mass=1.0,
+        slow_modes=2,
+        mfpt_pairs=2,
+        mfpt_walks_per_pair=1,
+        mfpt_max_steps=10,
+        betweenness_samples=2,
+        clustering_samples=2,
+        distance_samples=2,
+    )
+    dictionary_options = DictionaryOptions(
+        boundary_sensitive=False,
+        frequency_scan="full",
+        frequency_scan_batch_size=2,
+        min_support=1,
+    )
+    full_rows, full_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=0,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=dictionary_options,
+        cpu_workers=1,
+    )
+    assert full_rows
+
+    incremental_rows, incremental_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=1,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=DictionaryOptions(
+            boundary_sensitive=False,
+            frequency_scan="incremental",
+            frequency_scan_batch_size=2,
+            min_support=1,
+        ),
+        cpu_workers=1,
+        prefilled_occurrences=full_rows[:2],
+    )
+
+    assert incremental_counts == full_counts
+    assert {
+        (row.center, row.nodes, row.dictionary_type_id)
+        for row in incremental_rows
+    } == {
+        (row.center, row.nodes, row.dictionary_type_id)
+        for row in full_rows
+    }
