@@ -72,6 +72,11 @@ def test_grammar_v2_roundtrip_reuses_shape_and_separates_interfaces(tmp_path):
     assert report["port_edge_records"] == 3
     assert report["residual_edge_records"] == 1
     assert report["archive_bytes"] == archive.stat().st_size
+    assert report["baseline_binary_bytes"] > 0
+    assert report["baseline_json_bytes"] == report["baseline_bytes"]
+    assert report["compression_ratio_binary_baseline"] == (
+        report["archive_bytes"] / report["baseline_binary_bytes"]
+    )
 
     n, restored = decode_grammar(archive)
     assert n == 10
