@@ -36,6 +36,7 @@ from .quotient import membership_matrix
 from .wishart_cluster import WishartClustering, wishart_cluster
 from .wishart_config import ColabExecutionOptions, DictionaryOptions, WishartOptions
 from .wishart_resume import load_latest_checkpoint, truncate_after_checkpoint, write_level_checkpoint
+from .transition_grammar import encode_transition_grammar
 from .wishart_dynamics import cluster_transition_metrics, compute_dynamic_snapshot
 from .wishart_metrics import (
     EgoCandidate,
@@ -1140,6 +1141,21 @@ def run_wishart_hierarchy(
             cpu_workers=execution_options.cpu_workers,
         )
         phase_times["transition_metrics"] = time.perf_counter() - phase_started
+
+        if dictionary_options.emit_exact_transition_codec:
+            transition_dir = (
+                destination / f"transition_{level:03d}_{level + 1:03d}"
+            )
+            transition_dir.mkdir(parents=True, exist_ok=True)
+            exact_codec_report = encode_transition_grammar(
+                vertex_count=int(current.shape[0]),
+                relation_layers=relation_layers,
+                figure_nodes=[item.nodes for item in plan.occurrences],
+                symbol_types=symbol_types,
+                output=transition_dir / "grammar_exact_v2.zip",
+            )
+            dictionary_metrics["exact_transition_codec"] = exact_codec_report
+
         _write_transition(
             destination,
             level=level,
@@ -1163,6 +1179,9 @@ def run_wishart_hierarchy(
                     "dictionary_size": len(dictionary.types),
                     "figure_occurrences": len(occurrences),
                     "mdl_gain_bits_proxy": dictionary_metrics["mdl_gain_bits_proxy"],
+                    "exact_transition_codec": dictionary_metrics.get(
+                        "exact_transition_codec"
+                    ),
                 },
             )
 
@@ -1195,6 +1214,9 @@ def run_wishart_hierarchy(
                 "canonical_types": len(type_ids),
                 "figure_occurrences": len(occurrences),
                 "dictionary_metrics": dictionary_metrics,
+                "exact_transition_codec": dictionary_metrics.get(
+                    "exact_transition_codec"
+                ),
             }
         )
 
@@ -1255,8 +1277,11 @@ def run_wishart_hierarchy(
                 "levels_detail": level_summaries,
                 "transitions": transition_summaries,
                 "mdl_note": (
-                    "Bit counts are a transparent structural MDL proxy; they are "
-                    "not measured bytes of a finalized lossless binary codec."
+                    "Selection bit counts remain a structural MDL proxy. When "
+                    "dictionary.codec.emit_transition_archives=true, each accepted "
+                    "transition also records measured bytes for an independently "
+                    "round-tripped grammar_exact_v2 archive of the source relation "
+                    "layers."
                 ),
             },
             indent=2,
