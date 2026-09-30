@@ -14,6 +14,7 @@ from scipy import sparse
 
 from .grammar_codec import encode_grammar
 from .graphex_components import EdgeRecord
+from .relation_adjacency import adjacency_relation_diagnostic
 
 
 def relation_layers_to_edge_records(
@@ -52,6 +53,7 @@ def encode_transition_grammar(
     figure_nodes: Sequence[Sequence[int]],
     symbol_types: Mapping[int, str],
     output: str | Path,
+    source_adjacency: sparse.spmatrix | None = None,
 ) -> dict[str, object]:
     records = relation_layers_to_edge_records(relation_layers)
     report = encode_grammar(
@@ -61,8 +63,14 @@ def encode_transition_grammar(
         output,
         node_types=symbol_types,
     )
-    return {
+    result = {
         **report,
         "source_relation_layers": len(relation_layers),
         "scope": "exact source-level relation-layer CSR entries before contraction",
     }
+    if source_adjacency is not None:
+        result["adjacency_from_relations"] = adjacency_relation_diagnostic(
+            source_adjacency,
+            relation_layers,
+        )
+    return result
