@@ -957,6 +957,10 @@ def run_wishart_hierarchy(
         current_huffman = state["current_huffman"]
         level_summaries = state["level_summaries"]
         transition_summaries = state["transition_summaries"]
+        # Incremental occurrence reuse is transient. After RESUME force a
+        # complete census once rather than trusting a cache not persisted in
+        # the checkpoint contract.
+        incremental_scan_cache: tuple[_ScannedOccurrence, ...] = ()
         if checkpoint_hook is not None:
             checkpoint_hook(
                 destination,
@@ -979,6 +983,7 @@ def run_wishart_hierarchy(
         current_huffman: dict[str, str] = {}
         level_summaries: list[dict[str, object]] = []
         transition_summaries: list[dict[str, object]] = []
+        incremental_scan_cache: tuple[_ScannedOccurrence, ...] = ()
         write_level_checkpoint(
             destination, next_level=0, current=current,
             relation_layers=relation_layers, memberships=memberships,
@@ -1078,6 +1083,17 @@ def run_wishart_hierarchy(
             break
 
         phase_started = time.perf_counter()
+        force_full_census = (
+            dictionary_options.frequency_scan != "incremental"
+            or level == 0
+            or level % dictionary_options.frequency_full_rescan_every == 0
+            or not incremental_scan_cache
+        )
+        prefilled_scan = (
+            ()
+            if force_full_census
+            else incremental_scan_cache
+        )
         scanned, full_counts = _scan_known_types(
             current,
             relation_layers,
@@ -1089,6 +1105,13 @@ def run_wishart_hierarchy(
             wishart_options=options,
             dictionary_options=dictionary_options,
             cpu_workers=execution_options.cpu_workers,
+            prefilled_occurrences=prefilled_scan,
+        )
+        scan_reused_centers = len({item.center for item in prefilled_scan})
+        scan_mode = (
+            "full"
+            if force_full_census
+            else "incremental"
         )
 
         phase_times["full_scan"] = time.perf_counter() - phase_started
@@ -1166,6 +1189,11 @@ def run_wishart_hierarchy(
             ),
             "recursive_types_total": int(
                 sum(bool(item.child_types) for item in dictionary.types.values())
+            ),
+            "frequency_scan_mode": scan_mode,
+            "incremental_reused_centers": scan_reused_centers,
+            "frequency_full_rescan_every": (
+                dictionary_options.frequency_full_rescan_every
             ),
         }
         _write_dictionary_artifacts(
@@ -1273,6 +1301,53 @@ def run_wishart_hierarchy(
 
         phase_started = time.perf_counter()
         old_count = current.shape[0]
+
+        if dictionary_options.frequency_scan == "incremental":
+            changed_nodes = {
+                int(node)
+                for occurrence in plan.occurrences
+                for node in occurrence.nodes
+            }
+            invalid_centers = set(
+                OccurrenceIndex.affected_centers(
+                    current,
+                    changed_nodes,
+                    radius=options.radius + 1,
+                )
+            )
+            carried: list[_ScannedOccurrence] = []
+            assignment = np.asarray(plan.fine_to_coarse, dtype=np.int64)
+            for item in scanned:
+                if item.center in invalid_centers:
+                    continue
+                mapped_nodes = tuple(
+                    int(assignment[node]) for node in item.nodes
+                )
+                mapped_prototype = tuple(
+                    int(assignment[node])
+                    for node in item.prototype_to_fine_nodes
+                )
+                if len(set(mapped_nodes)) != len(mapped_nodes):
+                    continue
+                carried.append(
+                    _ScannedOccurrence(
+                        candidate_index=len(carried),
+                        center=int(assignment[item.center]),
+                        nodes=mapped_nodes,
+                        prototype_to_fine_nodes=mapped_prototype,
+                        dictionary_type_id=item.dictionary_type_id,
+                    )
+                )
+            incremental_scan_cache = tuple(carried)
+            dictionary_metrics["incremental_cache_next_level"] = len(
+                incremental_scan_cache
+            )
+            dictionary_metrics["incremental_invalidated_centers"] = len(
+                invalid_centers
+            )
+        else:
+            incremental_scan_cache = ()
+
         previous_symbol_types = symbol_types
         membership = membership_matrix(plan.fine_to_coarse)
         current = _contract_matrix(
