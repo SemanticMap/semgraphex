@@ -157,10 +157,15 @@ def _port_profile(
     relation_to_id: Mapping[str, int],
 ) -> tuple[PortSpec, ...]:
     local = {fine: index for index, fine in enumerate(ordered_fine_nodes)}
-    ports: list[PortSpec] = []
+    # InterfaceVariant is a reusable *port schema*, not an occurrence census.
+    # Edge multiplicity is already preserved exactly by PortBinding rows.  A
+    # set prevents otherwise identical shapes from fragmenting into different
+    # variants merely because one occurrence has more external edges through
+    # the same typed/directed port.
+    ports: set[PortSpec] = set()
     for edge in external:
         if int(edge.source) in local:
-            ports.append(
+            ports.add(
                 PortSpec(
                     local_node=local[int(edge.source)],
                     relation_id=relation_to_id[str(edge.relation)],
@@ -168,7 +173,7 @@ def _port_profile(
                 )
             )
         if int(edge.target) in local and int(edge.target) != int(edge.source):
-            ports.append(
+            ports.add(
                 PortSpec(
                     local_node=local[int(edge.target)],
                     relation_id=relation_to_id[str(edge.relation)],
