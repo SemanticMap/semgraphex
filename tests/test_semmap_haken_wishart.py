@@ -158,6 +158,33 @@ def test_graph_dictionary_deduplicates_isomorphic_typed_candidates() -> None:
     assert len(dictionary.types) == 1
 
 
+def test_graph_dictionary_factors_same_shape_across_interface_variants() -> None:
+    adjacency = _layer([(0, 1), (1, 0), (1, 2), (2, 1)])
+    a = EgoCandidate(
+        0,
+        np.arange(3),
+        adjacency,
+        {"IsA": adjacency},
+        boundary_signature=((0, "IsA", "out", 1),),
+    )
+    b = EgoCandidate(
+        1,
+        np.arange(3),
+        adjacency,
+        {"IsA": adjacency},
+        boundary_signature=((2, "UsedFor", "in", 2),),
+    )
+    dictionary = GraphDictionary(boundary_sensitive=True)
+    first = dictionary.resolve_or_create(a, level=0)
+    second = dictionary.resolve_or_create(b, level=0)
+
+    assert first.type_id != second.type_id
+    assert first.shape_id == second.shape_id
+    assert first.interface_variant_id != second.interface_variant_id
+    assert len(dictionary.shapes) == 1
+    assert len(dictionary.interface_variants) == 2
+
+
 def test_graph_dictionary_separates_relation_and_recursive_symbol_types() -> None:
     adjacency = _layer([(0, 1), (1, 0), (1, 2), (2, 1)])
     is_a = EgoCandidate(
