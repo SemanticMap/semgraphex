@@ -6,6 +6,7 @@ import json
 import zipfile
 from pathlib import Path
 
+from .compression_analysis import write_compression_report
 from .hierarchy_codec import (
     FORMAT as HIERARCHY_FORMAT,
     decode_hierarchy_bundle,
@@ -49,6 +50,10 @@ def main(argv: list[str] | None = None) -> int:
     decode_parser.add_argument("--archive", type=Path, required=True)
     decode_parser.add_argument("--output", type=Path, required=True)
 
+    report_parser = subparsers.add_parser("report")
+    report_parser.add_argument("--run-dir", type=Path, required=True)
+    report_parser.add_argument("--output", type=Path)
+
     args = parser.parse_args(argv)
     if args.command == "inspect":
         print(json.dumps(_inspect(args.archive), indent=2, sort_keys=True))
@@ -68,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "decode":
         report = write_decoded_hierarchy(args.archive, args.output)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    if args.command == "report":
+        report = write_compression_report(args.run_dir, args.output)
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     raise AssertionError(args.command)
