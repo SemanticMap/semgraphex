@@ -31,7 +31,13 @@ from .grammar_codec import (
     decode_grammar,
     encode_grammar,
 )
-from .grammar_types import InternalShape, PortSpec, ShapeEdge
+from .grammar_streams import (
+    STREAM_LAYOUT as COMPACT_STREAM_LAYOUT,
+    read_internal as _read_internal_compact,
+    read_occurrences as _read_occurrences_compact,
+    read_ports as _read_ports_compact,
+)
+from .grammar_types import InterfaceVariant, InternalShape, PortSpec, ShapeEdge
 from .graphex_components import EdgeRecord
 from .transition_grammar import relation_layers_to_edge_records
 from .relation_adjacency import adjacency_relation_diagnostic, sum_relation_layers
@@ -192,14 +198,43 @@ def _decode_transition_delta(
         )
         for item in shapes_raw
     }
-    variants = {
-        int(item["variant_id"]): {
-            PortSpec(int(port[0]), int(port[1]), str(port[2]))
-            for port in item["ports"]
-        }
+    variant_objects = {
+        int(item["variant_id"]): InterfaceVariant(
+            variant_id=int(item["variant_id"]),
+            shape_id=int(item["shape_id"]),
+            ports=tuple(
+                PortSpec(int(port[0]), int(port[1]), str(port[2]))
+                for port in item["ports"]
+            ),
+        )
         for item in variants_raw
     }
-    occurrence_rows = _read_occurrences(occurrences_data)
+    variants = {
+        variant_id: set(variant.ports)
+        for variant_id, variant in variant_objects.items()
+    }
+    stream_layout = manifest.get("stream_layout")
+    if stream_layout == COMPACT_STREAM_LAYOUT:
+        occurrence_rows = _read_occurrences_compact(
+            occurrences_data,
+            shapes,
+        )
+        internal_rows = _read_internal_compact(
+            internal_data,
+            occurrence_rows,
+            shapes,
+        )
+        port_rows = _read_ports_compact(
+            ports_data,
+            occurrence_rows,
+            variant_objects,
+        )
+    elif stream_layout is None:
+        occurrence_rows = _read_occurrences(occurrences_data)
+        internal_rows = _read_internal(internal_data)
+        port_rows = _read_ports(ports_data)
+    else:
+        raise ValueError(f"unsupported grammar stream layout: {stream_layout}")
     occurrences = {
         row.occurrence_id: row for row in occurrence_rows
     }
@@ -224,7 +259,7 @@ def _decode_transition_delta(
             ) from error
         rows.append((source, target, edge.relation, edge.weight))
 
-    for item in _read_internal(internal_data):
+    for item in internal_rows:
         occurrence = occurrences.get(item.occurrence_id)
         if occurrence is None:
             raise ValueError("internal delta references missing occurrence")
@@ -245,7 +280,7 @@ def _decode_transition_delta(
             )
         )
 
-    for item in _read_ports(ports_data):
+    for item in port_rows:
         occurrence = occurrences.get(item.occurrence_id)
         if occurrence is None:
             raise ValueError("port delta references missing occurrence")
