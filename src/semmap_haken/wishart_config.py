@@ -196,6 +196,7 @@ class DictionaryOptions:
     frequency_scan_batch_size: int = 5000
     min_support: int = 3
     min_mdl_gain_bits: float = 0.0
+    selection_objective: Literal["mdl_proxy", "grammar_v2_logical"] = "mdl_proxy"
     local_improvement: bool = True
     family_match_jaccard: float = 0.5
     max_dictionary_size: int = 20000
@@ -220,6 +221,7 @@ class DictionaryOptions:
             frequency_scan_batch_size=int(raw.get("frequency_scan_batch_size", 5000)),
             min_support=int(raw.get("min_support", 3)),
             min_mdl_gain_bits=float(selection.get("min_gain_bits", 0.0)),
+            selection_objective=str(selection.get("objective", "mdl_proxy")),
             local_improvement=bool(selection.get("local_improvement", True)),
             family_match_jaccard=float(raw.get("family_match_jaccard", 0.5)),
             max_dictionary_size=int(limits.get("max_dictionary_size", 20000)),
@@ -242,6 +244,11 @@ class DictionaryOptions:
             raise ValueError("dictionary.max_dictionary_size must be positive")
         if not 0.0 <= self.family_match_jaccard <= 1.0:
             raise ValueError("dictionary.family_match_jaccard must be in [0, 1]")
+        if self.selection_objective not in {"mdl_proxy", "grammar_v2_logical"}:
+            raise ValueError(
+                "dictionary.selection.objective must be mdl_proxy or "
+                "grammar_v2_logical"
+            )
 
 
 def load_dictionary_options(path: str | Path) -> DictionaryOptions:
