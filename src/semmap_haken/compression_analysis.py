@@ -90,6 +90,7 @@ def analyze_compression_run(run_dir: str | Path) -> dict[str, object]:
             },
             "largest_entry": largest_name,
             "largest_entry_bytes": int(largest_bytes),
+            "codec_timing_seconds": dict(codec.get("timing_seconds", {})),
         })
 
     hierarchy_codec = hierarchy.get("hierarchy_exact_codec") or {}
