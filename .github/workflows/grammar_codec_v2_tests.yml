@@ -16,6 +16,7 @@ on:
       - 'tests/test_grammar_cost.py'
       - 'tests/test_transition_grammar.py'
       - 'tests/test_recursive_dictionary_model.py'
+      - 'tests/test_incremental_dictionary_support.py'
       - 'tests/test_semmap_haken_wishart.py'
       - 'tests/test_semmap_glove_graphex_100k.py'
       - '.github/workflows/grammar_codec_v2_tests.yml'
@@ -41,5 +42,6 @@ jobs:
             tests/test_grammar_cost.py \
             tests/test_transition_grammar.py \
             tests/test_recursive_dictionary_model.py \
+            tests/test_incremental_dictionary_support.py \
             tests/test_semmap_glove_graphex_100k.py \
             tests/test_semmap_haken_wishart.py
