@@ -132,6 +132,7 @@ def select_nonoverlapping_mdl(
     ordered = sorted(positive, key=density, reverse=True)
     selected: list[MdlOccurrence] = []
     occupied: set[int] = set()
+    selected_by_node: dict[int, MdlOccurrence] = {}
     rejected: list[MdlOccurrence] = []
     for item in ordered:
         nodes = set(item.nodes)
@@ -140,21 +141,44 @@ def select_nonoverlapping_mdl(
             continue
         selected.append(item)
         occupied.update(nodes)
+        for node in nodes:
+            selected_by_node[node] = item
 
     if local_improvement:
         for challenger in sorted(rejected, key=lambda item: item.mdl_gain, reverse=True):
             challenger_nodes = set(challenger.nodes)
-            conflicts = [item for item in selected if set(item.nodes) & challenger_nodes]
+            conflicts = {
+                selected_by_node[node]
+                for node in challenger_nodes
+                if node in selected_by_node
+            }
             if not conflicts:
                 selected.append(challenger)
+                for node in challenger_nodes:
+                    selected_by_node[node] = challenger
                 continue
             if challenger.mdl_gain <= sum(item.mdl_gain for item in conflicts) + 1e-12:
                 continue
-            remaining = [item for item in selected if item not in conflicts]
-            remaining_nodes = {node for item in remaining for node in item.nodes}
-            if challenger_nodes & remaining_nodes:
+
+            for conflict in conflicts:
+                if conflict in selected:
+                    selected.remove(conflict)
+                for node in conflict.nodes:
+                    if selected_by_node.get(node) == conflict:
+                        del selected_by_node[node]
+
+            if any(node in selected_by_node for node in challenger_nodes):
+                # Defensive rollback should never trigger because conflicts are
+                # collected from every occupied challenger node.
+                for conflict in conflicts:
+                    selected.append(conflict)
+                    for node in conflict.nodes:
+                        selected_by_node[node] = conflict
                 continue
-            selected = remaining + [challenger]
+
+            selected.append(challenger)
+            for node in challenger_nodes:
+                selected_by_node[node] = challenger
 
     return tuple(
         sorted(
