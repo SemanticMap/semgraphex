@@ -37,6 +37,8 @@ from .wishart_cluster import WishartClustering, wishart_cluster
 from .wishart_config import ColabExecutionOptions, DictionaryOptions, WishartOptions
 from .wishart_resume import load_latest_checkpoint, truncate_after_checkpoint, write_level_checkpoint
 from .transition_grammar import encode_transition_grammar
+from .recursive_grammar import write_recursive_grammar
+from .dictionary_graphex import write_dictionary_projection
 from .wishart_dynamics import cluster_transition_metrics, compute_dynamic_snapshot
 from .wishart_metrics import (
     EgoCandidate,
@@ -685,6 +687,7 @@ def _write_dictionary_artifacts(
     dictionary_dir = directory / "dictionary"
     dictionary.write(dictionary_dir)
     family_registry.write(dictionary_dir)
+    write_recursive_grammar(dictionary_dir, dictionary.types)
     accepted_counts = dictionary.frequency_counts(accepted=True)
     candidate_counts = dictionary.frequency_counts(accepted=False)
     (dictionary_dir / "huffman.json").write_text(
@@ -1142,10 +1145,23 @@ def run_wishart_hierarchy(
         )
         phase_times["transition_metrics"] = time.perf_counter() - phase_started
 
+        transition_dir = (
+            destination / f"transition_{level:03d}_{level + 1:03d}"
+        )
+        transition_dir.mkdir(parents=True, exist_ok=True)
+        graph_projection = write_dictionary_projection(
+            transition_dir / "dictionary_graphex.json",
+            relation_layers,
+            plan.fine_to_coarse,
+            plan.dictionary_type_by_coarse,
+        )
+        dictionary_metrics["dictionary_graphex"] = {
+            "symbol_count": graph_projection["symbol_count"],
+            "block_count": graph_projection.get("block_count", 0),
+            "scope": graph_projection["scope"],
+        }
+
         if dictionary_options.emit_exact_transition_codec:
-            transition_dir = (
-                destination / f"transition_{level:03d}_{level + 1:03d}"
-            )
             transition_dir.mkdir(parents=True, exist_ok=True)
             exact_codec_report = encode_transition_grammar(
                 vertex_count=int(current.shape[0]),
