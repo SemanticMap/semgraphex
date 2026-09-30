@@ -14,6 +14,7 @@ on:
       - 'src/semmap_haken/glove_graphex_100k.py'
       - 'tests/test_grammar_codec_v2.py'
       - 'tests/test_exact_edge_baseline.py'
+      - 'tests/test_compression_analysis.py'
       - 'tests/test_hierarchy_codec.py'
       - 'tests/test_grammar_cost.py'
       - 'tests/test_transition_grammar.py'
@@ -56,6 +57,7 @@ jobs:
           pytest -q \
             tests/test_grammar_codec_v2.py \
             tests/test_exact_edge_baseline.py \
+            tests/test_compression_analysis.py \
             tests/test_hierarchy_codec.py \
             tests/test_grammar_cost.py \
             tests/test_transition_grammar.py \
