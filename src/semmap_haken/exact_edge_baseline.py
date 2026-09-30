@@ -16,8 +16,10 @@ from typing import Iterable
 from .grammar_binary import (
     bits_to_float,
     float_to_bits,
+    read_svarint,
     read_u64,
     read_uvarint,
+    write_svarint,
     write_u64,
     write_uvarint,
 )
@@ -58,11 +60,18 @@ def _write_edges(
 ) -> bytes:
     stream = io.BytesIO()
     write_uvarint(stream, len(records))
+    previous_edge_id = 0
+    previous_source = 0
     for row in records:
+        edge_id = int(row.edge_id)
         if not implicit_edge_ids:
-            write_uvarint(stream, int(row.edge_id))
-        write_uvarint(stream, int(row.source))
-        write_uvarint(stream, int(row.target))
+            write_svarint(stream, edge_id - previous_edge_id)
+            previous_edge_id = edge_id
+        source = int(row.source)
+        target = int(row.target)
+        write_svarint(stream, source - previous_source)
+        previous_source = source
+        write_svarint(stream, target - source)
         write_uvarint(stream, relation_to_id[str(row.relation)])
         write_u64(stream, float_to_bits(float(row.weight)))
     return stream.getvalue()
@@ -77,10 +86,23 @@ def _read_edges(
     stream = io.BytesIO(data)
     count = read_uvarint(stream)
     result: list[EdgeRecord] = []
+    previous_edge_id = 0
+    previous_source = 0
     for index in range(count):
-        edge_id = index if implicit_edge_ids else read_uvarint(stream)
-        source = read_uvarint(stream)
-        target = read_uvarint(stream)
+        if implicit_edge_ids:
+            edge_id = index
+        else:
+            edge_id = previous_edge_id + read_svarint(stream)
+            if edge_id < 0:
+                raise ValueError("negative decoded edge ID")
+            previous_edge_id = edge_id
+        source = previous_source + read_svarint(stream)
+        if source < 0:
+            raise ValueError("negative decoded edge source")
+        previous_source = source
+        target = source + read_svarint(stream)
+        if target < 0:
+            raise ValueError("negative decoded edge target")
         relation_id = read_uvarint(stream)
         if relation_id >= len(relations):
             raise ValueError("relation ID outside dictionary")
