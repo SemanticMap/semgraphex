@@ -121,6 +121,14 @@ def test_two_transition_hierarchy_decodes_exact_level_zero(tmp_path):
     assert report["transitions"] == 2
     assert report["final_nodes"] == 3
     assert report["level0_nodes"] == 6
+    assert report["baseline_level0_binary_edge_bytes"] > 0
+    assert report["baseline_level0_binary_bundle_bytes"] >= (
+        report["baseline_level0_binary_edge_bytes"]
+    )
+    assert report["compression_ratio_binary_bundle"] == (
+        report["archive_bytes"] / report["baseline_level0_binary_bundle_bytes"]
+    )
+    assert report["zip_container_overhead_bytes"] >= 0
 
     expected = relation_layers_to_edge_records({"r": level0})
     archive = run / "hierarchy_exact_v1.zip"
