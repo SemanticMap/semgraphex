@@ -1191,6 +1191,13 @@ def run_wishart_hierarchy(
             relation_layers,
             plan.fine_to_coarse,
             plan.dictionary_type_by_coarse,
+            fine_mass=np.asarray(
+                [
+                    len(memberships[index])
+                    for index in range(int(current.shape[0]))
+                ],
+                dtype=np.float64,
+            ),
         )
         dictionary_metrics["dictionary_graphex"] = {
             "symbol_count": graph_projection["symbol_count"],
