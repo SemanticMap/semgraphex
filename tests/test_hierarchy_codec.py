@@ -10,6 +10,8 @@ from scipy import sparse
 from semmap_haken.hierarchy_codec import (
     build_hierarchy_archive,
     decode_hierarchy,
+    decode_hierarchy_bundle,
+    write_decoded_hierarchy,
 )
 from semmap_haken.transition_grammar import (
     encode_transition_grammar,
@@ -28,6 +30,16 @@ def _write_level(run, level, matrix):
     sparse.save_npz(relation_dir / "r.npz", matrix)
     (relation_dir / "index.json").write_text(
         json.dumps({"r": "r.npz"}), encoding="utf-8"
+    )
+    membership = {
+        str(node): {
+            "original_concepts": [f"/c/en/l{level}_n{node}"],
+            "concept_concat": f"/c/en/l{level}_n{node}",
+        }
+        for node in range(matrix.shape[0])
+    }
+    (level_dir / "membership.json").write_text(
+        json.dumps(membership), encoding="utf-8"
     )
     return level_dir
 
@@ -111,7 +123,24 @@ def test_two_transition_hierarchy_decodes_exact_level_zero(tmp_path):
     assert report["level0_nodes"] == 6
 
     expected = relation_layers_to_edge_records({"r": level0})
-    assert decode_hierarchy(run / "hierarchy_exact_v1.zip") == (6, expected)
+    archive = run / "hierarchy_exact_v1.zip"
+    assert decode_hierarchy(archive) == (6, expected)
+
+    n, bundle_records, memberships, raw_adjacency = decode_hierarchy_bundle(
+        archive
+    )
+    assert n == 6
+    assert bundle_records == expected
+    assert memberships[0] == ("/c/en/l0_n0",)
+    assert len(memberships) == 6
+    assert raw_adjacency is None
+
+    decoded_dir = tmp_path / "decoded"
+    materialized = write_decoded_hierarchy(archive, decoded_dir)
+    assert materialized["roundtrip_materialized"]
+    assert (decoded_dir / "COMPLETED").is_file()
+    assert (decoded_dir / "membership.json").is_file()
+    assert sparse.load_npz(decoded_dir / "adjacency.npz").shape == (6, 6)
 
 
 def test_hierarchy_codec_rejects_non_sum_aggregation(tmp_path):
