@@ -1240,11 +1240,15 @@ def run_wishart_hierarchy(
             destination / f"transition_{level:03d}_{level + 1:03d}"
         )
         transition_dir.mkdir(parents=True, exist_ok=True)
+        projection_symbol_types = _compose_symbol_types(
+            symbol_types,
+            plan,
+        )
         graph_projection = write_dictionary_projection(
             transition_dir / "dictionary_graphex.json",
             relation_layers,
             plan.fine_to_coarse,
-            plan.dictionary_type_by_coarse,
+            projection_symbol_types,
             fine_mass=np.asarray(
                 [
                     len(memberships[index])
