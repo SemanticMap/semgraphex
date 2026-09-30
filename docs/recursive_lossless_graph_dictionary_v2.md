@@ -179,3 +179,53 @@ input, Git-revision and compute-device lineage checks.
 The notebook validates per-transition exact codec reports after publication.
 The hierarchy run itself is responsible for the stronger consolidated
 final-to-level0 roundtrip before COMPLETED is written.
+
+
+## Fair compact binary baseline
+
+The historical `baseline_bytes` metric is retained for continuity and measures a DEFLATE-compressed JSON edge list. It is not the primary comparator for new compression claims.
+
+Every `grammar_exact_v2` report now also contains:
+
+    baseline_binary_bytes
+    net_saved_vs_binary_bytes
+    compression_ratio_binary_baseline
+
+The binary baseline is exact and non-grammatical: integer/varint endpoints and relation IDs, explicit record identity when needed, and exact IEEE-754 binary64 weights.
+
+For the consolidated hierarchy, the stronger apples-to-apples comparator is:
+
+    baseline_level0_binary_bundle_bytes
+    compression_ratio_binary_bundle
+
+The bundle includes the same level-0 membership payload and the same raw adjacency fallback when one is required. Therefore this ratio is the primary storage metric for the recursive dictionary.
+
+Interpretation:
+
+    ratio < 1   grammar archive is smaller than compact exact baseline
+    ratio = 1   no measured storage advantage
+    ratio > 1   grammar/archive overhead exceeds the structural reuse gain
+
+Node-count reduction is reported separately and must not be substituted for this storage ratio.
+
+## Compression bottleneck report
+
+A completed exact hierarchy now publishes:
+
+    compression_analysis.json
+
+It contains one row per transition with measured archive bytes, compact binary baseline bytes, binary compression ratio, internal/port/residual record counts, compressed bytes for shapes/variants/occurrences/internal/ports/residual streams, per-stream archive share, and the largest compressed archive entry.
+
+The summary records the best and worst transition ratios, the first transition that no longer beats the compact binary baseline, and the final consolidated hierarchy ratio.
+
+The same report can be regenerated from persisted artifacts with:
+
+    semmap-grammar-codec report --run-dir <RUN_DIR>
+
+This is the preferred input for deciding whether the next optimization should target interface bindings, residuals, occurrence placement or dictionary metadata.
+
+## Interface schema versus multiplicity
+
+`InterfaceVariant` stores the unique typed/directed port schema. It does not repeat a `PortSpec` for every external edge record. Exact multiplicity, external endpoints, relation identity, direction and weights remain in `PortBinding`.
+
+This allows two occurrences with the same core shape and the same usable port schema to share a variant even when different numbers of external records pass through a port. It reduces artificial variant fragmentation without changing losslessness.
