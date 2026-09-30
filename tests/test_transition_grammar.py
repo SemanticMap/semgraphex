@@ -14,8 +14,8 @@ from semmap_haken.transition_grammar import (
 def test_relation_layers_roundtrip_through_transition_grammar(tmp_path):
     related = sparse.csr_matrix(
         (
-            np.array([1.0, 2.0, 3.0]),
-            (np.array([0, 1, 3]), np.array([1, 2, 4])),
+            np.array([1.0, 2.0, 3.0, 4.0]),
+            (np.array([0, 1, 2, 3]), np.array([1, 2, 4, 4])),
         ),
         shape=(5, 5),
     )
