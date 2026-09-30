@@ -138,3 +138,40 @@ python -m pytest tests
 ```
 
 The historical prototype remains available only for compatibility and is not evidence for the Haken/ConceptNet research program.
+
+
+## Recursive Wishart compression figures
+
+An experimental recursive framework for discovering unknown compression figures
+with Wishart mode analysis is documented in
+[`docs/wishart_recursive_coarsening.md`](docs/wishart_recursive_coarsening.md).
+
+Start with:
+
+```bash
+python scripts/run_wishart_coarsening.py --config configs/wishart_conceptnet_small.yaml
+```
+
+Use the optional `wishart` dependency extra for low-rank GW and FGW metrics.
+
+
+## Wishart in Google Colab
+
+The `feature/wishart-colab-drive` workflow runs recursive Wishart coarsening on
+fast Colab-local `/content` scratch and uses Google Drive only for durable
+input/output. This avoids repeated sparse I/O through the Drive FUSE mount.
+
+Preferred command after mounting Drive in a notebook cell:
+
+```bash
+semmap-wishart-colab \
+  --config configs/wishart_conceptnet_colab.yaml \
+  --drive-root /content/drive/MyDrive/SemanticMap/semgraphex \
+  --prepared-drive prepared/prepare-xxxxxxxxxxxx \
+  --run-name wishart-typed-wl-colab-01
+```
+
+Results are checkpointed after every completed level/transition and the durable
+`COMPLETED` marker is published last. See
+[`docs/wishart_colab_drive.md`](docs/wishart_colab_drive.md) and
+[`notebooks/04_wishart_colab_drive.ipynb`](notebooks/04_wishart_colab_drive.ipynb).

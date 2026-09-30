@@ -1,0 +1,7 @@
+name: wishart-colab-10k
+expected_max_nodes: 10000
+recommended_ram_gib: 6
+recommended_disk_gib: 8
+notes: >-
+  Colab-safe recursive Wishart profile. Compute on /content local scratch;
+  use Google Drive only for staged inputs and incremental durable checkpoints.

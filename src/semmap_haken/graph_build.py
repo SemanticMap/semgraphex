@@ -40,12 +40,41 @@ def transform_weight(weight: float, transform: str) -> float:
 
 def _select_nodes(adjacency: sparse.csr_matrix, node_ids: list[str], *, component: str, max_nodes: int) -> tuple[sparse.csr_matrix, list[str]]:
     selected = np.arange(adjacency.shape[0])
-    if component == "largest" and adjacency.shape[0]:
+    if component in {"largest", "largest_connected_sample"} and adjacency.shape[0]:
         _, labels = connected_components(adjacency, directed=False, return_labels=True)
         sizes = np.bincount(labels)
         largest = np.flatnonzero(sizes == sizes.max())
-        chosen_label = min(largest, key=lambda label: min(node_ids[index] for index in np.flatnonzero(labels == label)))
+        chosen_label = min(
+            largest, key=lambda label: min(node_ids[index] for index in np.flatnonzero(labels == label))
+        )
         selected = np.flatnonzero(labels == chosen_label)
+        if component == "largest_connected_sample" and len(selected) > max_nodes:
+            # URI-prefix truncation breaks connectivity; retain BFS-tree edges.
+            from collections import deque
+
+            topology = adjacency.maximum(adjacency.T).tocsr()
+            degrees = np.diff(topology.indptr)
+            start = min(selected, key=lambda index: (-degrees[index], node_ids[index]))
+            seen = np.zeros(adjacency.shape[0], dtype=bool)
+            seen[start] = True
+            queue = deque([int(start)])
+            chosen = [int(start)]
+            while queue and len(chosen) < max_nodes:
+                current = queue.popleft()
+                lo, hi = topology.indptr[current], topology.indptr[current + 1]
+                neighborhood = topology.indices[lo:hi]
+                order = np.lexsort((neighborhood, -degrees[neighborhood]))
+                for neighbor in neighborhood[order]:
+                    node = int(neighbor)
+                    if not seen[node]:
+                        seen[node] = True
+                        chosen.append(node)
+                        queue.append(node)
+                        if len(chosen) == max_nodes:
+                            break
+            if len(chosen) != max_nodes:
+                raise RuntimeError("connected sampling exhausted before max_nodes")
+            selected = np.asarray(chosen, dtype=np.int64)
     selected = sorted(selected, key=lambda index: node_ids[index])[:max_nodes]
     return adjacency[selected][:, selected].tocsr(), [node_ids[index] for index in selected]
 
@@ -81,7 +110,7 @@ def build_sparse_graph(assertions: Iterable[Assertion], *, directed: bool, weigh
         row = edge_rows.setdefault(key, {"start_uri": record.start_uri, "end_uri": record.end_uri, "relation": record.relation_name, "relation_uri": record.relation_uri, "dataset": record.dataset, "sources": record.sources, "license": record.license, "assertion_count": 0, "aggregate_contribution": 0.0})
         row["assertion_count"] = int(row["assertion_count"]) + 1
         row["aggregate_contribution"] = float(row["aggregate_contribution"]) + transform_weight(record.weight, weight_transform)
-    report = {"node_count": adjacency.shape[0], "edge_count": edge_count, "adjacency_nnz": int(adjacency.nnz), "self_loop_count": loops, "self_loop_policy": self_loop_policy, "relation_histogram": dict(sorted(selected_counts.items())), "selection_policy": "lexicographic URI order after optional deterministic LCC; retain first max_nodes induced nodes"}
+    report = {"node_count": adjacency.shape[0], "edge_count": edge_count, "adjacency_nnz": int(adjacency.nnz), "self_loop_count": loops, "self_loop_policy": self_loop_policy, "relation_histogram": dict(sorted(selected_counts.items())), "selection_policy": ("deterministic degree-seeded BFS within largest weak component; URI-sorted output" if component == "largest_connected_sample" else "lexicographic URI order after optional deterministic LCC; retain first max_nodes induced nodes")}
     return PreparedGraph(adjacency, tuple(node_ids), report, tuple(edge_rows[key] for key in sorted(edge_rows)))
 
 

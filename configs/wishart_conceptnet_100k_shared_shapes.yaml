@@ -1,0 +1,134 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+
+dataset:
+  source: conceptnet-5.7
+  path: ../data/conceptnet_en_100k.tsv
+  language: en
+  relations:
+    - RelatedTo
+    - IsA
+    - PartOf
+    - HasA
+    - UsedFor
+    - HasProperty
+    - CapableOf
+    - Causes
+  min_weight: 1.0
+  max_nodes: 100000
+  component: largest
+
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: log1p
+  operator: normalized_adjacency
+
+runtime:
+  profile: wishart-dictionary-100k-shared-shapes
+  random_seed: 1729
+
+execution:
+  backend: cpu
+  dtype: float64
+  deterministic: true
+
+dynamics:
+  model: linear
+  alpha: 1.0
+  beta: auto_critical
+  auto_critical_margin: 0.05
+  time_start: 0.0
+  time_stop: 5.0
+  time_steps: 21
+  perturbations_per_kind: 1
+  perturbation_amplitude: 1.0
+  perturbation_seed: 1729
+  random_sparse_fraction: 0.1
+  storage_policy: none
+  max_storage_mb: 32
+
+spectral:
+  prepared_graph_dir: null
+  top_k: 16
+  max_r: 8
+  tolerance: 1.0e-10
+  maxiter: null
+  symmetry_tolerance: 1.0e-10
+
+wishart:
+  metric: typed_wl
+  radius: 1
+  max_ego_nodes: 48
+
+  # Discovery is sampled. Frequency estimation below is a separate full scan.
+  candidate_limit: 5000
+
+  # Wishart is applied to unique exact graph types, not raw occurrences.
+  clustering_domain: canonical_types
+  density_weight: occurrence_frequency
+  k_neighbors: 4
+  significance: 0.7
+  min_cluster_size: 3
+  min_cluster_mass: 10
+
+  min_figure_nodes: 2
+  max_figures_per_level: 5000
+  max_levels: 12
+  min_graph_nodes: 50
+  aggregation: sum
+  random_seed: 1729
+
+  wl_iterations: 3
+  feature_dim: 4096
+
+  graphlet_size: 3
+  graphlet_samples: 256
+  relation_js_block_size: 128
+
+  transport_rank: 24
+  transport_max_candidates: 256
+  fgw_alpha: 0.5
+
+  slow_modes: 8
+  mfpt_pairs: 24
+  mfpt_walks_per_pair: 8
+  mfpt_max_steps: 500
+  betweenness_samples: 64
+  clustering_samples: 256
+  distance_samples: 128
+
+dictionary:
+  enabled: true
+
+  # Exact type = WL bucket + exact VF2 check over topology, relation labels,
+  # recursive child-symbol labels and boundary signature.
+  boundary_sensitive: true
+
+  # Use discovery sample only to open types, then scan every current node in
+  # batches to estimate the frequencies used by MDL/Huffman/Wishart mass.
+  frequency_scan: full
+  frequency_scan_batch_size: 5000
+  min_support: 3
+
+  family_match_jaccard: 0.5
+  huffman: true
+
+  selection:
+    min_gain_bits: 0.0
+    local_improvement: true
+
+  limits:
+    max_dictionary_size: 100000
+
+# Notebook creates one local immutable YAML per k=4 and k=5.\n# max_dictionary_size is raised to avoid the prior 20k cap stopping at level 4.\n# The run retains legacy checkpoints; factored export is stored separately.\n# Editable copy lives on Drive: <DRIVE_ROOT>/config/experiment.yaml.
+# Only the kNN step (typed_wl / graphlet) is CUDA-accelerated.
+colab:
+  device: auto
+  cpu_workers: 4
+  gpu_batch_size: 128
+  min_gpu_types: 128
+  checkpoint_every_levels: 1

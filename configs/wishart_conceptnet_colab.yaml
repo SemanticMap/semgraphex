@@ -1,0 +1,108 @@
+paths:
+  workspace_root: ..
+  data_root: data
+  cache_root: data/cache
+  runs_root: tmp/runs
+
+dataset:
+  source: conceptnet-5.7
+  version: "5.7.0"
+  # In Colab prefer --prepared-drive or --dataset-drive. The Drive-backed
+  # runner stages the selected source to /content before computation.
+  language: en
+  relations:
+    - RelatedTo
+    - IsA
+    - PartOf
+    - HasA
+    - UsedFor
+    - HasProperty
+    - CapableOf
+    - Causes
+  min_weight: 1.0
+  max_nodes: 10000
+  component: largest
+
+graph:
+  directed: false
+  self_loop_policy: exclude
+  weight_transform: log1p
+  operator: normalized_adjacency
+
+runtime:
+  profile: wishart-colab-10k
+  random_seed: 1729
+  resource_profile: resource_profiles/wishart_colab_10k.yaml
+
+execution:
+  backend: cpu
+  dtype: float64
+  workers: auto
+  reserved_cpu_cores: 1
+  threads_per_worker: 1
+  deterministic: true
+
+# Required by the shared ExperimentConfig contract; not used by Wishart.
+dynamics:
+  model: linear
+  alpha: 1.0
+  beta: auto_critical
+  auto_critical_margin: 0.05
+  time_start: 0.0
+  time_stop: 5.0
+  time_steps: 21
+  perturbations_per_kind: 1
+  perturbation_amplitude: 1.0
+  perturbation_seed: 1729
+  random_sparse_fraction: 0.1
+  storage_policy: none
+  max_storage_mb: 32
+
+spectral:
+  prepared_graph_dir: null
+  top_k: 16
+  max_r: 8
+  tolerance: 1.0e-10
+  maxiter: null
+  symmetry_tolerance: 1.0e-10
+
+wishart:
+  metric: typed_wl
+
+  radius: 1
+  max_ego_nodes: 48
+  candidate_limit: 5000
+
+  k_neighbors: 12
+  significance: 0.7
+  min_cluster_size: 3
+
+  min_figure_nodes: 2
+  max_figures_per_level: 1500
+  max_levels: 6
+  min_graph_nodes: 50
+  aggregation: sum
+  random_seed: 1729
+
+  wl_iterations: 2
+  feature_dim: 512
+
+  graphlet_size: 3
+  graphlet_samples: 256
+
+  # relation_js now uses O(block_size * N), not O(N^2), working memory.
+  relation_js_block_size: 128
+
+  # Pairwise transport remains intentionally bounded on Colab.
+  transport_rank: 24
+  transport_max_candidates: 256
+  fgw_alpha: 0.5
+
+  # Sampled diagnostics keep expensive dynamics bounded per level.
+  slow_modes: 8
+  mfpt_pairs: 24
+  mfpt_walks_per_pair: 8
+  mfpt_max_steps: 500
+  betweenness_samples: 32
+  clustering_samples: 128
+  distance_samples: 64

@@ -10,7 +10,7 @@ import yaml
 
 WeightTransform = Literal["binary", "raw", "log1p", "capped", "relation_normalized"]
 OperatorName = Literal["normalized_adjacency", "random_walk", "laplacian", "jacobian"]
-ComponentPolicy = Literal["largest", "all"]
+ComponentPolicy = Literal["largest", "all", "largest_connected_sample"]
 
 
 class ConfigurationError(ValueError):
@@ -177,8 +177,8 @@ def load_config(path: str | Path) -> ExperimentConfig:
     if not isinstance(relations, list) or not all(isinstance(item, str) for item in relations):
         raise ConfigurationError("dataset.relations must be a list of strings")
     component = _require(dataset_raw, "component", "dataset")
-    if component not in {"largest", "all"}:
-        raise ConfigurationError("dataset.component must be 'largest' or 'all'")
+    if component not in {"largest", "all", "largest_connected_sample"}:
+        raise ConfigurationError("dataset.component must be largest, all, or largest_connected_sample")
     max_rows = dataset_raw.get("max_rows")
     if max_rows is not None and (isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0):
         raise ConfigurationError("dataset.max_rows must be a positive integer or null")
