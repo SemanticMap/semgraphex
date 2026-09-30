@@ -25,6 +25,7 @@ from .wishart_gpu import resolve_device
 from .wishart_parallel import (
     initialize_match_worker, match_chunk, ordered_fingerprints, spawn_pool,
 )
+from .grammar_cost import estimate_grammar_occurrence_cost
 from .graph_mdl import (
     MdlOccurrence,
     build_canonical_huffman_codes,
@@ -562,6 +563,7 @@ def _score_and_select_occurrences(
     type_info: Mapping[str, tuple[int | None, str | None, float]],
     graph_node_count: int,
     relation_count: int,
+    edge_record_count: int,
     dictionary_options: DictionaryOptions,
     min_figure_nodes: int,
     max_figures: int,
@@ -578,7 +580,9 @@ def _score_and_select_occurrences(
     )
     fallback_bits = max(1.0, math.log2(max(2, len(eligible_counts))))
     scored: list[MdlOccurrence] = []
-    payload_by_index: dict[int, tuple[_ScannedOccurrence, float, float]] = {}
+    payload_by_index: dict[
+        int, tuple[_ScannedOccurrence, float, float, dict[str, float]]
+    ] = {}
     cost_cache: dict[str, tuple[float, float]] = {}
 
     for item in scanned:
@@ -587,23 +591,43 @@ def _score_and_select_occurrences(
         support = eligible_counts.get(item.dictionary_type_id, 0)
         if support <= 0:
             continue
-        if item.dictionary_type_id not in cost_cache:
-            representative = dictionary.representative(item.dictionary_type_id)
-            prototype_bits = estimate_dictionary_prototype_bits(
-                representative, relation_count=relation_count,
-            )
-            type_code_bits = float(
-                len(huffman[item.dictionary_type_id])
-                if item.dictionary_type_id in huffman else fallback_bits
-            )
-            cost_cache[item.dictionary_type_id] = estimated_occurrence_cost(
+        representative = dictionary.representative(item.dictionary_type_id)
+        type_code_bits = float(
+            len(huffman[item.dictionary_type_id])
+            if item.dictionary_type_id in huffman else fallback_bits
+        )
+        components: dict[str, float] = {}
+        if dictionary_options.selection_objective == "grammar_v2_logical":
+            logical = estimate_grammar_occurrence_cost(
                 representative,
+                occurrence_nodes=item.nodes,
+                support=support,
                 graph_node_count=graph_node_count,
                 relation_count=relation_count,
+                edge_record_count=edge_record_count,
                 type_code_bits=type_code_bits,
-                dictionary_amortized_bits=prototype_bits / support,
             )
-        raw_bits, encoded_bits = cost_cache[item.dictionary_type_id]
+            raw_bits = logical.raw_bits
+            encoded_bits = logical.encoded_bits
+            components = {
+                "rule_bits": logical.rule_bits,
+                "occurrence_bits": logical.occurrence_bits,
+                "internal_payload_bits": logical.internal_payload_bits,
+                "port_payload_bits": logical.port_payload_bits,
+            }
+        else:
+            if item.dictionary_type_id not in cost_cache:
+                prototype_bits = estimate_dictionary_prototype_bits(
+                    representative, relation_count=relation_count,
+                )
+                cost_cache[item.dictionary_type_id] = estimated_occurrence_cost(
+                    representative,
+                    graph_node_count=graph_node_count,
+                    relation_count=relation_count,
+                    type_code_bits=type_code_bits,
+                    dictionary_amortized_bits=prototype_bits / support,
+                )
+            raw_bits, encoded_bits = cost_cache[item.dictionary_type_id]
         if raw_bits - encoded_bits <= dictionary_options.min_mdl_gain_bits:
             continue
         mdl = MdlOccurrence(
@@ -614,7 +638,9 @@ def _score_and_select_occurrences(
             encoded_bits=encoded_bits,
         )
         scored.append(mdl)
-        payload_by_index[item.candidate_index] = (item, raw_bits, encoded_bits)
+        payload_by_index[item.candidate_index] = (
+            item, raw_bits, encoded_bits, components
+        )
 
     selected_mdl = select_nonoverlapping_mdl(
         scored,
@@ -625,7 +651,7 @@ def _score_and_select_occurrences(
     )
     selected: list[FigureOccurrence] = []
     for mdl in selected_mdl:
-        item, raw_bits, encoded_bits = payload_by_index[mdl.candidate_index]
+        item, raw_bits, encoded_bits, _ = payload_by_index[mdl.candidate_index]
         cluster_label, family_id, kth_radius = type_info.get(
             item.dictionary_type_id,
             (None, None, 0.0),
@@ -661,7 +687,15 @@ def _score_and_select_occurrences(
             eligible_counts[type_id] * len(code)
             for type_id, code in huffman.items()
         ) / total_frequency
+    selected_components: Counter[str] = Counter()
+    for mdl in selected_mdl:
+        _, _, _, components = payload_by_index[mdl.candidate_index]
+        for key, value in components.items():
+            selected_components[key] += float(value)
+
     metrics = {
+        "selection_objective": dictionary_options.selection_objective,
+        "logical_component_bits": dict(selected_components),
         "eligible_types": len(eligible_counts),
         "scanned_occurrences": len(scanned),
         "selected_occurrences": len(selected),
@@ -1063,6 +1097,9 @@ def run_wishart_hierarchy(
             type_info=type_info,
             graph_node_count=current.shape[0],
             relation_count=len(relation_layers),
+            edge_record_count=int(
+                sum(layer.nnz for layer in relation_layers.values())
+            ),
             dictionary_options=dictionary_options,
             min_figure_nodes=options.min_figure_nodes,
             max_figures=options.max_figures_per_level,
