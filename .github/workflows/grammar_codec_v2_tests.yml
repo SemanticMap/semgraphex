@@ -13,6 +13,7 @@ on:
       - 'src/semmap_haken/wishart_*.py'
       - 'src/semmap_haken/glove_graphex_100k.py'
       - 'tests/test_grammar_codec_v2.py'
+      - 'tests/test_grammar_cost.py'
       - 'tests/test_transition_grammar.py'
       - 'tests/test_recursive_dictionary_model.py'
       - 'tests/test_semmap_haken_wishart.py'
@@ -37,6 +38,7 @@ jobs:
         run: |
           pytest -q \
             tests/test_grammar_codec_v2.py \
+            tests/test_grammar_cost.py \
             tests/test_transition_grammar.py \
             tests/test_recursive_dictionary_model.py \
             tests/test_semmap_glove_graphex_100k.py \
