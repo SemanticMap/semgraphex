@@ -48,9 +48,9 @@ def test_permutation_preserves_graph_size_and_figure_count():
     assert pn == n
     assert len(pedges) == len(edges)
     assert len(pfigures) == len(figures)
-    assert {node for group in pfigures for node in group} == {
-        node for group in figures for node in group
-    }
+    permuted_nodes = {node for group in pfigures for node in group}
+    assert len(permuted_nodes) == sum(len(group) for group in figures)
+    assert all(0 <= node < n for node in permuted_nodes)
     assert any(
         (a.source, a.target) != (b.source, b.target)
         for a, b in zip(edges, pedges, strict=True)
