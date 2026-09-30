@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from semmap_haken.compression_analysis import (
     analyze_compression_run,
     write_compression_report,
@@ -83,7 +84,7 @@ def test_compression_analysis_uses_binary_baseline_and_payload_shares(tmp_path):
     assert report["summary"]["worst_transition_binary_ratio"] == 1.1
     assert report["summary"]["first_transition_not_beating_binary_baseline"] == 1
     assert report["summary"]["hierarchy_roundtrip_exact"] is True
-    assert report["transitions"][0]["node_reduction_fraction"] == 0.2
+    assert report["transitions"][0]["node_reduction_fraction"] == pytest.approx(0.2)
     assert report["transitions"][1]["largest_entry"] == "ports.bin"
     assert report["transitions"][1]["payload_share"]["ports"] == 400 / 1100
 
