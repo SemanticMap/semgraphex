@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import tempfile
 from pathlib import Path
 
@@ -65,6 +66,34 @@ def repeated_triangles(
     return vertex_count, tuple(rows), tuple(figures)
 
 
+
+def permute_node_ids(
+    vertex_count: int,
+    edges: tuple[EdgeRecord, ...],
+    figures: tuple[tuple[int, ...], ...],
+    *,
+    seed: int = 1729,
+) -> tuple[int, tuple[EdgeRecord, ...], tuple[tuple[int, ...], ...]]:
+    """Relabel nodes without changing graph structure or edge-record order."""
+    labels = list(range(int(vertex_count)))
+    random.Random(int(seed)).shuffle(labels)
+    mapping = {old: labels[old] for old in range(int(vertex_count))}
+    remapped_edges = tuple(
+        EdgeRecord(
+            int(row.edge_id),
+            mapping[int(row.source)],
+            mapping[int(row.target)],
+            str(row.relation),
+            float(row.weight),
+        )
+        for row in edges
+    )
+    remapped_figures = tuple(
+        tuple(mapping[int(node)] for node in figure)
+        for figure in figures
+    )
+    return int(vertex_count), remapped_edges, remapped_figures
+
 def run_synthetic_benchmark(
     repeats: int = 500,
     *,
@@ -85,6 +114,18 @@ def run_synthetic_benchmark(
             edges,
             (),
             root / "residual.zip",
+        )
+
+        permuted_n, permuted_edges, permuted_figures = permute_node_ids(
+            vertex_count,
+            edges,
+            figures,
+        )
+        permuted = encode_grammar(
+            permuted_n,
+            permuted_edges,
+            permuted_figures,
+            root / "permuted.zip",
         )
 
         port_n, port_edges, port_figures = repeated_triangles(
@@ -124,6 +165,7 @@ def run_synthetic_benchmark(
         "port_edges_per_figure": int(port_edges_per_figure),
         "repeated_exact_motif": compact(repeated),
         "same_graph_residual_only": compact(residual),
+        "permuted_repeated_motif": compact(permuted),
         "port_heavy_repeated_motif": compact(port_heavy),
     }
 
