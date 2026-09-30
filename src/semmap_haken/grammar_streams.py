@@ -40,6 +40,9 @@ def write_occurrences(
     """Encode occurrence IDs and node counts implicitly from stream order/rule."""
     out = io.BytesIO()
     write_uvarint(out, len(rows))
+    previous_anchor = 0
+    previous_symbol = 0
+    previous_variant = 0
     for expected_id, row in enumerate(rows):
         if int(row.occurrence_id) != expected_id:
             raise ValueError("compact occurrences require contiguous occurrence IDs")
@@ -48,12 +51,17 @@ def write_occurrences(
             raise ValueError("occurrence references missing shape")
         if len(row.shape_to_fine_nodes) != len(shape.node_types):
             raise ValueError("occurrence node mapping differs from shape arity")
-        write_uvarint(out, int(row.symbol_id))
-        write_uvarint(out, int(row.variant_id))
+        symbol_id = int(row.symbol_id)
+        variant_id = int(row.variant_id)
+        write_svarint(out, symbol_id - previous_symbol)
+        write_svarint(out, variant_id - previous_variant)
+        previous_symbol = symbol_id
+        previous_variant = variant_id
         if not row.shape_to_fine_nodes:
             continue
         first = int(row.shape_to_fine_nodes[0])
-        write_uvarint(out, first)
+        write_svarint(out, first - previous_anchor)
+        previous_anchor = first
         previous = first
         for node in row.shape_to_fine_nodes[1:]:
             current = int(node)
@@ -69,16 +77,26 @@ def read_occurrences(
     stream = io.BytesIO(data)
     count = read_uvarint(stream)
     rows: list[Occurrence] = []
+    previous_anchor = 0
+    previous_symbol = 0
+    previous_variant = 0
     for occurrence_id in range(count):
-        symbol_id = read_uvarint(stream)
-        variant_id = read_uvarint(stream)
+        symbol_id = previous_symbol + read_svarint(stream)
+        variant_id = previous_variant + read_svarint(stream)
+        if symbol_id < 0 or variant_id < 0:
+            raise ValueError("negative decoded symbol or variant ID")
+        previous_symbol = symbol_id
+        previous_variant = variant_id
         shape = shapes.get(symbol_id)
         if shape is None:
             raise ValueError("occurrence references missing shape")
         node_count = len(shape.node_types)
         nodes: list[int] = []
         if node_count:
-            first = read_uvarint(stream)
+            first = previous_anchor + read_svarint(stream)
+            if first < 0:
+                raise ValueError("negative decoded fine node")
+            previous_anchor = first
             nodes.append(first)
             previous = first
             for _ in range(node_count - 1):
