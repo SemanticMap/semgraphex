@@ -39,6 +39,7 @@ from .wishart_config import ColabExecutionOptions, DictionaryOptions, WishartOpt
 from .wishart_resume import load_latest_checkpoint, truncate_after_checkpoint, write_level_checkpoint
 from .transition_grammar import encode_transition_grammar
 from .recursive_grammar import write_recursive_grammar
+from .compression_analysis import write_compression_report
 from .dictionary_graphex import write_dictionary_projection
 from .occurrence_index import OccurrenceIndex
 from .hierarchy_codec import build_hierarchy_archive
@@ -1469,6 +1470,19 @@ def run_wishart_hierarchy(
         hierarchy_payload["multiscale_graph_model"] = {
             "projection_count": multiscale_graph_report["projection_count"],
             "scope": multiscale_graph_report["scope"],
+        }
+        (destination / "hierarchy.json").write_text(
+            json.dumps(hierarchy_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        compression_analysis = write_compression_report(destination)
+        hierarchy_payload = json.loads(
+            (destination / "hierarchy.json").read_text(encoding="utf-8")
+        )
+        hierarchy_payload["compression_analysis"] = {
+            "scope": compression_analysis["scope"],
+            "summary": compression_analysis["summary"],
+            "artifact": "compression_analysis.json",
         }
         (destination / "hierarchy.json").write_text(
             json.dumps(hierarchy_payload, indent=2, sort_keys=True) + "\n",
