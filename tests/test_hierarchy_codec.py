@@ -153,3 +153,39 @@ def test_hierarchy_codec_rejects_non_sum_aggregation(tmp_path):
     )
     with pytest.raises(ValueError, match="aggregation=sum"):
         build_hierarchy_archive(run)
+
+
+def test_grammar_codec_cli_verify_and_decode(tmp_path, capsys):
+    from semmap_haken.grammar_cli import main
+
+    run = tmp_path / "run"
+    run.mkdir()
+    matrix = sparse.csr_matrix(
+        ([1.0, 2.0], ([0, 1], [1, 2])),
+        shape=(3, 3),
+    )
+    _write_level(run, 0, matrix)
+    (run / "hierarchy.json").write_text(
+        json.dumps({"options": {"aggregation": "sum"}}),
+        encoding="utf-8",
+    )
+    report = build_hierarchy_archive(run)
+    assert report["roundtrip_exact"]
+    archive = run / "hierarchy_exact_v1.zip"
+
+    assert main(["verify", "--archive", str(archive)]) == 0
+    verified = json.loads(capsys.readouterr().out)
+    assert verified["verified"]
+    assert verified["nodes"] == 3
+
+    output = tmp_path / "cli-decoded"
+    assert main([
+        "decode",
+        "--archive",
+        str(archive),
+        "--output",
+        str(output),
+    ]) == 0
+    decoded = json.loads(capsys.readouterr().out)
+    assert decoded["roundtrip_materialized"]
+    assert (output / "COMPLETED").is_file()
