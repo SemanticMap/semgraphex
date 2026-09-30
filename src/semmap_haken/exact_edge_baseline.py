@@ -98,12 +98,10 @@ def _read_edges(
     return tuple(result)
 
 
-def encode_edge_baseline(
+def _encode_archive_bytes(
     vertex_count: int,
-    edges: Iterable[EdgeRecord],
-    output: str | Path,
-) -> dict[str, object]:
-    records = tuple(edges)
+    records: tuple[EdgeRecord, ...],
+) -> bytes:
     _validate(vertex_count, records)
     relations = tuple(sorted({str(row.relation) for row in records}))
     relation_to_id = {name: index for index, name in enumerate(relations)}
@@ -121,10 +119,9 @@ def encode_edge_baseline(
             "preserved by exact IEEE bit pattern"
         ),
     }
-    target = Path(output)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    buffer = io.BytesIO()
     with zipfile.ZipFile(
-        target,
+        buffer,
         "w",
         compression=zipfile.ZIP_DEFLATED,
         compresslevel=9,
@@ -138,6 +135,27 @@ def encode_edge_baseline(
                 implicit_edge_ids=implicit_edge_ids,
             ),
         )
+    return buffer.getvalue()
+
+
+def encode_edge_baseline_bytes(
+    vertex_count: int,
+    edges: Iterable[EdgeRecord],
+) -> bytes:
+    """Return a complete exact baseline ZIP as bytes."""
+    return _encode_archive_bytes(vertex_count, tuple(edges))
+
+
+def encode_edge_baseline(
+    vertex_count: int,
+    edges: Iterable[EdgeRecord],
+    output: str | Path,
+) -> dict[str, object]:
+    records = tuple(edges)
+    payload = _encode_archive_bytes(vertex_count, records)
+    target = Path(output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
 
     decoded_n, decoded = decode_edge_baseline(target)
     if decoded_n != vertex_count or decoded != records:
@@ -145,6 +163,7 @@ def encode_edge_baseline(
         raise AssertionError("exact edge baseline roundtrip failed")
 
     with zipfile.ZipFile(target) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
         entry_bytes = {
             info.filename: int(info.compress_size)
             for info in archive.infolist()
@@ -153,15 +172,15 @@ def encode_edge_baseline(
         "format": FORMAT,
         "archive_bytes": target.stat().st_size,
         "edge_records": len(records),
-        "relations": len(relations),
-        "implicit_edge_ids": implicit_edge_ids,
+        "relations": len(manifest["relations"]),
+        "implicit_edge_ids": bool(manifest["implicit_edge_ids"]),
         "entry_compressed_bytes": entry_bytes,
         "roundtrip_exact": True,
     }
 
 
 def decode_edge_baseline(
-    archive_path: str | Path,
+    archive_path: str | Path | io.BytesIO,
 ) -> tuple[int, tuple[EdgeRecord, ...]]:
     with zipfile.ZipFile(archive_path) as archive:
         manifest = json.loads(archive.read("manifest.json"))
