@@ -25,7 +25,7 @@ from .grammar_binary import (
 )
 from .graphex_components import EdgeRecord
 
-FORMAT = "semmap_edge_exact_baseline_v1"
+FORMAT = "semmap_edge_exact_baseline_v2"
 
 
 def _json(value: object) -> bytes:
@@ -136,6 +136,7 @@ def _encode_archive_bytes(
         "edge_count": len(records),
         "relations": list(relations),
         "implicit_edge_ids": bool(implicit_edge_ids),
+        "stream_layout": "record_order_delta_endpoints_v1",
         "exactness_scope": (
             "directed typed weighted EdgeRecord stream; binary64 weights "
             "preserved by exact IEEE bit pattern"
