@@ -36,9 +36,11 @@ def test_relation_layers_roundtrip_through_transition_grammar(tmp_path):
         figure_nodes=((0, 1, 2),),
         symbol_types={1: "GT_CHILD"},
         output=archive,
+        source_adjacency=related + isa,
     )
 
     assert report["roundtrip_exact"]
     assert report["source_relation_layers"] == 2
+    assert report["adjacency_from_relations"]["matches"]
     assert report["port_edge_records"] >= 1
     assert decode_grammar(archive) == (5, records)
