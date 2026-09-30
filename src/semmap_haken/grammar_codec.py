@@ -24,6 +24,7 @@ from typing import Iterable, Mapping
 import networkx as nx
 
 from .edge_table import EdgeTable
+from .exact_edge_baseline import encode_edge_baseline_bytes
 from .grammar_binary import (
     bits_to_float,
     float_to_bits,
@@ -703,6 +704,9 @@ def encode_grammar(
         archive.writestr("ports.bin", _write_ports(port_payload))
         archive.writestr("residual.bin", _write_residual(residual_payload))
 
+    # Legacy JSON+DEFLATE baseline remains for continuity with earlier
+    # experiments, but the compact binary baseline is the authoritative
+    # non-grammar storage comparator for new compression claims.
     baseline_buffer = io.BytesIO()
     with zipfile.ZipFile(
         baseline_buffer,
@@ -726,6 +730,7 @@ def encode_grammar(
                 ],
             }),
         )
+    binary_baseline = encode_edge_baseline_bytes(vertex_count, records)
 
     decoded_n, decoded_edges = decode_grammar(target)
     if decoded_n != vertex_count or decoded_edges != records:
@@ -751,15 +756,25 @@ def encode_grammar(
         entry_bytes.get(name, 0)
         for name in ("internal.bin", "ports.bin", "residual.bin")
     )
-    baseline_bytes = len(baseline_buffer.getvalue())
+    baseline_json_bytes = len(baseline_buffer.getvalue())
+    baseline_binary_bytes = len(binary_baseline)
+    archive_bytes = target.stat().st_size
     return {
         "format": FORMAT,
-        "archive_bytes": target.stat().st_size,
-        "baseline_bytes": baseline_bytes,
-        "net_saved_bytes": baseline_bytes - target.stat().st_size,
+        "archive_bytes": archive_bytes,
+        # Backward-compatible alias for historical reports.
+        "baseline_bytes": baseline_json_bytes,
+        "baseline_json_bytes": baseline_json_bytes,
+        "baseline_binary_bytes": baseline_binary_bytes,
+        "net_saved_bytes": baseline_json_bytes - archive_bytes,
+        "net_saved_vs_binary_bytes": baseline_binary_bytes - archive_bytes,
         "compression_ratio": (
-            target.stat().st_size / baseline_bytes
-            if baseline_bytes else None
+            archive_bytes / baseline_json_bytes
+            if baseline_json_bytes else None
+        ),
+        "compression_ratio_binary_baseline": (
+            archive_bytes / baseline_binary_bytes
+            if baseline_binary_bytes else None
         ),
         "shapes": len(shapes),
         "interface_variants": len(variants),
