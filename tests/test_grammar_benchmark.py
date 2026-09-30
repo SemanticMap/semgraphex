@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from semmap_haken.grammar_benchmark import (
+    permute_node_ids,
     repeated_triangles,
     run_synthetic_benchmark,
 )
@@ -19,6 +20,7 @@ def test_synthetic_benchmark_reports_reuse_and_port_load():
     report = run_synthetic_benchmark(12, port_edges_per_figure=2)
     repeated = report["repeated_exact_motif"]
     residual = report["same_graph_residual_only"]
+    permuted = report["permuted_repeated_motif"]
     ports = report["port_heavy_repeated_motif"]
 
     assert repeated["shapes"] == 1
@@ -30,7 +32,26 @@ def test_synthetic_benchmark_reports_reuse_and_port_load():
     assert residual["occurrences"] == 0
     assert residual["residual_edge_records"] == 48
 
+    assert permuted["shapes"] == 1
+    assert permuted["occurrences"] == 12
+    assert permuted["internal_edge_records"] == 48
+
     assert ports["shapes"] == 1
     assert ports["occurrences"] == 12
     assert ports["port_edge_records"] == 24
     assert ports["binary_ratio"] is not None
+
+
+def test_permutation_preserves_graph_size_and_figure_count():
+    n, edges, figures = repeated_triangles(5, port_edges_per_figure=1)
+    pn, pedges, pfigures = permute_node_ids(n, edges, figures, seed=7)
+    assert pn == n
+    assert len(pedges) == len(edges)
+    assert len(pfigures) == len(figures)
+    assert {node for group in pfigures for node in group} == {
+        node for group in figures for node in group
+    }
+    assert any(
+        (a.source, a.target) != (b.source, b.target)
+        for a, b in zip(edges, pedges, strict=True)
+    )
