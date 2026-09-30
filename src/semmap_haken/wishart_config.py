@@ -192,8 +192,9 @@ class DictionaryOptions:
 
     enabled: bool = True
     boundary_sensitive: bool = True
-    frequency_scan: Literal["full", "discovery"] = "full"
+    frequency_scan: Literal["full", "discovery", "incremental"] = "full"
     frequency_scan_batch_size: int = 5000
+    frequency_full_rescan_every: int = 4
     min_support: int = 3
     min_mdl_gain_bits: float = 0.0
     selection_objective: Literal["mdl_proxy", "grammar_v2_logical"] = "mdl_proxy"
@@ -219,6 +220,9 @@ class DictionaryOptions:
             boundary_sensitive=bool(raw.get("boundary_sensitive", True)),
             frequency_scan=str(raw.get("frequency_scan", "full")),
             frequency_scan_batch_size=int(raw.get("frequency_scan_batch_size", 5000)),
+            frequency_full_rescan_every=int(
+                raw.get("frequency_full_rescan_every", 4)
+            ),
             min_support=int(raw.get("min_support", 3)),
             min_mdl_gain_bits=float(selection.get("min_gain_bits", 0.0)),
             selection_objective=str(selection.get("objective", "mdl_proxy")),
@@ -234,10 +238,16 @@ class DictionaryOptions:
         return result
 
     def validate(self) -> None:
-        if self.frequency_scan not in {"full", "discovery"}:
-            raise ValueError("dictionary.frequency_scan must be full or discovery")
+        if self.frequency_scan not in {"full", "discovery", "incremental"}:
+            raise ValueError(
+                "dictionary.frequency_scan must be full, discovery or incremental"
+            )
         if self.frequency_scan_batch_size <= 0:
             raise ValueError("dictionary.frequency_scan_batch_size must be positive")
+        if self.frequency_full_rescan_every <= 0:
+            raise ValueError(
+                "dictionary.frequency_full_rescan_every must be positive"
+            )
         if self.min_support <= 0:
             raise ValueError("dictionary.min_support must be positive")
         if self.max_dictionary_size <= 0:
