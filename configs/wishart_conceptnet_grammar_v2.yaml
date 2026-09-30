@@ -107,6 +107,7 @@ dictionary:
     emit_transition_archives: true
 
   selection:
+    objective: grammar_v2_logical
     min_gain_bits: 0.0
     local_improvement: true
 
