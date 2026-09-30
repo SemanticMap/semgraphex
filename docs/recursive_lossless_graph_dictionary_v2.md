@@ -30,7 +30,7 @@ The archive contains only decoder-relevant data:
     shapes.json
     variants.json
     rules.json
-    occurrences.json
+    occurrences.bin
     internal.bin
     ports.bin
     residual.bin
