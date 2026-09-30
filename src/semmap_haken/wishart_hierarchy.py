@@ -1213,6 +1213,7 @@ def run_wishart_hierarchy(
                 figure_nodes=[item.nodes for item in plan.occurrences],
                 symbol_types=symbol_types,
                 output=transition_dir / "grammar_exact_v2.zip",
+                source_adjacency=current,
             )
             dictionary_metrics["exact_transition_codec"] = exact_codec_report
 
