@@ -41,6 +41,7 @@ from .transition_grammar import encode_transition_grammar
 from .recursive_grammar import write_recursive_grammar
 from .dictionary_graphex import write_dictionary_projection
 from .occurrence_index import OccurrenceIndex
+from .hierarchy_codec import build_hierarchy_archive
 from .wishart_dynamics import cluster_transition_metrics, compute_dynamic_snapshot
 from .wishart_metrics import (
     EgoCandidate,
@@ -1451,6 +1452,20 @@ def run_wishart_hierarchy(
         + "\n",
         encoding="utf-8",
     )
+    hierarchy_codec_report = None
+    if dictionary_options.emit_exact_transition_codec:
+        hierarchy_codec_report = build_hierarchy_archive(destination)
+        hierarchy_payload = json.loads(
+            (destination / "hierarchy.json").read_text(encoding="utf-8")
+        )
+        hierarchy_payload["hierarchy_exact_codec"] = hierarchy_codec_report
+        (destination / "hierarchy.json").write_text(
+            json.dumps(hierarchy_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    # Completion is published only after the consolidated final->level0
+    # roundtrip succeeds when exact transition archives are enabled.
     (destination / "COMPLETED").write_text("complete\n", encoding="utf-8")
     if checkpoint_hook is not None:
         checkpoint_hook(
@@ -1461,6 +1476,7 @@ def run_wishart_hierarchy(
                 "stop_reason": stop_reason,
                 "final_nodes": int(current.shape[0]),
                 "dictionary_size": len(dictionary.types),
+                "hierarchy_exact_codec": hierarchy_codec_report,
             },
         )
     return summary
