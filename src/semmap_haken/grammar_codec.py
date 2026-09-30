@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import time
 import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -579,6 +580,7 @@ def encode_grammar(
     node_types: Mapping[int, str] | None = None,
 ) -> dict[str, object]:
     """Encode a graph exactly using reusable shapes, ports, and residuals."""
+    codec_started = time.perf_counter()
     records = tuple(edges)
     _validate_records(vertex_count, records)
     groups = _validate_figures(vertex_count, figures)
@@ -594,6 +596,7 @@ def encode_grammar(
         for node in nodes:
             owner[node] = occurrence_id
 
+    canonicalization_started = time.perf_counter()
     (
         shapes,
         variants,
@@ -607,7 +610,9 @@ def encode_grammar(
         relation_to_id,
         node_types,
     )
+    canonicalization_seconds = time.perf_counter() - canonicalization_started
 
+    payload_started = time.perf_counter()
     port_payload: list[PortBinding] = []
     residual_payload: list[ResidualEdge] = []
     internal_ids = {item.edge_id for item in internal_payload}
@@ -665,6 +670,7 @@ def encode_grammar(
             )
         )
 
+    payload_build_seconds = time.perf_counter() - payload_started
     ids = [int(row.edge_id) for row in records]
     record_order: str | list[int] = (
         "ascending_ids"
@@ -697,6 +703,7 @@ def encode_grammar(
 
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True)
+    archive_write_started = time.perf_counter()
     with zipfile.ZipFile(
         target,
         "w",
@@ -734,10 +741,12 @@ def encode_grammar(
             "residual.bin",
             _write_residual_compact(residual_payload),
         )
+    archive_write_seconds = time.perf_counter() - archive_write_started
 
     # Legacy JSON+DEFLATE baseline remains for continuity with earlier
     # experiments, but the compact binary baseline is the authoritative
     # non-grammar storage comparator for new compression claims.
+    baseline_started = time.perf_counter()
     baseline_buffer = io.BytesIO()
     with zipfile.ZipFile(
         baseline_buffer,
@@ -762,11 +771,14 @@ def encode_grammar(
             }),
         )
     binary_baseline = encode_edge_baseline_bytes(vertex_count, records)
+    baseline_seconds = time.perf_counter() - baseline_started
 
+    verify_started = time.perf_counter()
     decoded_n, decoded_edges = decode_grammar(target)
     if decoded_n != vertex_count or decoded_edges != records:
         target.unlink(missing_ok=True)
         raise AssertionError("grammar_exact_v2 roundtrip failed")
+    verify_decode_seconds = time.perf_counter() - verify_started
 
     with zipfile.ZipFile(target) as archive:
         entry_bytes = {
@@ -816,6 +828,14 @@ def encode_grammar(
         "grammar_compressed_entry_bytes": grammar_bytes,
         "payload_compressed_entry_bytes": payload_bytes,
         "entry_compressed_bytes": entry_bytes,
+        "timing_seconds": {
+            "canonicalization": canonicalization_seconds,
+            "payload_build": payload_build_seconds,
+            "archive_write": archive_write_seconds,
+            "baseline_build": baseline_seconds,
+            "verify_decode": verify_decode_seconds,
+            "total": time.perf_counter() - codec_started,
+        },
         "roundtrip_exact": True,
     }
 
