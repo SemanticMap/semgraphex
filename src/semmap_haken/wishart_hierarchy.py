@@ -40,6 +40,7 @@ from .wishart_resume import load_latest_checkpoint, truncate_after_checkpoint, w
 from .transition_grammar import encode_transition_grammar
 from .recursive_grammar import write_recursive_grammar
 from .dictionary_graphex import write_dictionary_projection
+from .occurrence_index import OccurrenceIndex
 from .wishart_dynamics import cluster_transition_metrics, compute_dynamic_snapshot
 from .wishart_metrics import (
     EgoCandidate,
@@ -337,6 +338,7 @@ def _scan_known_types(
     wishart_options: WishartOptions,
     dictionary_options: DictionaryOptions,
     cpu_workers: int = 1,
+    prefilled_occurrences: Sequence[_ScannedOccurrence] = (),
 ) -> tuple[tuple[_ScannedOccurrence, ...], Counter[str]]:
     if dictionary_options.frequency_scan == "discovery":
         rows: list[_ScannedOccurrence] = []
@@ -360,9 +362,32 @@ def _scan_known_types(
     else:
         rows: list[_ScannedOccurrence] = []
         seen: set[tuple[str, tuple[int, ...]]] = set()
-        next_index = 0
+        cached_centers: set[int] = set()
+        for cached in prefilled_occurrences:
+            key = (cached.dictionary_type_id, tuple(cached.nodes))
+            if key in seen or cached.center in cached_centers:
+                continue
+            seen.add(key)
+            cached_centers.add(int(cached.center))
+            rows.append(
+                _ScannedOccurrence(
+                    candidate_index=len(rows),
+                    center=int(cached.center),
+                    nodes=tuple(int(x) for x in cached.nodes),
+                    prototype_to_fine_nodes=tuple(
+                        int(x) for x in cached.prototype_to_fine_nodes
+                    ),
+                    dictionary_type_id=str(cached.dictionary_type_id),
+                )
+            )
+        next_index = len(rows)
         batch_size = dictionary_options.frequency_scan_batch_size
         extractor = EgoExtractor(adjacency, relation_layers)
+        centers_to_scan = [
+            center
+            for center in range(adjacency.shape[0])
+            if center not in cached_centers
+        ]
 
         def consume(
             batch: Sequence[EgoCandidate],
@@ -404,10 +429,10 @@ def _scan_known_types(
         )
         pending = deque()
         with process_pool as pool:
-            for start in range(0, adjacency.shape[0], batch_size):
-                stop = min(adjacency.shape[0], start + batch_size)
+            for start in range(0, len(centers_to_scan), batch_size):
+                center_batch = centers_to_scan[start:start + batch_size]
                 candidates = extractor.extract_centers(
-                    range(start, stop),
+                    center_batch,
                     radius=wishart_options.radius,
                     max_ego_nodes=wishart_options.max_ego_nodes,
                     symbol_types=symbol_types,
