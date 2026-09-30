@@ -95,8 +95,11 @@ wishart:
 dictionary:
   enabled: true
   boundary_sensitive: true
-  frequency_scan: full
+  frequency_scan: incremental
   frequency_scan_batch_size: 5000
+  # Exact matches outside radius+1 of contracted nodes are carried forward;
+  # every 4th level is rescanned completely as a correctness control.
+  frequency_full_rescan_every: 4
   min_support: 3
   family_match_jaccard: 0.5
   huffman: true
