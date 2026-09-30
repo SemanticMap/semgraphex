@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 from scipy import sparse
 
+from .exact_edge_baseline import encode_edge_baseline_bytes
 from .grammar_binary import (
     bits_to_float,
     read_uvarint,
@@ -414,18 +415,68 @@ def build_hierarchy_archive(
             target.unlink(missing_ok=True)
             raise AssertionError("hierarchy codec relation roundtrip failed")
 
-        baseline_path = Path(tmp) / "level0_baseline.zip"
+        # Keep the historical residual-only grammar baseline for continuity,
+        # but compare new compression claims against a compact non-grammar
+        # binary bundle containing the same level-0 memberships (and the same
+        # raw-adjacency fallback, when one is required).
+        baseline_path = Path(tmp) / "level0_legacy_grammar_baseline.zip"
         encode_grammar(decoded_n, expected, (), baseline_path)
-        baseline_bytes = baseline_path.stat().st_size
+        legacy_baseline_bytes = baseline_path.stat().st_size
+
+        edge_baseline_bytes = encode_edge_baseline_bytes(decoded_n, expected)
+        bundle_buffer = io.BytesIO()
+        with zipfile.ZipFile(
+            bundle_buffer,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as baseline_bundle:
+            baseline_bundle.writestr(
+                "edge_baseline.zip",
+                edge_baseline_bytes,
+                compress_type=zipfile.ZIP_STORED,
+            )
+            baseline_bundle.writestr("membership.bin", membership_bytes)
+            if not adjacency_diagnostic["matches"]:
+                baseline_bundle.writestr(
+                    "level0_adjacency.npz",
+                    (level0 / "adjacency.npz").read_bytes(),
+                    compress_type=zipfile.ZIP_STORED,
+                )
+        binary_bundle_baseline_bytes = len(bundle_buffer.getvalue())
+
+    with zipfile.ZipFile(target) as built_archive:
+        entry_compressed_bytes = {
+            info.filename: int(info.compress_size)
+            for info in built_archive.infolist()
+        }
+    archive_bytes = target.stat().st_size
+    compressed_payload_bytes = sum(entry_compressed_bytes.values())
+    container_overhead_bytes = archive_bytes - compressed_payload_bytes
 
     report = {
         "format": FORMAT,
-        "archive_bytes": target.stat().st_size,
-        "baseline_level0_bytes": baseline_bytes,
-        "net_saved_bytes": baseline_bytes - target.stat().st_size,
-        "compression_ratio": (
-            target.stat().st_size / baseline_bytes if baseline_bytes else None
+        "archive_bytes": archive_bytes,
+        # Historical comparator retained so existing result readers do not
+        # silently change meaning.
+        "baseline_level0_bytes": legacy_baseline_bytes,
+        "baseline_level0_legacy_grammar_bytes": legacy_baseline_bytes,
+        "baseline_level0_binary_edge_bytes": len(edge_baseline_bytes),
+        "baseline_level0_binary_bundle_bytes": binary_bundle_baseline_bytes,
+        "net_saved_bytes": legacy_baseline_bytes - archive_bytes,
+        "net_saved_vs_binary_bundle_bytes": (
+            binary_bundle_baseline_bytes - archive_bytes
         ),
+        "compression_ratio": (
+            archive_bytes / legacy_baseline_bytes
+            if legacy_baseline_bytes else None
+        ),
+        "compression_ratio_binary_bundle": (
+            archive_bytes / binary_bundle_baseline_bytes
+            if binary_bundle_baseline_bytes else None
+        ),
+        "entry_compressed_bytes": entry_compressed_bytes,
+        "zip_container_overhead_bytes": container_overhead_bytes,
         "transitions": len(transitions),
         "final_nodes": int(final_n),
         "level0_nodes": int(decoded_n),
