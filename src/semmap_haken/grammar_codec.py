@@ -27,8 +27,10 @@ from .edge_table import EdgeTable
 from .grammar_binary import (
     bits_to_float,
     float_to_bits,
+    read_svarint,
     read_u64,
     read_uvarint,
+    write_svarint,
     write_u64,
     write_uvarint,
 )
@@ -214,6 +216,58 @@ def _rule_to_json(rule: GrammarRule) -> dict[str, object]:
         "shape_id": rule.shape_id,
         "child_symbols": list(rule.child_symbols),
     }
+
+
+def _write_occurrences(rows: tuple[Occurrence, ...]) -> bytes:
+    out = io.BytesIO()
+    write_uvarint(out, len(rows))
+    for row in rows:
+        write_uvarint(out, row.occurrence_id)
+        write_uvarint(out, row.symbol_id)
+        write_uvarint(out, row.variant_id)
+        write_uvarint(out, len(row.shape_to_fine_nodes))
+        if not row.shape_to_fine_nodes:
+            continue
+        first = int(row.shape_to_fine_nodes[0])
+        write_uvarint(out, first)
+        previous = first
+        for node in row.shape_to_fine_nodes[1:]:
+            current = int(node)
+            write_svarint(out, current - previous)
+            previous = current
+    return out.getvalue()
+
+
+def _read_occurrences(data: bytes) -> tuple[Occurrence, ...]:
+    stream = io.BytesIO(data)
+    count = read_uvarint(stream)
+    rows: list[Occurrence] = []
+    for _ in range(count):
+        occurrence_id = read_uvarint(stream)
+        symbol_id = read_uvarint(stream)
+        variant_id = read_uvarint(stream)
+        node_count = read_uvarint(stream)
+        nodes: list[int] = []
+        if node_count:
+            first = read_uvarint(stream)
+            nodes.append(first)
+            previous = first
+            for _ in range(node_count - 1):
+                previous = previous + read_svarint(stream)
+                if previous < 0:
+                    raise ValueError("negative decoded fine node")
+                nodes.append(previous)
+        rows.append(
+            Occurrence(
+                occurrence_id=occurrence_id,
+                symbol_id=symbol_id,
+                variant_id=variant_id,
+                shape_to_fine_nodes=tuple(nodes),
+            )
+        )
+    if stream.read(1):
+        raise ValueError("trailing occurrence payload bytes")
+    return tuple(rows)
 
 
 def _write_internal(rows: list[InternalEdgePayload]) -> bytes:
@@ -644,10 +698,7 @@ def encode_grammar(
             "rules.json",
             _json([_rule_to_json(rule) for rule in rules]),
         )
-        archive.writestr(
-            "occurrences.json",
-            _json([_occurrence_to_json(row) for row in occurrences]),
-        )
+        archive.writestr("occurrences.bin", _write_occurrences(occurrences))
         archive.writestr("internal.bin", _write_internal(internal_payload))
         archive.writestr("ports.bin", _write_ports(port_payload))
         archive.writestr("residual.bin", _write_residual(residual_payload))
@@ -693,7 +744,7 @@ def encode_grammar(
             "shapes.json",
             "variants.json",
             "rules.json",
-            "occurrences.json",
+            "occurrences.bin",
         )
     )
     payload_bytes = sum(
@@ -733,7 +784,7 @@ def decode_grammar(
             raise ValueError("unsupported grammar archive format")
         shapes_raw = json.loads(archive.read("shapes.json"))
         variants_raw = json.loads(archive.read("variants.json"))
-        occurrences_raw = json.loads(archive.read("occurrences.json"))
+        occurrences_rows = _read_occurrences(archive.read("occurrences.bin"))
         internal = _read_internal(archive.read("internal.bin"))
         ports = _read_ports(archive.read("ports.bin"))
         residuals = _read_residual(archive.read("residual.bin"))
@@ -762,13 +813,8 @@ def decode_grammar(
         for item in variants_raw
     }
     occurrences = {
-        int(item["occurrence_id"]): Occurrence(
-            occurrence_id=int(item["occurrence_id"]),
-            symbol_id=int(item["symbol_id"]),
-            variant_id=int(item["variant_id"]),
-            shape_to_fine_nodes=tuple(int(x) for x in item["shape_to_fine_nodes"]),
-        )
-        for item in occurrences_raw
+        int(item.occurrence_id): item
+        for item in occurrences_rows
     }
 
     restored: dict[int, EdgeRecord] = {}
