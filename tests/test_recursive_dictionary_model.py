@@ -74,3 +74,23 @@ def test_dictionary_projection_uses_original_node_mass_and_relation_blocks():
         and block["target_symbol"] == "GT_B"
         for block in projection["blocks"]
     )
+
+
+def test_dictionary_projection_uses_propagated_original_mass():
+    layer = sparse.csr_matrix(
+        (
+            np.array([1.0]),
+            (np.array([0]), np.array([2])),
+        ),
+        shape=(3, 3),
+    )
+    projection = estimate_dictionary_projection(
+        {"r": layer},
+        np.array([0, 0, 1], dtype=np.int64),
+        {0: "GT_A", 1: "GT_B"},
+        fine_mass=np.array([2.0, 3.0, 7.0]),
+    )
+    assert projection["mass"]["GT_A"]["original_node_count"] == 5.0
+    assert projection["mass"]["GT_A"]["current_node_count"] == 2
+    assert projection["mass"]["GT_B"]["original_node_count"] == 7.0
+    assert projection["mass"]["GT_A"]["probability_mass"] == pytest.approx(5 / 12)
