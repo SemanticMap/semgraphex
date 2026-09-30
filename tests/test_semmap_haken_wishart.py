@@ -311,6 +311,7 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
         frequency_scan="full",
         frequency_scan_batch_size=3,
         min_support=2,
+        emit_exact_transition_codec=True,
     )
 
     output = tmp_path / "dictionary-run"
@@ -341,3 +342,15 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
     ]
     assert occurrences
     assert all(item["prototype_to_fine_nodes"] for item in occurrences)
+
+    grammar_archive = transition / "grammar_exact_v2.zip"
+    assert grammar_archive.is_file()
+    from semmap_haken.grammar_codec import decode_grammar
+    from semmap_haken.transition_grammar import relation_layers_to_edge_records
+    from semmap_haken.wishart_metrics import relation_layers_from_prepared
+
+    expected_records = relation_layers_to_edge_records(
+        relation_layers_from_prepared(graph, directed=False)
+    )
+    assert decode_grammar(grammar_archive) == (n, expected_records)
+    assert metrics["exact_transition_codec"]["roundtrip_exact"]
