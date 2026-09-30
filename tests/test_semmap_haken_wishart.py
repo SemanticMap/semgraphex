@@ -383,6 +383,16 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
     assert decode_grammar(grammar_archive) == (n, expected_records)
     assert metrics["exact_transition_codec"]["roundtrip_exact"]
 
+    hierarchy_archive = output / "hierarchy_exact_v1.zip"
+    assert hierarchy_archive.is_file()
+    from semmap_haken.hierarchy_codec import decode_hierarchy
+
+    assert decode_hierarchy(hierarchy_archive) == (n, expected_records)
+    hierarchy_report = json.loads(
+        (output / "hierarchy_codec_report.json").read_text(encoding="utf-8")
+    )
+    assert hierarchy_report["roundtrip_exact"]
+
 
 def test_incremental_prefill_matches_full_frequency_census() -> None:
     from semmap_haken.graph_dictionary import GraphDictionary
