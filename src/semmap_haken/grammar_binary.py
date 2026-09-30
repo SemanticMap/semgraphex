@@ -27,6 +27,16 @@ def write_uvarint(stream: BinaryIO, value: int) -> None:
     stream.write(encode_uvarint(value))
 
 
+def encode_svarint(value: int) -> bytes:
+    value = int(value)
+    zigzag = 2 * value if value >= 0 else -2 * value - 1
+    return encode_uvarint(zigzag)
+
+
+def write_svarint(stream: BinaryIO, value: int) -> None:
+    stream.write(encode_svarint(value))
+
+
 def read_uvarint(stream: BinaryIO) -> int:
     value = 0
     shift = 0
@@ -40,6 +50,11 @@ def read_uvarint(stream: BinaryIO) -> int:
             return value
         shift += 7
     raise ValueError("uvarint exceeds 64 bits")
+
+
+def read_svarint(stream: BinaryIO) -> int:
+    zigzag = read_uvarint(stream)
+    return zigzag // 2 if zigzag % 2 == 0 else -(zigzag // 2) - 1
 
 
 def float_to_bits(value: float) -> int:
