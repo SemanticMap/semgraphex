@@ -206,9 +206,10 @@ def build_hierarchy_archive(
 ) -> dict[str, object]:
     """Build and verify final-graph + reverse-transition exact archive."""
     run = Path(run_dir)
-    if not (run / "COMPLETED").is_file():
-        raise ValueError("hierarchy archive requires a COMPLETED run")
-    hierarchy = json.loads((run / "hierarchy.json").read_text(encoding="utf-8"))
+    hierarchy_path = run / "hierarchy.json"
+    if not hierarchy_path.is_file():
+        raise ValueError("hierarchy archive requires hierarchy.json")
+    hierarchy = json.loads(hierarchy_path.read_text(encoding="utf-8"))
     if hierarchy.get("options", {}).get("aggregation") != "sum":
         raise ValueError(
             "hierarchy_exact_v1 currently requires wishart.aggregation=sum"
