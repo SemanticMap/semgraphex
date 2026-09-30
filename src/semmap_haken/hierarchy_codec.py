@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -17,7 +18,11 @@ from pathlib import Path
 import numpy as np
 from scipy import sparse
 
-from .grammar_binary import bits_to_float
+from .grammar_binary import (
+    bits_to_float,
+    read_uvarint,
+    write_uvarint,
+)
 from .grammar_codec import (
     _read_internal,
     _read_occurrences,
@@ -28,8 +33,77 @@ from .grammar_codec import (
 from .grammar_types import InternalShape, PortSpec, ShapeEdge
 from .graphex_components import EdgeRecord
 from .transition_grammar import relation_layers_to_edge_records
+from .relation_adjacency import adjacency_relation_diagnostic, sum_relation_layers
 
 FORMAT = "semmap_hierarchy_exact_v1"
+
+
+def _common_prefix_bytes(left: bytes, right: bytes) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+def _encode_level0_memberships(level: Path) -> bytes:
+    raw = json.loads((level / "membership.json").read_text(encoding="utf-8"))
+    count = len(raw)
+    if set(map(int, raw)) != set(range(count)):
+        raise ValueError("level-0 membership IDs must be contiguous")
+    stream = io.BytesIO()
+    write_uvarint(stream, count)
+    previous = b""
+    for node in range(count):
+        value = raw[str(node)]
+        concepts = value.get("original_concepts", []) if isinstance(value, dict) else value
+        if isinstance(concepts, str):
+            concepts = [concepts]
+        concepts = [str(item) for item in concepts]
+        if not concepts:
+            raise ValueError(f"missing original concepts for level-0 node {node}")
+        write_uvarint(stream, len(concepts))
+        for concept in concepts:
+            encoded = concept.encode("utf-8")
+            prefix = _common_prefix_bytes(previous, encoded)
+            suffix = encoded[prefix:]
+            write_uvarint(stream, prefix)
+            write_uvarint(stream, len(suffix))
+            stream.write(suffix)
+            previous = encoded
+    return stream.getvalue()
+
+
+def _decode_memberships(data: bytes) -> tuple[tuple[str, ...], ...]:
+    stream = io.BytesIO(data)
+    count = read_uvarint(stream)
+    rows: list[tuple[str, ...]] = []
+    previous = b""
+    for _ in range(count):
+        item_count = read_uvarint(stream)
+        if item_count <= 0:
+            raise ValueError("membership row must not be empty")
+        concepts = []
+        for _ in range(item_count):
+            prefix = read_uvarint(stream)
+            suffix_size = read_uvarint(stream)
+            if prefix > len(previous):
+                raise ValueError("invalid membership prefix length")
+            suffix = stream.read(suffix_size)
+            if len(suffix) != suffix_size:
+                raise ValueError("truncated membership suffix")
+            encoded = previous[:prefix] + suffix
+            concepts.append(encoded.decode("utf-8"))
+            previous = encoded
+        rows.append(tuple(concepts))
+    if stream.read(1):
+        raise ValueError("trailing membership bytes")
+    return tuple(rows)
+
+
+def _relation_filename(relation: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", relation).strip("_") or "relation"
+    return safe + ".npz"
 
 
 def _load_relation_layers(level: Path) -> dict[str, sparse.csr_matrix]:
@@ -218,6 +292,15 @@ def build_hierarchy_archive(
     levels = sorted(run.glob("level_???"))
     if not levels:
         raise ValueError("run contains no hierarchy levels")
+    level0 = levels[0]
+    level0_layers = _load_relation_layers(level0)
+    level0_adjacency = sparse.load_npz(level0 / "adjacency.npz").tocsr()
+    adjacency_diagnostic = adjacency_relation_diagnostic(
+        level0_adjacency,
+        level0_layers,
+    )
+    membership_bytes = _encode_level0_memberships(level0)
+
     final_level = levels[-1]
     final_layers = _load_relation_layers(final_level)
     final_records = relation_layers_to_edge_records(final_layers)
@@ -257,6 +340,13 @@ def build_hierarchy_archive(
             "aggregation": "sum",
             "final_level": int(final_level.name.split("_")[1]),
             "transition_count": len(transitions),
+            "membership_encoding": "front-coded UTF-8 original_concepts",
+            "adjacency_mode": (
+                "relation_sum"
+                if adjacency_diagnostic["matches"]
+                else "stored_level0_npz"
+            ),
+            "level0_adjacency_from_relations": adjacency_diagnostic,
             "transitions": [
                 {
                     "source_level": row["source_level"],
@@ -288,6 +378,13 @@ def build_hierarchy_archive(
                 final_path.read_bytes(),
                 compress_type=zipfile.ZIP_STORED,
             )
+            outer.writestr("membership.bin", membership_bytes)
+            if not adjacency_diagnostic["matches"]:
+                outer.writestr(
+                    "level0_adjacency.npz",
+                    (level0 / "adjacency.npz").read_bytes(),
+                    compress_type=zipfile.ZIP_STORED,
+                )
             for row in transitions:
                 prefix = (
                     f"transition_{row['source_level']:03d}_"
@@ -309,9 +406,8 @@ def build_hierarchy_archive(
                         )
 
         decoded_n, decoded = decode_hierarchy(target)
-        level0_layers = _load_relation_layers(levels[0])
         expected = relation_layers_to_edge_records(level0_layers)
-        if decoded_n != sparse.load_npz(levels[0] / "adjacency.npz").shape[0]:
+        if decoded_n != level0_adjacency.shape[0]:
             target.unlink(missing_ok=True)
             raise AssertionError("hierarchy codec vertex roundtrip failed")
         if decoded != expected:
@@ -334,6 +430,9 @@ def build_hierarchy_archive(
         "final_nodes": int(final_n),
         "level0_nodes": int(decoded_n),
         "roundtrip_exact": True,
+        "membership_nodes": len(_decode_memberships(membership_bytes)),
+        "adjacency_mode": manifest["adjacency_mode"],
+        "level0_adjacency_from_relations": adjacency_diagnostic,
     }
     (run / "hierarchy_codec_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -386,3 +485,113 @@ def decode_hierarchy(
         if expected_target_level != 0 and transitions:
             raise ValueError("hierarchy archive does not reach level 0")
         return current_n, current_records
+
+
+def decode_hierarchy_bundle(
+    archive_path: str | Path,
+) -> tuple[
+    int,
+    tuple[EdgeRecord, ...],
+    tuple[tuple[str, ...], ...],
+    bytes | None,
+]:
+    """Decode graph records, level-0 memberships, and optional raw adjacency."""
+    n, records = decode_hierarchy(archive_path)
+    with zipfile.ZipFile(archive_path) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        memberships = _decode_memberships(archive.read("membership.bin"))
+        raw_adjacency = (
+            archive.read("level0_adjacency.npz")
+            if manifest.get("adjacency_mode") == "stored_level0_npz"
+            else None
+        )
+    if len(memberships) != n:
+        raise ValueError("membership count differs from decoded node count")
+    return n, records, memberships, raw_adjacency
+
+
+def write_decoded_hierarchy(
+    archive_path: str | Path,
+    output_dir: str | Path,
+) -> dict[str, object]:
+    """Materialize a decoded hierarchy in the standard level directory form."""
+    n, records, memberships, raw_adjacency = decode_hierarchy_bundle(
+        archive_path
+    )
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    relation_dir = target / "relations"
+    relation_dir.mkdir(exist_ok=True)
+
+    by_relation: dict[str, list[EdgeRecord]] = {}
+    for record in records:
+        by_relation.setdefault(record.relation, []).append(record)
+
+    relation_index = {}
+    layers = {}
+    for relation, rows in sorted(by_relation.items()):
+        source = np.fromiter(
+            (row.source for row in rows), dtype=np.int64, count=len(rows)
+        )
+        destination = np.fromiter(
+            (row.target for row in rows), dtype=np.int64, count=len(rows)
+        )
+        weights = np.fromiter(
+            (row.weight for row in rows), dtype=np.float64, count=len(rows)
+        )
+        layer = sparse.csr_matrix(
+            (weights, (source, destination)),
+            shape=(n, n),
+            dtype=np.float64,
+        )
+        layer.sum_duplicates()
+        layer.sort_indices()
+        filename = _relation_filename(relation)
+        sparse.save_npz(relation_dir / filename, layer)
+        relation_index[relation] = filename
+        layers[relation] = layer
+
+    (relation_dir / "index.json").write_text(
+        json.dumps(relation_index, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    if raw_adjacency is not None:
+        (target / "adjacency.npz").write_bytes(raw_adjacency)
+        adjacency_mode = "stored_level0_npz"
+    else:
+        adjacency = sum_relation_layers(layers, shape=(n, n))
+        sparse.save_npz(target / "adjacency.npz", adjacency)
+        adjacency_mode = "relation_sum"
+
+    membership_payload = {
+        str(index): {
+            "original_concepts": list(values),
+            "concept_concat": " | ".join(values),
+        }
+        for index, values in enumerate(memberships)
+    }
+    (target / "membership.json").write_text(
+        json.dumps(
+            membership_payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    report = {
+        "format": FORMAT,
+        "node_count": n,
+        "edge_records": len(records),
+        "relations": len(layers),
+        "adjacency_mode": adjacency_mode,
+        "source_archive": str(archive_path),
+        "roundtrip_materialized": True,
+    }
+    (target / "DECODED.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (target / "COMPLETED").write_text("decoded\n", encoding="utf-8")
+    return report
