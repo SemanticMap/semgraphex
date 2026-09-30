@@ -20,6 +20,8 @@ def estimate_dictionary_projection(
     relation_layers: Mapping[str, sparse.spmatrix],
     fine_to_coarse: np.ndarray,
     dictionary_type_by_coarse: Mapping[int, str],
+    *,
+    fine_mass: np.ndarray | None = None,
 ) -> dict[str, object]:
     assignment = np.asarray(fine_to_coarse, dtype=np.int64)
     if assignment.ndim != 1:
@@ -37,6 +39,15 @@ def estimate_dictionary_projection(
             },
         }
 
+    if fine_mass is None:
+        masses = np.ones(assignment.size, dtype=np.float64)
+    else:
+        masses = np.asarray(fine_mass, dtype=np.float64)
+        if masses.shape != assignment.shape:
+            raise ValueError("fine_mass must match fine_to_coarse")
+        if np.any(~np.isfinite(masses)) or np.any(masses <= 0):
+            raise ValueError("fine_mass must contain positive finite values")
+
     fine_symbol = np.array(
         [
             str(dictionary_type_by_coarse.get(int(coarse), "ATOM"))
@@ -44,18 +55,19 @@ def estimate_dictionary_projection(
         ],
         dtype=object,
     )
-    unique, counts = np.unique(fine_symbol, return_counts=True)
-    mass_counts = {
-        str(symbol): int(count)
-        for symbol, count in zip(unique, counts, strict=True)
-    }
-    total = int(assignment.size)
+    mass_counts: dict[str, float] = defaultdict(float)
+    coarse_node_counts: dict[str, int] = defaultdict(int)
+    for symbol, node_mass in zip(fine_symbol, masses, strict=True):
+        mass_counts[str(symbol)] += float(node_mass)
+        coarse_node_counts[str(symbol)] += 1
+    total_mass = float(masses.sum())
     mass = {
         symbol: {
-            "original_node_count": count,
-            "probability_mass": count / total,
+            "original_node_count": float(node_mass),
+            "current_node_count": int(coarse_node_counts[symbol]),
+            "probability_mass": float(node_mass / total_mass),
         }
-        for symbol, count in sorted(mass_counts.items())
+        for symbol, node_mass in sorted(mass_counts.items())
     }
 
     accum: dict[tuple[str, str, str], list[float]] = defaultdict(
@@ -91,7 +103,7 @@ def estimate_dictionary_projection(
             "target_symbol": target_symbol,
             "edge_records": int(edge_records),
             "weight_sum": float(weight_sum),
-            "exposure_pairs": int(exposure),
+            "exposure_pairs": float(exposure),
             "record_intensity": (
                 float(edge_records / exposure) if exposure else 0.0
             ),
@@ -122,11 +134,14 @@ def write_dictionary_projection(
     relation_layers: Mapping[str, sparse.spmatrix],
     fine_to_coarse: np.ndarray,
     dictionary_type_by_coarse: Mapping[int, str],
+    *,
+    fine_mass: np.ndarray | None = None,
 ) -> dict[str, object]:
     result = estimate_dictionary_projection(
         relation_layers,
         fine_to_coarse,
         dictionary_type_by_coarse,
+        fine_mass=fine_mass,
     )
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
