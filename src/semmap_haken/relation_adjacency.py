@@ -33,10 +33,22 @@ def adjacency_relation_diagnostic(
     rtol: float = 1e-12,
     atol: float = 1e-12,
 ) -> dict[str, object]:
-    source = adjacency.tocsr().astype(np.float64, copy=False)
+    source = adjacency.tocsr().astype(np.float64, copy=True)
+    source.sum_duplicates()
+    source.sort_indices()
+    source.eliminate_zeros()
     reconstructed = sum_relation_layers(
         relation_layers,
         shape=source.shape,
+    )
+    exact_equal = bool(
+        source.shape == reconstructed.shape
+        and np.array_equal(source.indptr, reconstructed.indptr)
+        and np.array_equal(source.indices, reconstructed.indices)
+        and np.array_equal(
+            source.data.view(np.uint64),
+            reconstructed.data.view(np.uint64),
+        )
     )
     delta = (source - reconstructed).tocsr()
     max_abs = float(np.max(np.abs(delta.data))) if delta.nnz else 0.0
@@ -52,6 +64,7 @@ def adjacency_relation_diagnostic(
     )
     return {
         "matches": matches,
+        "exact_equal": exact_equal,
         "max_abs_error": max_abs,
         "adjacency_nnz": int(source.nnz),
         "relation_sum_nnz": int(reconstructed.nnz),
