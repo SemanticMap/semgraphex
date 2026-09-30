@@ -42,6 +42,7 @@ from .recursive_grammar import write_recursive_grammar
 from .dictionary_graphex import write_dictionary_projection
 from .occurrence_index import OccurrenceIndex
 from .hierarchy_codec import build_hierarchy_archive
+from .multiscale_graph_model import write_multiscale_graph_report
 from .wishart_dynamics import cluster_transition_metrics, compute_dynamic_snapshot
 from .wishart_metrics import (
     EgoCandidate,
@@ -1456,6 +1457,8 @@ def run_wishart_hierarchy(
         + "\n",
         encoding="utf-8",
     )
+    multiscale_graph_report = write_multiscale_graph_report(destination)
+
     hierarchy_codec_report = None
     if dictionary_options.emit_exact_transition_codec:
         hierarchy_codec_report = build_hierarchy_archive(destination)
@@ -1463,6 +1466,10 @@ def run_wishart_hierarchy(
             (destination / "hierarchy.json").read_text(encoding="utf-8")
         )
         hierarchy_payload["hierarchy_exact_codec"] = hierarchy_codec_report
+        hierarchy_payload["multiscale_graph_model"] = {
+            "projection_count": multiscale_graph_report["projection_count"],
+            "scope": multiscale_graph_report["scope"],
+        }
         (destination / "hierarchy.json").write_text(
             json.dumps(hierarchy_payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -1481,6 +1488,11 @@ def run_wishart_hierarchy(
                 "final_nodes": int(current.shape[0]),
                 "dictionary_size": len(dictionary.types),
                 "hierarchy_exact_codec": hierarchy_codec_report,
+                "multiscale_graph_model": {
+                    "projection_count": multiscale_graph_report[
+                        "projection_count"
+                    ]
+                },
             },
         )
     return summary
