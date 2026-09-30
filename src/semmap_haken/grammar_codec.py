@@ -35,6 +35,17 @@ from .grammar_binary import (
     write_u64,
     write_uvarint,
 )
+from .grammar_streams import (
+    STREAM_LAYOUT as COMPACT_STREAM_LAYOUT,
+    read_internal as _read_internal_compact,
+    read_occurrences as _read_occurrences_compact,
+    read_ports as _read_ports_compact,
+    read_residual as _read_residual_compact,
+    write_internal as _write_internal_compact,
+    write_occurrences as _write_occurrences_compact,
+    write_ports as _write_ports_compact,
+    write_residual as _write_residual_compact,
+)
 from .grammar_types import (
     GrammarRule,
     InterfaceVariant,
@@ -666,6 +677,7 @@ def encode_grammar(
         "edge_count": len(records),
         "relations": list(relations),
         "record_order": record_order,
+        "stream_layout": COMPACT_STREAM_LAYOUT,
         "shape_count": len(shapes),
         "variant_count": len(variants),
         "occurrence_count": len(occurrences),
@@ -704,10 +716,24 @@ def encode_grammar(
             "rules.json",
             _json([_rule_to_json(rule) for rule in rules]),
         )
-        archive.writestr("occurrences.bin", _write_occurrences(occurrences))
-        archive.writestr("internal.bin", _write_internal(internal_payload))
-        archive.writestr("ports.bin", _write_ports(port_payload))
-        archive.writestr("residual.bin", _write_residual(residual_payload))
+        shape_map = {shape.shape_id: shape for shape in shapes}
+        variant_map = {variant.variant_id: variant for variant in variants}
+        archive.writestr(
+            "occurrences.bin",
+            _write_occurrences_compact(occurrences, shape_map),
+        )
+        archive.writestr(
+            "internal.bin",
+            _write_internal_compact(internal_payload, occurrences, shape_map),
+        )
+        archive.writestr(
+            "ports.bin",
+            _write_ports_compact(port_payload, occurrences, variant_map),
+        )
+        archive.writestr(
+            "residual.bin",
+            _write_residual_compact(residual_payload),
+        )
 
     # Legacy JSON+DEFLATE baseline remains for continuity with earlier
     # experiments, but the compact binary baseline is the authoritative
@@ -804,10 +830,10 @@ def decode_grammar(
             raise ValueError("unsupported grammar archive format")
         shapes_raw = json.loads(archive.read("shapes.json"))
         variants_raw = json.loads(archive.read("variants.json"))
-        occurrences_rows = _read_occurrences(archive.read("occurrences.bin"))
-        internal = _read_internal(archive.read("internal.bin"))
-        ports = _read_ports(archive.read("ports.bin"))
-        residuals = _read_residual(archive.read("residual.bin"))
+        occurrences_data = archive.read("occurrences.bin")
+        internal_data = archive.read("internal.bin")
+        ports_data = archive.read("ports.bin")
+        residual_data = archive.read("residual.bin")
 
     relations = tuple(str(item) for item in manifest["relations"])
     shapes = {
@@ -832,9 +858,35 @@ def decode_grammar(
         )
         for item in variants_raw
     }
+    stream_layout = manifest.get("stream_layout")
+    if stream_layout == COMPACT_STREAM_LAYOUT:
+        occurrence_rows = _read_occurrences_compact(
+            occurrences_data,
+            shapes,
+        )
+        internal = _read_internal_compact(
+            internal_data,
+            occurrence_rows,
+            shapes,
+        )
+        ports = _read_ports_compact(
+            ports_data,
+            occurrence_rows,
+            variants,
+        )
+        residuals = _read_residual_compact(residual_data)
+    elif stream_layout is None:
+        # Backward compatibility for v2 archives written before stream layout
+        # versioning was introduced on this development branch.
+        occurrence_rows = _read_occurrences(occurrences_data)
+        internal = _read_internal(internal_data)
+        ports = _read_ports(ports_data)
+        residuals = _read_residual(residual_data)
+    else:
+        raise ValueError(f"unsupported grammar stream layout: {stream_layout}")
     occurrences = {
         int(item.occurrence_id): item
-        for item in occurrences_rows
+        for item in occurrence_rows
     }
 
     restored: dict[int, EdgeRecord] = {}
