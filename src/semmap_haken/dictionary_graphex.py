@@ -75,9 +75,10 @@ def estimate_dictionary_projection(
     )
     for relation, matrix in sorted(relation_layers.items()):
         layer = matrix.tocsr()
-        if layer.shape != (total, total):
+        fine_count = int(assignment.size)
+        if layer.shape != (fine_count, fine_count):
             raise ValueError("relation layer size differs from fine_to_coarse")
-        rows = np.repeat(np.arange(total), np.diff(layer.indptr))
+        rows = np.repeat(np.arange(fine_count), np.diff(layer.indptr))
         for source, target, weight in zip(
             rows, layer.indices, layer.data, strict=True
         ):
