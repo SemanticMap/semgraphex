@@ -200,6 +200,7 @@ class DictionaryOptions:
     family_match_jaccard: float = 0.5
     max_dictionary_size: int = 20000
     huffman: bool = True
+    emit_exact_transition_codec: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "DictionaryOptions":
@@ -209,6 +210,9 @@ class DictionaryOptions:
         limits = raw.get("limits", {})
         if not isinstance(limits, Mapping):
             raise ValueError("dictionary.limits must be a mapping")
+        codec = raw.get("codec", {})
+        if not isinstance(codec, Mapping):
+            raise ValueError("dictionary.codec must be a mapping")
         result = cls(
             enabled=bool(raw.get("enabled", True)),
             boundary_sensitive=bool(raw.get("boundary_sensitive", True)),
@@ -220,6 +224,9 @@ class DictionaryOptions:
             family_match_jaccard=float(raw.get("family_match_jaccard", 0.5)),
             max_dictionary_size=int(limits.get("max_dictionary_size", 20000)),
             huffman=bool(raw.get("huffman", True)),
+            emit_exact_transition_codec=bool(
+                codec.get("emit_transition_archives", False)
+            ),
         )
         result.validate()
         return result
