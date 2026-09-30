@@ -34,7 +34,20 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -c requirements/constraints.txt -e '.[dev,wishart]'
+          pip install -c requirements/constraints.txt -e '.[dev,wishart]' nbformat
+      - name: Validate grammar-v2 Colab notebook
+        run: |
+          python - <<'PY'
+          import nbformat
+          from pathlib import Path
+          path = Path('notebooks/13_recursive_lossless_grammar_v2_colab.ipynb')
+          nb = nbformat.read(path, as_version=4)
+          nbformat.validate(nb)
+          for i, cell in enumerate(nb.cells):
+              if cell.cell_type == 'code':
+                  compile(cell.source, f'{path}:{i}', 'exec')
+          print('validated', path)
+          PY
       - name: Run grammar and integration tests
         run: |
           pytest -q \
