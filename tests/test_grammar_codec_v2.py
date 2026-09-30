@@ -150,3 +150,26 @@ def test_invalid_inputs_are_rejected(tmp_path):
             (),
             tmp_path / "nan.zip",
         )
+
+
+def test_interface_variant_ignores_external_edge_multiplicity(tmp_path):
+    edges = (
+        EdgeRecord(0, 0, 1, "core", 1.0),
+        EdgeRecord(1, 2, 3, "core", 2.0),
+        EdgeRecord(2, 1, 4, "external", 3.0),
+        EdgeRecord(3, 3, 5, "external", 4.0),
+        EdgeRecord(4, 3, 6, "external", 5.0),
+    )
+    archive = tmp_path / "multiplicity.zip"
+    report = encode_grammar(
+        7,
+        edges,
+        ((0, 1), (2, 3)),
+        archive,
+    )
+    assert report["shapes"] == 1
+    # Both occurrences expose the same typed/directed port schema.  The
+    # different number of external records belongs in bindings, not variants.
+    assert report["interface_variants"] == 1
+    assert report["port_edge_records"] == 3
+    assert decode_grammar(archive) == (7, edges)
