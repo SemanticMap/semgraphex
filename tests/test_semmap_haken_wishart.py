@@ -497,3 +497,101 @@ def test_incremental_prefill_matches_full_frequency_census() -> None:
         (row.center, row.nodes, row.dictionary_type_id)
         for row in full_rows
     }
+
+
+def test_full_scan_cpu_budget_split() -> None:
+    from semmap_haken.wishart_hierarchy import _split_full_scan_workers
+
+    assert _split_full_scan_workers(1) == (1, 0)
+    assert _split_full_scan_workers(2) == (1, 1)
+    assert _split_full_scan_workers(4) == (1, 3)
+    assert _split_full_scan_workers(8) == (2, 6)
+    assert _split_full_scan_workers(12) == (4, 8)
+
+
+def test_parallel_full_scan_pipeline_matches_serial() -> None:
+    from semmap_haken.graph_dictionary import GraphDictionary
+    from semmap_haken.wishart_config import DictionaryOptions, WishartOptions
+    from semmap_haken.wishart_hierarchy import _discover_types, _scan_known_types
+
+    n = 12
+    rows: list[int] = []
+    cols: list[int] = []
+    for node in range(n - 1):
+        rows.extend((node, node + 1))
+        cols.extend((node + 1, node))
+    # Add deterministic shortcuts so batches contain non-identical egos.
+    for left, right in ((0, 3), (2, 6), (5, 9), (8, 11)):
+        rows.extend((left, right))
+        cols.extend((right, left))
+    adjacency = sparse.csr_matrix(
+        (np.ones(len(rows)), (rows, cols)),
+        shape=(n, n),
+        dtype=float,
+    )
+    relation_layers = {"r": adjacency.copy()}
+    candidates = extract_ego_candidates(
+        adjacency,
+        relation_layers,
+        radius=1,
+        max_ego_nodes=6,
+        candidate_limit=n,
+        seed=17,
+        workers=1,
+    )
+    dictionary = GraphDictionary(boundary_sensitive=False)
+    discovery_type_ids, _ = _discover_types(
+        candidates,
+        dictionary,
+        level=0,
+        cpu_workers=1,
+    )
+    wishart_options = WishartOptions(
+        radius=1,
+        max_ego_nodes=6,
+        candidate_limit=n,
+        k_neighbors=2,
+        min_cluster_size=1,
+        min_cluster_mass=1.0,
+        slow_modes=2,
+        mfpt_pairs=2,
+        mfpt_walks_per_pair=1,
+        mfpt_max_steps=10,
+        betweenness_samples=2,
+        clustering_samples=2,
+        distance_samples=2,
+    )
+    dictionary_options = DictionaryOptions(
+        boundary_sensitive=False,
+        frequency_scan="full",
+        frequency_scan_batch_size=2,
+        min_support=1,
+    )
+
+    serial_rows, serial_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=0,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=dictionary_options,
+        cpu_workers=1,
+    )
+    parallel_rows, parallel_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=0,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=dictionary_options,
+        cpu_workers=4,
+    )
+
+    assert parallel_counts == serial_counts
+    assert parallel_rows == serial_rows
