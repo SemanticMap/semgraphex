@@ -1494,6 +1494,7 @@ def run_wishart_hierarchy(
                 "exact_transition_codec": dictionary_metrics.get(
                     "exact_transition_codec"
                 ),
+                "phase_timing_seconds": phase_times,
             }
         )
 
