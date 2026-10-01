@@ -876,6 +876,27 @@ def encode_grammar(
         "grammar_compressed_entry_bytes": grammar_bytes,
         "payload_compressed_entry_bytes": payload_bytes,
         "entry_compressed_bytes": entry_bytes,
+        "grammar_relations": (
+            list(sorted(grammar_relation_set))
+            if grammar_relation_set is not None
+            else list(relations)
+        ),
+        "grammar_relation_edge_records": sum(
+            1
+            for row in records
+            if (
+                grammar_relation_set is None
+                or str(row.relation) in grammar_relation_set
+            )
+        ),
+        "non_grammar_relation_edge_records": sum(
+            1
+            for row in records
+            if (
+                grammar_relation_set is not None
+                and str(row.relation) not in grammar_relation_set
+            )
+        ),
         "timing_seconds": {
             "canonicalization": canonicalization_seconds,
             "payload_build": payload_build_seconds,
