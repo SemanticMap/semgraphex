@@ -329,6 +329,24 @@ def _discover_types(
     return tuple(type_ids), counts
 
 
+
+def _split_full_scan_workers(cpu_workers: int) -> tuple[int, int]:
+    """Split one CPU budget between CSR ego extraction and VF2 matching.
+
+    The sum never exceeds cpu_workers. For parallel scans, at least one worker
+    is reserved for each stage so extraction can overlap spawned matching
+    without nested N x N parallelism.
+    """
+    workers = int(cpu_workers)
+    if workers < 1:
+        raise ValueError("cpu_workers must be positive")
+    if workers == 1:
+        return 1, 0
+    extract_workers = max(1, workers // 3)
+    extract_workers = min(extract_workers, workers - 1)
+    match_workers = workers - extract_workers
+    return extract_workers, match_workers
+
 def _scan_known_types(
     adjacency: sparse.csr_matrix,
     relation_layers: Mapping[str, sparse.csr_matrix],
@@ -419,19 +437,7 @@ def _scan_known_types(
                 )
                 next_index += 1
 
-        # Only matching is GIL-bound. The parent extracts CSR candidates and
-        # consumes results in center order; worker dictionary snapshots never
-        # mutate the live registry. At most 2*workers batches are in flight.
-        process_pool = (
-            spawn_pool(
-                workers=cpu_workers,
-                initializer=initialize_match_worker,
-                initargs=(dictionary,),
-            )
-            if cpu_workers > 1 else nullcontext(None)
-        )
-        pending = deque()
-        with process_pool as pool:
+        if cpu_workers == 1:
             for start in range(0, len(centers_to_scan), batch_size):
                 center_batch = centers_to_scan[start:start + batch_size]
                 candidates = extractor.extract_centers(
@@ -439,27 +445,87 @@ def _scan_known_types(
                     radius=wishart_options.radius,
                     max_ego_nodes=wishart_options.max_ego_nodes,
                     symbol_types=symbol_types,
-                    workers=1 if pool is not None else cpu_workers,
+                    workers=1,
                 )
-                if pool is None:
-                    matches = []
-                    for candidate in candidates:
-                        match = dictionary.match_with_mapping(candidate)
-                        matches.append(
-                            (match.graph_type.type_id, match.prototype_to_candidate)
-                            if match is not None else None
-                        )
-                    consume(candidates, matches)
-                else:
-                    pending.append(
-                        (candidates, pool.submit(match_chunk, tuple(candidates)))
+                matches = []
+                for candidate in candidates:
+                    match = dictionary.match_with_mapping(candidate)
+                    matches.append(
+                        (match.graph_type.type_id, match.prototype_to_candidate)
+                        if match is not None else None
                     )
-                    if len(pending) >= 2 * cpu_workers:
-                        first_batch, future = pending.popleft()
-                        consume(first_batch, future.result())
-            while pending:
-                first_batch, future = pending.popleft()
-                consume(first_batch, future.result())
+                consume(candidates, matches)
+        else:
+            extract_workers, match_workers = _split_full_scan_workers(cpu_workers)
+            starts = list(range(0, len(centers_to_scan), batch_size))
+            max_extract_inflight = max(1, min(len(starts), 2 * extract_workers))
+            max_match_inflight = max(1, min(4, 2 * match_workers))
+
+            def extract_batch(start: int) -> tuple[EgoCandidate, ...]:
+                center_batch = centers_to_scan[start:start + batch_size]
+                # One thread owns each batch. Do not start another nested thread
+                # pool inside EgoExtractor; the shared outer pool is the single
+                # extraction layer from the global CPU budget.
+                return extractor.extract_centers(
+                    center_batch,
+                    radius=wishart_options.radius,
+                    max_ego_nodes=wishart_options.max_ego_nodes,
+                    symbol_types=symbol_types,
+                    workers=1,
+                )
+
+            # Spawn matching processes before starting extraction threads.
+            # This avoids fork-style CUDA hazards and keeps persistent
+            # dictionary snapshots read-only in child interpreters.
+            with spawn_pool(
+                workers=match_workers,
+                initializer=initialize_match_worker,
+                initargs=(dictionary,),
+            ) as match_pool, ThreadPoolExecutor(
+                max_workers=extract_workers
+            ) as extract_pool:
+                starts_iter = iter(starts)
+                pending_extract = deque()
+                pending_match = deque()
+
+                for _ in range(max_extract_inflight):
+                    try:
+                        start = next(starts_iter)
+                    except StopIteration:
+                        break
+                    pending_extract.append(
+                        (start, extract_pool.submit(extract_batch, start))
+                    )
+
+                while pending_extract:
+                    _, extract_future = pending_extract.popleft()
+                    candidates = extract_future.result()
+
+                    try:
+                        next_start = next(starts_iter)
+                    except StopIteration:
+                        next_start = None
+                    if next_start is not None:
+                        pending_extract.append(
+                            (
+                                next_start,
+                                extract_pool.submit(extract_batch, next_start),
+                            )
+                        )
+
+                    pending_match.append(
+                        (
+                            candidates,
+                            match_pool.submit(match_chunk, tuple(candidates)),
+                        )
+                    )
+                    if len(pending_match) >= max_match_inflight:
+                        first_batch, match_future = pending_match.popleft()
+                        consume(first_batch, match_future.result())
+
+                while pending_match:
+                    first_batch, match_future = pending_match.popleft()
+                    consume(first_batch, match_future.result())
         scanned = tuple(rows)
 
     counts: Counter[str] = Counter(item.dictionary_type_id for item in scanned)
