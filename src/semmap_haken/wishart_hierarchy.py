@@ -1264,6 +1264,49 @@ def run_wishart_hierarchy(
             "frequency_full_rescan_every": (
                 dictionary_options.frequency_full_rescan_every
             ),
+            "full_scan_parallelism": (
+                {
+                    "cpu_budget": int(execution_options.cpu_workers),
+                    "extract_workers": int(
+                        _split_full_scan_workers(
+                            execution_options.cpu_workers
+                        )[0]
+                    ),
+                    "match_workers": int(
+                        _split_full_scan_workers(
+                            execution_options.cpu_workers
+                        )[1]
+                    ),
+                    "pipeline_enabled": bool(
+                        execution_options.cpu_workers > 1
+                        and dictionary_options.frequency_scan != "discovery"
+                    ),
+                    "bounded_extract_batches": int(
+                        2
+                        * _split_full_scan_workers(
+                            execution_options.cpu_workers
+                        )[0]
+                    ),
+                    "bounded_match_batches": int(
+                        min(
+                            4,
+                            2
+                            * _split_full_scan_workers(
+                                execution_options.cpu_workers
+                            )[1],
+                        )
+                    ),
+                }
+                if dictionary_options.frequency_scan != "discovery"
+                else {
+                    "cpu_budget": int(execution_options.cpu_workers),
+                    "extract_workers": 0,
+                    "match_workers": 0,
+                    "pipeline_enabled": False,
+                    "bounded_extract_batches": 0,
+                    "bounded_match_batches": 0,
+                }
+            ),
         }
         _write_dictionary_artifacts(
             destination,
