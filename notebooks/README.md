@@ -31,3 +31,6 @@ Each workflow displays the source, checksum/cache status, preflight result, run 
 
 - [`14_conceptnet_100k_recursive_grammar_l4_colab.ipynb`](14_conceptnet_100k_recursive_grammar_l4_colab.ipynb) — one-click full benchmark for the recursive lossless graph dictionary on ConceptNet-100k with strict L4/CUDA preflight, Drive-backed NEW/RESUME checkpoints, exact final-to-level0 round-trip validation, compact-binary compression baselines, and multiscale grammar-induced graph/graphex diagnostics.
 - Open directly in Colab: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/recursive-lossless-graph-dictionary-v2/notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb
+
+- [`15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb`](15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb) — same ConceptNet-100k recursive lossless experiment with a single bounded CPU budget split between ego extraction threads and spawned VF2 matching processes; NEW/RESUME on Drive and optional per-level full-scan speedup comparison against notebook 14.
+- Open directly in Colab: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/recursive-lossless-graph-dictionary-v2/notebooks/15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb
