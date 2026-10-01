@@ -173,3 +173,30 @@ def test_interface_variant_ignores_external_edge_multiplicity(tmp_path):
     assert report["interface_variants"] == 1
     assert report["port_edge_records"] == 3
     assert decode_grammar(archive) == (7, edges)
+
+
+def test_relation_subset_keeps_full_graph_exact(tmp_path):
+    edges = (
+        EdgeRecord(0, 0, 1, "RelatedTo", 1.0),
+        EdgeRecord(1, 1, 2, "RelatedTo", 2.0),
+        EdgeRecord(2, 0, 2, "IsA", 3.0),
+        EdgeRecord(3, 2, 3, "UsedFor", 4.0),
+    )
+    archive = tmp_path / "relatedto-grammar.zip"
+    report = encode_grammar(
+        4,
+        edges,
+        ((0, 1, 2),),
+        archive,
+        grammar_relations=("RelatedTo",),
+    )
+    assert decode_grammar(archive) == (4, edges)
+    assert report["roundtrip_exact"]
+    assert report["grammar_relations"] == ["RelatedTo"]
+    assert report["grammar_relation_edge_records"] == 2
+    assert report["non_grammar_relation_edge_records"] == 2
+    # Only RelatedTo becomes reusable internal structure. The IsA edge inside
+    # the figure and UsedFor boundary edge stay exact residual corrections.
+    assert report["internal_edge_records"] == 2
+    assert report["port_edge_records"] == 0
+    assert report["residual_edge_records"] == 2
