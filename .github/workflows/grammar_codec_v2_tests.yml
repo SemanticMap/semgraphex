@@ -27,6 +27,8 @@ on:
       - 'tests/test_incremental_dictionary_support.py'
       - 'tests/test_semmap_haken_wishart.py'
       - 'tests/test_semmap_glove_graphex_100k.py'
+      - 'notebooks/13_recursive_lossless_grammar_v2_colab.ipynb'
+      - 'notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb'
       - '.github/workflows/grammar_codec_v2_tests.yml'
   workflow_dispatch:
 
@@ -48,13 +50,17 @@ jobs:
           python - <<'PY'
           import nbformat
           from pathlib import Path
-          path = Path('notebooks/13_recursive_lossless_grammar_v2_colab.ipynb')
-          nb = nbformat.read(path, as_version=4)
-          nbformat.validate(nb)
-          for i, cell in enumerate(nb.cells):
-              if cell.cell_type == 'code':
-                  compile(cell.source, f'{path}:{i}', 'exec')
-          print('validated', path)
+          paths = [
+              Path('notebooks/13_recursive_lossless_grammar_v2_colab.ipynb'),
+              Path('notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb'),
+          ]
+          for path in paths:
+              nb = nbformat.read(path, as_version=4)
+              nbformat.validate(nb)
+              for i, cell in enumerate(nb.cells):
+                  if cell.cell_type == 'code':
+                      compile(cell.source, f'{path}:{i}', 'exec')
+              print('validated', path)
           PY
       - name: Run grammar and integration tests
         run: |
