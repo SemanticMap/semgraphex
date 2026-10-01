@@ -54,6 +54,7 @@ def encode_transition_grammar(
     symbol_types: Mapping[int, str],
     output: str | Path,
     source_adjacency: sparse.spmatrix | None = None,
+    grammar_relations: Sequence[str] | None = None,
 ) -> dict[str, object]:
     records = relation_layers_to_edge_records(relation_layers)
     report = encode_grammar(
@@ -62,6 +63,7 @@ def encode_transition_grammar(
         figure_nodes,
         output,
         node_types=symbol_types,
+        grammar_relations=grammar_relations,
     )
     result = {
         **report,
