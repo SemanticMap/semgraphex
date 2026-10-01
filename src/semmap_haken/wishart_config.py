@@ -203,6 +203,7 @@ class DictionaryOptions:
     max_dictionary_size: int = 20000
     huffman: bool = True
     emit_exact_transition_codec: bool = False
+    grammar_relations: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "DictionaryOptions":
@@ -233,6 +234,10 @@ class DictionaryOptions:
             emit_exact_transition_codec=bool(
                 codec.get("emit_transition_archives", False)
             ),
+            grammar_relations=tuple(
+                str(item)
+                for item in raw.get("grammar_relations", ())
+            ),
         )
         result.validate()
         return result
@@ -254,6 +259,10 @@ class DictionaryOptions:
             raise ValueError("dictionary.max_dictionary_size must be positive")
         if not 0.0 <= self.family_match_jaccard <= 1.0:
             raise ValueError("dictionary.family_match_jaccard must be in [0, 1]")
+        if any(not item for item in self.grammar_relations):
+            raise ValueError("dictionary.grammar_relations entries must be non-empty")
+        if len(set(self.grammar_relations)) != len(self.grammar_relations):
+            raise ValueError("dictionary.grammar_relations entries must be unique")
         if self.selection_objective not in {"mdl_proxy", "grammar_v2_logical"}:
             raise ValueError(
                 "dictionary.selection.objective must be mdl_proxy or "
