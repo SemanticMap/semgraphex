@@ -1,0 +1,92 @@
+name: Grammar exact v2 tests
+
+on:
+  push:
+    branches:
+      - feature/recursive-lossless-graph-dictionary-v2
+  pull_request:
+    paths:
+      - 'src/semmap_haken/grammar_*.py'
+      - 'src/semmap_haken/grammar_benchmark.py'
+      - 'src/semmap_haken/exact_edge_baseline.py'
+      - 'src/semmap_haken/compression_analysis.py'
+      - 'src/semmap_haken/relation_ablation.py'
+      - 'src/semmap_haken/edge_table.py'
+      - 'src/semmap_haken/transition_grammar.py'
+      - 'src/semmap_haken/graph_dictionary.py'
+      - 'src/semmap_haken/wishart_*.py'
+      - 'src/semmap_haken/glove_graphex_100k.py'
+      - 'tests/test_grammar_codec_v2.py'
+      - 'tests/test_exact_edge_baseline.py'
+      - 'tests/test_compression_analysis.py'
+      - 'tests/test_grammar_benchmark.py'
+      - 'tests/test_relation_ablation.py'
+      - 'tests/test_hierarchy_codec.py'
+      - 'tests/test_grammar_cost.py'
+      - 'tests/test_transition_grammar.py'
+      - 'tests/test_recursive_dictionary_model.py'
+      - 'tests/test_multiscale_graph_model.py'
+      - 'tests/test_incremental_dictionary_support.py'
+      - 'tests/test_semmap_haken_wishart.py'
+      - 'tests/test_semmap_glove_graphex_100k.py'
+      - 'notebooks/13_recursive_lossless_grammar_v2_colab.ipynb'
+      - 'notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb'
+      - 'notebooks/15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb'
+      - 'notebooks/16_resume_legacy_cn100k_run_colab.ipynb'
+      - 'notebooks/17_relatedto_grammar_ablation_cn100k_l4_colab.ipynb'
+      - '.github/workflows/grammar_codec_v2_tests.yml'
+  workflow_dispatch:
+
+jobs:
+  grammar-v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c requirements/constraints.txt -e '.[dev,wishart]' nbformat
+      - name: Validate grammar-v2 Colab notebook
+        run: |
+          python - <<'PY'
+          import nbformat
+          from pathlib import Path
+          paths = [
+              Path('notebooks/13_recursive_lossless_grammar_v2_colab.ipynb'),
+              Path('notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb'),
+              Path('notebooks/15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb'),
+              Path('notebooks/16_resume_legacy_cn100k_run_colab.ipynb'),
+              Path('notebooks/17_relatedto_grammar_ablation_cn100k_l4_colab.ipynb'),
+          ]
+          for path in paths:
+              nb = nbformat.read(path, as_version=4)
+              nbformat.validate(nb)
+              for i, cell in enumerate(nb.cells):
+                  if cell.cell_type == 'code':
+                      compile(cell.source, f'{path}:{i}', 'exec')
+              print('validated', path)
+          PY
+      - name: Run grammar and integration tests
+        run: |
+          pytest -q \
+            tests/test_grammar_codec_v2.py \
+            tests/test_exact_edge_baseline.py \
+            tests/test_compression_analysis.py \
+            tests/test_grammar_benchmark.py \
+            tests/test_relation_ablation.py \
+            tests/test_hierarchy_codec.py \
+            tests/test_grammar_cost.py \
+            tests/test_transition_grammar.py \
+            tests/test_recursive_dictionary_model.py \
+            tests/test_multiscale_graph_model.py \
+            tests/test_incremental_dictionary_support.py \
+            tests/test_semmap_glove_graphex_100k.py \
+            tests/test_semmap_haken_wishart.py
+
+      - name: Run deterministic grammar benchmark
+        run: |
+          python -m semmap_haken.grammar_benchmark --repeats 500 --port-edges-per-figure 2

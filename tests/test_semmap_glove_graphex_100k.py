@@ -89,3 +89,23 @@ def test_noncontiguous_membership_rejected(tmp_path):
         pass
     else:
         raise AssertionError("invalid node membership accepted")
+
+
+def test_wishart_is_ranking_prior_not_hard_filter():
+    edges = (
+        EdgeRecord(0, 0, 1, "IsA", 1.0),
+        EdgeRecord(1, 2, 3, "IsA", 1.0),
+    )
+    labels = np.array([0, 1, 2, 3], dtype=np.int32)
+    ranked = discover_pairs(
+        edges, labels, max_figures=8, min_support=2, semantic_prior="ranking"
+    )
+    filtered = discover_pairs(
+        edges, labels, max_figures=8, min_support=2, semantic_prior="filter"
+    )
+    disabled = discover_pairs(
+        edges, labels, max_figures=8, min_support=2, semantic_prior="disabled"
+    )
+    assert len(ranked) == 2
+    assert len(disabled) == 2
+    assert filtered == []

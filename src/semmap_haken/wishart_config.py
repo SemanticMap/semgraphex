@@ -192,14 +192,18 @@ class DictionaryOptions:
 
     enabled: bool = True
     boundary_sensitive: bool = True
-    frequency_scan: Literal["full", "discovery"] = "full"
+    frequency_scan: Literal["full", "discovery", "incremental"] = "full"
     frequency_scan_batch_size: int = 5000
+    frequency_full_rescan_every: int = 4
     min_support: int = 3
     min_mdl_gain_bits: float = 0.0
+    selection_objective: Literal["mdl_proxy", "grammar_v2_logical"] = "mdl_proxy"
     local_improvement: bool = True
     family_match_jaccard: float = 0.5
     max_dictionary_size: int = 20000
     huffman: bool = True
+    emit_exact_transition_codec: bool = False
+    grammar_relations: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "DictionaryOptions":
@@ -209,32 +213,61 @@ class DictionaryOptions:
         limits = raw.get("limits", {})
         if not isinstance(limits, Mapping):
             raise ValueError("dictionary.limits must be a mapping")
+        codec = raw.get("codec", {})
+        if not isinstance(codec, Mapping):
+            raise ValueError("dictionary.codec must be a mapping")
         result = cls(
             enabled=bool(raw.get("enabled", True)),
             boundary_sensitive=bool(raw.get("boundary_sensitive", True)),
             frequency_scan=str(raw.get("frequency_scan", "full")),
             frequency_scan_batch_size=int(raw.get("frequency_scan_batch_size", 5000)),
+            frequency_full_rescan_every=int(
+                raw.get("frequency_full_rescan_every", 4)
+            ),
             min_support=int(raw.get("min_support", 3)),
             min_mdl_gain_bits=float(selection.get("min_gain_bits", 0.0)),
+            selection_objective=str(selection.get("objective", "mdl_proxy")),
             local_improvement=bool(selection.get("local_improvement", True)),
             family_match_jaccard=float(raw.get("family_match_jaccard", 0.5)),
             max_dictionary_size=int(limits.get("max_dictionary_size", 20000)),
             huffman=bool(raw.get("huffman", True)),
+            emit_exact_transition_codec=bool(
+                codec.get("emit_transition_archives", False)
+            ),
+            grammar_relations=tuple(
+                str(item)
+                for item in raw.get("grammar_relations", ())
+            ),
         )
         result.validate()
         return result
 
     def validate(self) -> None:
-        if self.frequency_scan not in {"full", "discovery"}:
-            raise ValueError("dictionary.frequency_scan must be full or discovery")
+        if self.frequency_scan not in {"full", "discovery", "incremental"}:
+            raise ValueError(
+                "dictionary.frequency_scan must be full, discovery or incremental"
+            )
         if self.frequency_scan_batch_size <= 0:
             raise ValueError("dictionary.frequency_scan_batch_size must be positive")
+        if self.frequency_full_rescan_every <= 0:
+            raise ValueError(
+                "dictionary.frequency_full_rescan_every must be positive"
+            )
         if self.min_support <= 0:
             raise ValueError("dictionary.min_support must be positive")
         if self.max_dictionary_size <= 0:
             raise ValueError("dictionary.max_dictionary_size must be positive")
         if not 0.0 <= self.family_match_jaccard <= 1.0:
             raise ValueError("dictionary.family_match_jaccard must be in [0, 1]")
+        if any(not item for item in self.grammar_relations):
+            raise ValueError("dictionary.grammar_relations entries must be non-empty")
+        if len(set(self.grammar_relations)) != len(self.grammar_relations):
+            raise ValueError("dictionary.grammar_relations entries must be unique")
+        if self.selection_objective not in {"mdl_proxy", "grammar_v2_logical"}:
+            raise ValueError(
+                "dictionary.selection.objective must be mdl_proxy or "
+                "grammar_v2_logical"
+            )
 
 
 def load_dictionary_options(path: str | Path) -> DictionaryOptions:

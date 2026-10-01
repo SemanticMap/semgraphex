@@ -47,14 +47,24 @@ been probed in the parent. Only read-only dictionary snapshots enter workers;
 all mutations of the persistent type registry, overlap selection, frequency
 counts and checkpoint state happen in the main process.
 
-Parallel full scan stages only `2 * cpu_workers` batches concurrently, then
-consumes the oldest future. This implements backpressure rather than eager
-scheduling of 100k ego candidates. Worker results contain compact
-`(type_id, prototype_mapping)` tuples instead of complete `GraphType`
-objects. The original center order fixes `candidate_index`, de-duplication
-and type frequencies. The extraction and match pools do not run nested sets
-of `cpu_workers` threads/processes: while spawn matching workers are active,
-the parent extracts each batch with one thread.
+Parallel full scan uses one explicit CPU budget and splits it between
+two pipeline stages:
+
+- read-only CSR ego extraction in a bounded ThreadPoolExecutor;
+- GIL-bound exact VF2 matching in a spawned ProcessPoolExecutor.
+
+The split is deterministic: one-third of the visible budget (at least one)
+is assigned to extraction and the remainder to matching. Examples:
+`4 -> 1+3`, `8 -> 2+6`, `12 -> 4+8`. The sum never exceeds
+`cpu_workers`; there is no nested `N x N` worker fan-out and BLAS remains
+separately bounded.
+
+Extraction prefetch is capped at `2 * extract_workers` batches and matching
+backpressure at at most four batches. Batches are consumed in original center
+order, so `candidate_index`, de-duplication and type frequencies remain
+deterministic. Worker results contain compact `(type_id, prototype_mapping)`
+tuples instead of complete `GraphType` objects. The process pool is spawned
+before extraction threads start, preserving the CUDA-safe spawn contract.
 
 For feature generation, per-batch sparse matrices are assembled by
 `scipy.sparse.vstack` in submitted chunk order. The graphlet RNG remains
@@ -130,3 +140,8 @@ have access to the user's authorized Drive or an actual Colab GPU runtime.
 The hardware probe, CUDA backend metadata, reset-and-resume rehearsal, and
 100k timings must be recorded from a clean GPU Colab session before treating
 this as a measured performance optimization.
+
+
+### Full-scan provenance
+
+Each transition records `dictionary_metrics.full_scan_parallelism` with the effective `cpu_budget`, `extract_workers`, `match_workers`, bounded queue sizes, and whether the pipeline was active. `phase_timing_seconds.full_scan` is also persisted in the transition summary so NEW/RESUME L4 runs can compare wall-clock speedup without changing scientific outputs.

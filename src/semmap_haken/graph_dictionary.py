@@ -20,6 +20,8 @@ class GraphType:
 
     type_id: str
     fingerprint: str
+    shape_id: str
+    interface_variant_id: str
     node_count: int
     edge_count: int
     relation_signature: dict[str, int]
@@ -294,19 +296,38 @@ class GraphDictionary:
         self._representatives: dict[str, EgoCandidate] = {}
         self._by_fingerprint: dict[str, list[str]] = {}
         self._next_id = 1
+        self.shapes: dict[str, dict[str, object]] = {}
+        self.interface_variants: dict[str, dict[str, object]] = {}
+        self._shape_representatives: dict[str, EgoCandidate] = {}
+        self._shape_by_fingerprint: dict[str, list[str]] = {}
+        self._variant_by_key: dict[
+            tuple[str, tuple[tuple[int, str, str, int], ...]], str
+        ] = {}
+        self._next_shape_id = 1
+        self._next_variant_id = 1
         self._candidate_level_counts: dict[tuple[str, int], int] = {}
         self._accepted_level_counts: dict[tuple[str, int], int] = {}
         # Transient LRU: do not pickle NetworkX objects into every checkpoint.
         self._representative_graphs: OrderedDict[str, nx.DiGraph] = OrderedDict()
+        self._shape_graphs: OrderedDict[str, nx.DiGraph] = OrderedDict()
 
     def __getstate__(self) -> dict[str, object]:
         payload = dict(self.__dict__)
         payload.pop("_representative_graphs", None)
+        payload.pop("_shape_graphs", None)
         return payload
 
     def __setstate__(self, state: dict[str, object]) -> None:
         self.__dict__.update(state)
         self._representative_graphs = OrderedDict()
+        self._shape_graphs = OrderedDict()
+        self.shapes = getattr(self, "shapes", {})
+        self.interface_variants = getattr(self, "interface_variants", {})
+        self._shape_representatives = getattr(self, "_shape_representatives", {})
+        self._shape_by_fingerprint = getattr(self, "_shape_by_fingerprint", {})
+        self._variant_by_key = getattr(self, "_variant_by_key", {})
+        self._next_shape_id = getattr(self, "_next_shape_id", 1)
+        self._next_variant_id = getattr(self, "_next_variant_id", 1)
 
     def _representative_graph(self, type_id: str) -> nx.DiGraph:
         if type_id in self._representative_graphs:
@@ -320,6 +341,103 @@ class GraphDictionary:
         if len(self._representative_graphs) > 2048:
             self._representative_graphs.popitem(last=False)
         return graph
+
+    def _shape_graph(self, shape_id: str) -> nx.DiGraph:
+        if shape_id in self._shape_graphs:
+            self._shape_graphs.move_to_end(shape_id)
+            return self._shape_graphs[shape_id]
+        graph = _candidate_graph(
+            self._shape_representatives[shape_id],
+            boundary_sensitive=False,
+        )
+        self._shape_graphs[shape_id] = graph
+        if len(self._shape_graphs) > 2048:
+            self._shape_graphs.popitem(last=False)
+        return graph
+
+    def _resolve_shape_variant(
+        self,
+        candidate: EgoCandidate,
+    ) -> tuple[str, str]:
+        shape_graph = _candidate_graph(candidate, boundary_sensitive=False)
+        shape_fingerprint = candidate_fingerprint(
+            candidate,
+            boundary_sensitive=False,
+            graph=shape_graph,
+        )
+        shape_id: str | None = None
+        mapping: dict[int, int] | None = None
+        for candidate_shape_id in self._shape_by_fingerprint.get(
+            shape_fingerprint, []
+        ):
+            representative = self._shape_representatives[candidate_shape_id]
+            matched = _isomorphism_mapping(
+                representative,
+                candidate,
+                boundary_sensitive=False,
+                left_graph=self._shape_graph(candidate_shape_id),
+                right_graph=shape_graph,
+            )
+            if matched is not None:
+                shape_id = candidate_shape_id
+                mapping = matched
+                break
+
+        if shape_id is None:
+            shape_id = f"GS_{self._next_shape_id:06d}"
+            self._next_shape_id += 1
+            mapping = {
+                index: index
+                for index in range(int(candidate.adjacency.shape[0]))
+            }
+            self.shapes[shape_id] = {
+                "shape_id": shape_id,
+                "fingerprint": shape_fingerprint,
+                "prototype": _prototype_payload(
+                    candidate,
+                    boundary_sensitive=False,
+                    graph=shape_graph,
+                ),
+                "child_types": [
+                    item for item in candidate.node_types if item
+                ],
+            }
+            self._shape_representatives[shape_id] = candidate
+            self._shape_by_fingerprint.setdefault(
+                shape_fingerprint, []
+            ).append(shape_id)
+
+        assert mapping is not None
+        candidate_to_shape = {
+            int(candidate_node): int(shape_node)
+            for shape_node, candidate_node in mapping.items()
+        }
+        canonical_boundary = tuple(
+            sorted(
+                (
+                    candidate_to_shape[int(node)],
+                    str(relation),
+                    str(direction),
+                    int(count),
+                )
+                for node, relation, direction, count
+                in candidate.boundary_signature
+            )
+        )
+        variant_key = (shape_id, canonical_boundary)
+        variant_id = self._variant_by_key.get(variant_key)
+        if variant_id is None:
+            variant_id = f"IV_{self._next_variant_id:06d}"
+            self._next_variant_id += 1
+            self._variant_by_key[variant_key] = variant_id
+            self.interface_variants[variant_id] = {
+                "variant_id": variant_id,
+                "shape_id": shape_id,
+                "boundary_signature": [
+                    list(item) for item in canonical_boundary
+                ],
+            }
+        return shape_id, variant_id
 
     def resolve_or_create(
         self,
@@ -358,10 +476,13 @@ class GraphDictionary:
 
         type_id = f"GT_{self._next_id:06d}"
         self._next_id += 1
+        shape_id, interface_variant_id = self._resolve_shape_variant(candidate)
         child_types = tuple(item for item in candidate.node_types if item)
         graph_type = GraphType(
             type_id=type_id,
             fingerprint=fingerprint,
+            shape_id=shape_id,
+            interface_variant_id=interface_variant_id,
             node_count=int(candidate.adjacency.shape[0]),
             edge_count=int(candidate.adjacency.nnz),
             relation_signature=_relation_signature(candidate),
@@ -474,8 +595,28 @@ class GraphDictionary:
             ),
             encoding="utf-8",
         )
+        (target / "internal_shapes.jsonl").write_text(
+            "".join(
+                json.dumps(self.shapes[shape_id], sort_keys=True) + "\n"
+                for shape_id in sorted(self.shapes)
+            ),
+            encoding="utf-8",
+        )
+        (target / "interface_variants.jsonl").write_text(
+            "".join(
+                json.dumps(self.interface_variants[variant_id], sort_keys=True)
+                + "\n"
+                for variant_id in sorted(self.interface_variants)
+            ),
+            encoding="utf-8",
+        )
         stats = {
             "dictionary_size": len(self.types),
+            "internal_shape_count": len(self.shapes),
+            "interface_variant_count": len(self.interface_variants),
+            "shape_reuse_ratio": (
+                len(self.types) / len(self.shapes) if self.shapes else 0.0
+            ),
             "candidate_occurrences": int(
                 sum(item.candidate_frequency for item in self.types.values())
             ),

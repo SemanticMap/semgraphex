@@ -12,6 +12,7 @@ from semmap_haken.graph_mdl import MdlOccurrence, build_canonical_huffman_codes,
 from semmap_haken.wishart_cluster import wishart_cluster
 from semmap_haken.wishart_metrics import (
     EgoCandidate,
+    extract_ego_candidates,
     relation_js_neighbors,
     typed_wl_features,
 )
@@ -156,6 +157,33 @@ def test_graph_dictionary_deduplicates_isomorphic_typed_candidates() -> None:
     second = dictionary.resolve_or_create(b, level=0)
     assert first.type_id == second.type_id
     assert len(dictionary.types) == 1
+
+
+def test_graph_dictionary_factors_same_shape_across_interface_variants() -> None:
+    adjacency = _layer([(0, 1), (1, 0), (1, 2), (2, 1)])
+    a = EgoCandidate(
+        0,
+        np.arange(3),
+        adjacency,
+        {"IsA": adjacency},
+        boundary_signature=((0, "IsA", "out", 1),),
+    )
+    b = EgoCandidate(
+        1,
+        np.arange(3),
+        adjacency,
+        {"IsA": adjacency},
+        boundary_signature=((2, "UsedFor", "in", 2),),
+    )
+    dictionary = GraphDictionary(boundary_sensitive=True)
+    first = dictionary.resolve_or_create(a, level=0)
+    second = dictionary.resolve_or_create(b, level=0)
+
+    assert first.type_id != second.type_id
+    assert first.shape_id == second.shape_id
+    assert first.interface_variant_id != second.interface_variant_id
+    assert len(dictionary.shapes) == 1
+    assert len(dictionary.interface_variants) == 2
 
 
 def test_graph_dictionary_separates_relation_and_recursive_symbol_types() -> None:
@@ -311,6 +339,7 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
         frequency_scan="full",
         frequency_scan_batch_size=3,
         min_support=2,
+        emit_exact_transition_codec=True,
     )
 
     output = tmp_path / "dictionary-run"
@@ -341,3 +370,277 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
     ]
     assert occurrences
     assert all(item["prototype_to_fine_nodes"] for item in occurrences)
+
+    grammar_archive = transition / "grammar_exact_v2.zip"
+    assert grammar_archive.is_file()
+    from semmap_haken.grammar_codec import decode_grammar
+    from semmap_haken.transition_grammar import relation_layers_to_edge_records
+    from semmap_haken.wishart_metrics import relation_layers_from_prepared
+
+    expected_records = relation_layers_to_edge_records(
+        relation_layers_from_prepared(graph, directed=False)
+    )
+    assert decode_grammar(grammar_archive) == (n, expected_records)
+    assert metrics["exact_transition_codec"]["roundtrip_exact"]
+
+    hierarchy_archive = output / "hierarchy_exact_v1.zip"
+    assert hierarchy_archive.is_file()
+    from semmap_haken.hierarchy_codec import decode_hierarchy
+
+    assert decode_hierarchy(hierarchy_archive) == (n, expected_records)
+    hierarchy_report = json.loads(
+        (output / "hierarchy_codec_report.json").read_text(encoding="utf-8")
+    )
+    assert hierarchy_report["roundtrip_exact"]
+    assert hierarchy_report["baseline_level0_binary_bundle_bytes"] > 0
+    analysis_path = output / "compression_analysis.json"
+    assert analysis_path.is_file()
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert analysis["summary"]["hierarchy_roundtrip_exact"] is True
+    published = json.loads(
+        (output / "hierarchy.json").read_text(encoding="utf-8")
+    )
+    assert published["compression_analysis"]["artifact"] == (
+        "compression_analysis.json"
+    )
+    assert published["transitions"]
+    timing = published["transitions"][0]["phase_timing_seconds"]
+    assert timing["full_scan"] >= 0.0
+    parallelism = published["transitions"][0]["dictionary_metrics"][
+        "full_scan_parallelism"
+    ]
+    assert parallelism["cpu_budget"] >= 1
+    assert (
+        parallelism["extract_workers"] + parallelism["match_workers"]
+        <= parallelism["cpu_budget"]
+    )
+
+
+def test_incremental_prefill_matches_full_frequency_census() -> None:
+    from semmap_haken.graph_dictionary import GraphDictionary
+    from semmap_haken.wishart_config import DictionaryOptions, WishartOptions
+    from semmap_haken.wishart_hierarchy import _discover_types, _scan_known_types
+
+    n = 7
+    rows = []
+    cols = []
+    for node in range(n - 1):
+        rows.extend((node, node + 1))
+        cols.extend((node + 1, node))
+    adjacency = sparse.csr_matrix(
+        (np.ones(len(rows)), (rows, cols)),
+        shape=(n, n),
+        dtype=float,
+    )
+    relation_layers = {"r": adjacency.copy()}
+    candidates = extract_ego_candidates(
+        adjacency,
+        relation_layers,
+        radius=1,
+        max_ego_nodes=3,
+        candidate_limit=n,
+        seed=3,
+        workers=1,
+    )
+    dictionary = GraphDictionary(boundary_sensitive=False)
+    discovery_type_ids, _ = _discover_types(
+        candidates, dictionary, level=0, cpu_workers=1
+    )
+    wishart_options = WishartOptions(
+        radius=1,
+        max_ego_nodes=3,
+        candidate_limit=n,
+        k_neighbors=2,
+        min_cluster_size=1,
+        min_cluster_mass=1.0,
+        slow_modes=2,
+        mfpt_pairs=2,
+        mfpt_walks_per_pair=1,
+        mfpt_max_steps=10,
+        betweenness_samples=2,
+        clustering_samples=2,
+        distance_samples=2,
+    )
+    dictionary_options = DictionaryOptions(
+        boundary_sensitive=False,
+        frequency_scan="full",
+        frequency_scan_batch_size=2,
+        min_support=1,
+    )
+    full_rows, full_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=0,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=dictionary_options,
+        cpu_workers=1,
+    )
+    assert full_rows
+
+    incremental_rows, incremental_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=1,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=DictionaryOptions(
+            boundary_sensitive=False,
+            frequency_scan="incremental",
+            frequency_scan_batch_size=2,
+            min_support=1,
+        ),
+        cpu_workers=1,
+        prefilled_occurrences=full_rows[:2],
+    )
+
+    assert incremental_counts == full_counts
+    assert {
+        (row.center, row.nodes, row.dictionary_type_id)
+        for row in incremental_rows
+    } == {
+        (row.center, row.nodes, row.dictionary_type_id)
+        for row in full_rows
+    }
+
+
+def test_full_scan_cpu_budget_split() -> None:
+    from semmap_haken.wishart_hierarchy import _split_full_scan_workers
+
+    assert _split_full_scan_workers(1) == (1, 0)
+    assert _split_full_scan_workers(2) == (1, 1)
+    assert _split_full_scan_workers(4) == (1, 3)
+    assert _split_full_scan_workers(8) == (2, 6)
+    assert _split_full_scan_workers(12) == (4, 8)
+
+
+def test_parallel_full_scan_pipeline_matches_serial() -> None:
+    from semmap_haken.graph_dictionary import GraphDictionary
+    from semmap_haken.wishart_config import DictionaryOptions, WishartOptions
+    from semmap_haken.wishart_hierarchy import _discover_types, _scan_known_types
+
+    n = 12
+    rows: list[int] = []
+    cols: list[int] = []
+    for node in range(n - 1):
+        rows.extend((node, node + 1))
+        cols.extend((node + 1, node))
+    # Add deterministic shortcuts so batches contain non-identical egos.
+    for left, right in ((0, 3), (2, 6), (5, 9), (8, 11)):
+        rows.extend((left, right))
+        cols.extend((right, left))
+    adjacency = sparse.csr_matrix(
+        (np.ones(len(rows)), (rows, cols)),
+        shape=(n, n),
+        dtype=float,
+    )
+    relation_layers = {"r": adjacency.copy()}
+    candidates = extract_ego_candidates(
+        adjacency,
+        relation_layers,
+        radius=1,
+        max_ego_nodes=6,
+        candidate_limit=n,
+        seed=17,
+        workers=1,
+    )
+    dictionary = GraphDictionary(boundary_sensitive=False)
+    discovery_type_ids, _ = _discover_types(
+        candidates,
+        dictionary,
+        level=0,
+        cpu_workers=1,
+    )
+    wishart_options = WishartOptions(
+        radius=1,
+        max_ego_nodes=6,
+        candidate_limit=n,
+        k_neighbors=2,
+        min_cluster_size=1,
+        min_cluster_mass=1.0,
+        slow_modes=2,
+        mfpt_pairs=2,
+        mfpt_walks_per_pair=1,
+        mfpt_max_steps=10,
+        betweenness_samples=2,
+        clustering_samples=2,
+        distance_samples=2,
+    )
+    dictionary_options = DictionaryOptions(
+        boundary_sensitive=False,
+        frequency_scan="full",
+        frequency_scan_batch_size=2,
+        min_support=1,
+    )
+
+    serial_rows, serial_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=0,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=dictionary_options,
+        cpu_workers=1,
+    )
+    parallel_rows, parallel_counts = _scan_known_types(
+        adjacency,
+        relation_layers,
+        dictionary,
+        level=0,
+        discovery_candidates=candidates,
+        discovery_type_ids=discovery_type_ids,
+        symbol_types={},
+        wishart_options=wishart_options,
+        dictionary_options=dictionary_options,
+        cpu_workers=4,
+    )
+
+    assert parallel_counts == serial_counts
+    assert parallel_rows == serial_rows
+
+
+def test_relatedto_discovery_view_preserves_full_source_layers() -> None:
+    from semmap_haken.wishart_hierarchy import _grammar_discovery_view
+
+    related = sparse.csr_matrix(
+        ([1.0, 1.0], ([0, 1], [1, 0])),
+        shape=(3, 3),
+    )
+    isa = sparse.csr_matrix(
+        ([1.0, 1.0], ([1, 2], [2, 1])),
+        shape=(3, 3),
+    )
+    source = {"RelatedTo": related, "IsA": isa}
+    discovery, selected = _grammar_discovery_view(
+        source,
+        ("RelatedTo",),
+        shape=(3, 3),
+    )
+    assert set(selected) == {"RelatedTo"}
+    assert discovery.nnz == related.nnz
+    assert (discovery != related).nnz == 0
+    # Source layers are not mutated or dropped: lossless encoding still sees
+    # all relations after discovery.
+    assert set(source) == {"RelatedTo", "IsA"}
+    assert source["IsA"].nnz == 2
+
+
+def test_dictionary_options_parse_grammar_relations() -> None:
+    from semmap_haken.wishart_config import DictionaryOptions
+
+    options = DictionaryOptions.from_mapping(
+        {
+            "enabled": True,
+            "grammar_relations": ["RelatedTo"],
+        }
+    )
+    assert options.grammar_relations == ("RelatedTo",)

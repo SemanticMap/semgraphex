@@ -266,32 +266,75 @@ def huffman_symbols(data, bits, n, codes):
     return result
 
 
-def discover_pairs(records, labels, max_figures=4096, min_support=5):
-    """Exact two-port directed relation motifs, restricted by GloVe class.
+def discover_pairs(
+    records,
+    labels,
+    max_figures=4096,
+    min_support=5,
+    semantic_prior="ranking",
+):
+    """Exact two-port motifs with an optional GloVe/Wishart semantic prior.
 
-    This is a bounded structural dictionary baseline; it does NOT claim to
-    discover all larger graph grammars or perform arbitrary VF2 matching.
+    ranking (default) never forbids a structural motif: Wishart agreement
+    only breaks ties between equally useful shapes. filter reproduces the
+    legacy same-cluster restriction. disabled ignores Wishart labels.
     """
+    if semantic_prior not in {"ranking", "filter", "disabled"}:
+        raise ValueError("semantic_prior must be ranking, filter or disabled")
     pairs = defaultdict(list)
+    pair_semantic = {}
     loop_vertices = {e.source for e in records if e.source == e.target}
     for e in records:
-        if (e.source != e.target and e.source not in loop_vertices
-                and e.target not in loop_vertices and labels[e.source] >= 0
-                and labels[e.source] == labels[e.target]):
-            key = (min(e.source, e.target), max(e.source, e.target))
-            pairs[key].append(e)
+        if e.source == e.target or e.source in loop_vertices or e.target in loop_vertices:
+            continue
+        same_family = (
+            int(labels[e.source]) >= 0
+            and int(labels[e.source]) == int(labels[e.target])
+        )
+        if semantic_prior == "filter" and not same_family:
+            continue
+        key = (min(e.source, e.target), max(e.source, e.target))
+        pairs[key].append(e)
+        pair_semantic[key] = bool(same_family)
+
     groups = defaultdict(list)
+    semantic_support = Counter()
     for (u, v), edges in pairs.items():
         shape = tuple(sorted((int(e.source == v), e.relation) for e in edges))
         groups[shape].append((u, v))
-    allowed = sorted((shape for shape, occ in groups.items() if len(occ) >= min_support),
-                     key=lambda s: (-len(groups[s]) * len(s), s))
-    selected = []; used = set()
+        if pair_semantic[(u, v)]:
+            semantic_support[shape] += 1
+
+    allowed = [shape for shape, occ in groups.items() if len(occ) >= min_support]
+    if semantic_prior == "ranking":
+        allowed.sort(
+            key=lambda shape: (
+                -len(groups[shape]) * len(shape),
+                -semantic_support[shape],
+                shape,
+            )
+        )
+    else:
+        allowed.sort(key=lambda shape: (-len(groups[shape]) * len(shape), shape))
+
+    selected = []
+    used = set()
     for shape in allowed:
-        for u, v in sorted(groups[shape]):
+        occurrences = sorted(
+            groups[shape],
+            key=lambda pair: (
+                -int(pair_semantic.get(pair, False))
+                if semantic_prior == "ranking" else 0,
+                pair,
+            ),
+        )
+        for u, v in occurrences:
             if u not in used and v not in used:
-                selected.append((u, v, shape)); used.add(u); used.add(v)
-                if len(selected) == max_figures: return selected
+                selected.append((u, v, shape))
+                used.add(u)
+                used.add(v)
+                if len(selected) == max_figures:
+                    return selected
     return selected
 
 
@@ -528,7 +571,8 @@ def run_identity(source_level, glove, args):
             "source": {x.relative_to(level).as_posix(): sha(x) for x in paths},
             "glove_sha256": sha(glove), "expected_nodes": args.expected_nodes,
             "k": args.k, "batch": args.batch, "max_figures": args.max_figures,
-            "min_support": args.min_support}
+            "min_support": args.min_support,
+            "semantic_pair_mode": args.semantic_pair_mode}
 
 
 STAGE_FILES = {
@@ -585,6 +629,12 @@ def cli(argv=None):
     parser.add_argument("--max-figures", type=int, default=4096)
     parser.add_argument("--checkpoint-drive", type=Path, default=None)
     parser.add_argument("--min-support", type=int, default=5)
+    parser.add_argument(
+        "--semantic-pair-mode",
+        choices=("ranking", "filter", "disabled"),
+        default="ranking",
+        help="Use GloVe/Wishart as ranking prior, legacy hard filter, or ignore it.",
+    )
     args = parser.parse_args(argv)
     run = args.run; run.mkdir(parents=True, exist_ok=True)
     identity = run_identity(args.source_level, args.glove, args)
@@ -626,7 +676,13 @@ def cli(argv=None):
             write_json(run / "block_model.json", model)
             connectors = connector_profiles(records, labels)
             write_json(run / "connectors.json", connectors)
-            figures = discover_pairs(records, labels, args.max_figures, args.min_support)
+            figures = discover_pairs(
+                records,
+                labels,
+                args.max_figures,
+                args.min_support,
+                semantic_prior=args.semantic_pair_mode,
+            )
             options = (0, min(1024, len(figures)), len(figures))
             best = None
             for cap in sorted(set(options)):
