@@ -396,6 +396,7 @@ def _canonicalize_shapes(
     owner: Mapping[int, int],
     relation_to_id: Mapping[str, int],
     node_types: Mapping[int, str],
+    grammar_relations: frozenset[str] | None = None,
 ) -> tuple[
     tuple[InternalShape, ...],
     tuple[InterfaceVariant, ...],
@@ -423,8 +424,19 @@ def _canonicalize_shapes(
             edge for edge in records
             if owner.get(int(edge.source)) == occurrence_id
             and owner.get(int(edge.target)) == occurrence_id
+            and (
+                grammar_relations is None
+                or str(edge.relation) in grammar_relations
+            )
         ]
-        external = _external_for_figure(occurrence_id, owner, records)
+        external = [
+            edge
+            for edge in _external_for_figure(occurrence_id, owner, records)
+            if (
+                grammar_relations is None
+                or str(edge.relation) in grammar_relations
+            )
+        ]
         graph = _shape_graph(nodes, internal, node_types)
         signature = _shape_signature(graph, internal)
 
@@ -578,6 +590,7 @@ def encode_grammar(
     output: str | Path,
     *,
     node_types: Mapping[int, str] | None = None,
+    grammar_relations: Iterable[str] | None = None,
 ) -> dict[str, object]:
     """Encode a graph exactly using reusable shapes, ports, and residuals."""
     codec_started = time.perf_counter()
@@ -585,11 +598,25 @@ def encode_grammar(
     _validate_records(vertex_count, records)
     groups = _validate_figures(vertex_count, figures)
     node_types = dict(node_types or {})
+    grammar_relation_set = (
+        None
+        if grammar_relations is None
+        else frozenset(str(item) for item in grammar_relations)
+    )
+    if grammar_relation_set is not None and not grammar_relation_set:
+        raise ValueError("grammar_relations must be non-empty when specified")
 
     table = EdgeTable.from_records(records)
     table.validate(vertex_count=vertex_count)
     relations = table.relations
     relation_to_id = {relation: index for index, relation in enumerate(relations)}
+    if grammar_relation_set is not None:
+        unknown_relations = grammar_relation_set.difference(relations)
+        if unknown_relations:
+            raise ValueError(
+                "grammar_relations not present in source graph: "
+                + ", ".join(sorted(unknown_relations))
+            )
 
     owner: dict[int, int] = {}
     for occurrence_id, nodes in enumerate(groups):
@@ -609,6 +636,7 @@ def encode_grammar(
         owner,
         relation_to_id,
         node_types,
+        grammar_relation_set,
     )
     canonicalization_seconds = time.perf_counter() - canonicalization_started
 
@@ -619,6 +647,20 @@ def encode_grammar(
 
     for edge in records:
         if int(edge.edge_id) in internal_ids:
+            continue
+        if (
+            grammar_relation_set is not None
+            and str(edge.relation) not in grammar_relation_set
+        ):
+            residual_payload.append(
+                ResidualEdge(
+                    edge_id=int(edge.edge_id),
+                    source=int(edge.source),
+                    target=int(edge.target),
+                    relation_id=relation_to_id[str(edge.relation)],
+                    weight_bits=float_to_bits(float(edge.weight)),
+                )
+            )
             continue
         source_owner = owner.get(int(edge.source))
         target_owner = owner.get(int(edge.target))
@@ -682,6 +724,12 @@ def encode_grammar(
         "vertex_count": int(vertex_count),
         "edge_count": len(records),
         "relations": list(relations),
+        "grammar_relations": (
+            list(sorted(grammar_relation_set))
+            if grammar_relation_set is not None
+            else list(relations)
+        ),
+        "non_grammar_relations_as_residual": grammar_relation_set is not None,
         "record_order": record_order,
         "stream_layout": COMPACT_STREAM_LAYOUT,
         "shape_count": len(shapes),
