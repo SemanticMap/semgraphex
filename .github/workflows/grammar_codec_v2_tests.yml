@@ -10,6 +10,7 @@ on:
       - 'src/semmap_haken/grammar_benchmark.py'
       - 'src/semmap_haken/exact_edge_baseline.py'
       - 'src/semmap_haken/compression_analysis.py'
+      - 'src/semmap_haken/relation_ablation.py'
       - 'src/semmap_haken/edge_table.py'
       - 'src/semmap_haken/transition_grammar.py'
       - 'src/semmap_haken/graph_dictionary.py'
@@ -19,6 +20,7 @@ on:
       - 'tests/test_exact_edge_baseline.py'
       - 'tests/test_compression_analysis.py'
       - 'tests/test_grammar_benchmark.py'
+      - 'tests/test_relation_ablation.py'
       - 'tests/test_hierarchy_codec.py'
       - 'tests/test_grammar_cost.py'
       - 'tests/test_transition_grammar.py'
@@ -73,6 +75,7 @@ jobs:
             tests/test_exact_edge_baseline.py \
             tests/test_compression_analysis.py \
             tests/test_grammar_benchmark.py \
+            tests/test_relation_ablation.py \
             tests/test_hierarchy_codec.py \
             tests/test_grammar_cost.py \
             tests/test_transition_grammar.py \
