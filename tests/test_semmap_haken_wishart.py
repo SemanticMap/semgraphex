@@ -606,3 +606,41 @@ def test_parallel_full_scan_pipeline_matches_serial() -> None:
 
     assert parallel_counts == serial_counts
     assert parallel_rows == serial_rows
+
+
+def test_relatedto_discovery_view_preserves_full_source_layers() -> None:
+    from semmap_haken.wishart_hierarchy import _grammar_discovery_view
+
+    related = sparse.csr_matrix(
+        ([1.0, 1.0], ([0, 1], [1, 0])),
+        shape=(3, 3),
+    )
+    isa = sparse.csr_matrix(
+        ([1.0, 1.0], ([1, 2], [2, 1])),
+        shape=(3, 3),
+    )
+    source = {"RelatedTo": related, "IsA": isa}
+    discovery, selected = _grammar_discovery_view(
+        source,
+        ("RelatedTo",),
+        shape=(3, 3),
+    )
+    assert set(selected) == {"RelatedTo"}
+    assert discovery.nnz == related.nnz
+    assert (discovery != related).nnz == 0
+    # Source layers are not mutated or dropped: lossless encoding still sees
+    # all relations after discovery.
+    assert set(source) == {"RelatedTo", "IsA"}
+    assert source["IsA"].nnz == 2
+
+
+def test_dictionary_options_parse_grammar_relations() -> None:
+    from semmap_haken.wishart_config import DictionaryOptions
+
+    options = DictionaryOptions.from_mapping(
+        {
+            "enabled": True,
+            "grammar_relations": ["RelatedTo"],
+        }
+    )
+    assert options.grammar_relations == ("RelatedTo",)
