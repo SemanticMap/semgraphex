@@ -34,3 +34,6 @@ Each workflow displays the source, checksum/cache status, preflight result, run 
 
 - [`15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb`](15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb) — same ConceptNet-100k recursive lossless experiment with a single bounded CPU budget split between ego extraction threads and spawned VF2 matching processes; NEW/RESUME on Drive and optional per-level full-scan speedup comparison against notebook 14.
 - Open directly in Colab: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/recursive-lossless-graph-dictionary-v2/notebooks/15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb
+
+- [`17_relatedto_grammar_ablation_cn100k_l4_colab.ipynb`](17_relatedto_grammar_ablation_cn100k_l4_colab.ipynb) — RelatedTo ablation: retrospective re-encoding of existing `-01`/`-03` accepted occurrences plus clean prospective `RelatedTo`-only and full-graph-with-RelatedTo-grammar runs; excluded relations remain exact residual corrections.
+- Open directly in Colab: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/recursive-lossless-graph-dictionary-v2/notebooks/17_relatedto_grammar_ablation_cn100k_l4_colab.ipynb
