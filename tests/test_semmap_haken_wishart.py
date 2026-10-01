@@ -403,6 +403,17 @@ def test_dictionary_runner_executes_full_scan_and_writes_symbolic_artifacts(
     assert published["compression_analysis"]["artifact"] == (
         "compression_analysis.json"
     )
+    assert published["transitions"]
+    timing = published["transitions"][0]["phase_timing_seconds"]
+    assert timing["full_scan"] >= 0.0
+    parallelism = published["transitions"][0]["dictionary_metrics"][
+        "full_scan_parallelism"
+    ]
+    assert parallelism["cpu_budget"] >= 1
+    assert (
+        parallelism["extract_workers"] + parallelism["match_workers"]
+        <= parallelism["cpu_budget"]
+    )
 
 
 def test_incremental_prefill_matches_full_frequency_census() -> None:
