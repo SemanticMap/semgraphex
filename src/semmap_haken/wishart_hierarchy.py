@@ -164,6 +164,44 @@ def _contract_matrix(
     return coarse
 
 
+
+def _grammar_discovery_view(
+    relation_layers: Mapping[str, sparse.csr_matrix],
+    grammar_relations: Sequence[str],
+    *,
+    shape: tuple[int, int],
+) -> tuple[sparse.csr_matrix, dict[str, sparse.csr_matrix]]:
+    """Return the graph view used for grammar discovery and exact identity.
+
+    Empty grammar_relations preserves the historical all-relation behavior.
+    A non-empty subset changes discovery/MDL only; the source relation layers
+    remain authoritative for lossless transition encoding and contraction.
+    """
+    if not grammar_relations:
+        selected = {
+            str(name): layer.tocsr()
+            for name, layer in relation_layers.items()
+        }
+    else:
+        requested = tuple(str(name) for name in grammar_relations)
+        missing = [name for name in requested if name not in relation_layers]
+        if missing:
+            raise ValueError(
+                "dictionary.grammar_relations missing from current relation layers: "
+                + ", ".join(missing)
+            )
+        selected = {
+            name: relation_layers[name].tocsr()
+            for name in requested
+        }
+    adjacency = sparse.csr_matrix(shape, dtype=np.float64)
+    for layer in selected.values():
+        adjacency = adjacency + layer
+    adjacency.sum_duplicates()
+    adjacency.eliminate_zeros()
+    adjacency.sort_indices()
+    return adjacency.tocsr(), selected
+
 def _contract_relation_layers(
     layers: Mapping[str, sparse.csr_matrix],
     assignment: np.ndarray,
@@ -1127,10 +1165,15 @@ def run_wishart_hierarchy(
             break
 
         dictionary_size_before = len(dictionary.types)
+        discovery_graph, discovery_relation_layers = _grammar_discovery_view(
+            relation_layers,
+            dictionary_options.grammar_relations,
+            shape=current.shape,
+        )
         phase_started = time.perf_counter()
         candidates = extract_ego_candidates(
-            current,
-            relation_layers,
+            discovery_graph,
+            discovery_relation_layers,
             radius=options.radius,
             max_ego_nodes=options.max_ego_nodes,
             candidate_limit=options.candidate_limit,
@@ -1164,8 +1207,8 @@ def run_wishart_hierarchy(
             else incremental_scan_cache
         )
         scanned, full_counts = _scan_known_types(
-            current,
-            relation_layers,
+            discovery_graph,
+            discovery_relation_layers,
             dictionary,
             level=level,
             discovery_candidates=candidates,
@@ -1213,9 +1256,9 @@ def run_wishart_hierarchy(
             counts=full_counts,
             type_info=type_info,
             graph_node_count=current.shape[0],
-            relation_count=len(relation_layers),
+            relation_count=len(discovery_relation_layers),
             edge_record_count=int(
-                sum(layer.nnz for layer in relation_layers.values())
+                sum(layer.nnz for layer in discovery_relation_layers.values())
             ),
             dictionary_options=dictionary_options,
             min_figure_nodes=options.min_figure_nodes,
@@ -1261,6 +1304,17 @@ def run_wishart_hierarchy(
             ),
             "frequency_scan_mode": scan_mode,
             "incremental_reused_centers": scan_reused_centers,
+            "grammar_relations": (
+                list(dictionary_options.grammar_relations)
+                if dictionary_options.grammar_relations
+                else list(sorted(relation_layers))
+            ),
+            "grammar_relation_edge_records": int(
+                sum(layer.nnz for layer in discovery_relation_layers.values())
+            ),
+            "source_relation_edge_records": int(
+                sum(layer.nnz for layer in relation_layers.values())
+            ),
             "frequency_full_rescan_every": (
                 dictionary_options.frequency_full_rescan_every
             ),
@@ -1383,6 +1437,9 @@ def run_wishart_hierarchy(
                 symbol_types=symbol_types,
                 output=transition_dir / "grammar_exact_v2.zip",
                 source_adjacency=current,
+                grammar_relations=(
+                    dictionary_options.grammar_relations or None
+                ),
             )
             dictionary_metrics["exact_transition_codec"] = exact_codec_report
 
