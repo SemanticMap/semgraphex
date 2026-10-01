@@ -25,3 +25,9 @@ Both notebooks default to the committed tiny TSV fixture and set `ALLOW_PRODUCTI
 The active workspace remains local for the run. Drive mounting is an explicit notebook callback, not a core import. If durable storage is requested, [`persist_paths()`](../src/semmap_haken/notebook.py) atomically copies selected light metadata after the run; it does not automatically copy heavy CSR artifacts.
 
 Each workflow displays the source, checksum/cache status, preflight result, run ID, and package-produced artifact paths. The resulting manifest/config/artifacts remain CLI-replayable through [`semmap-haken prepare`](../src/semmap_haken/cli.py).
+
+
+## Recursive lossless graph dictionary — ConceptNet 100k / L4
+
+- [`14_conceptnet_100k_recursive_grammar_l4_colab.ipynb`](14_conceptnet_100k_recursive_grammar_l4_colab.ipynb) — one-click full benchmark for the recursive lossless graph dictionary on ConceptNet-100k with strict L4/CUDA preflight, Drive-backed NEW/RESUME checkpoints, exact final-to-level0 round-trip validation, compact-binary compression baselines, and multiscale grammar-induced graph/graphex diagnostics.
+- Open directly in Colab: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/recursive-lossless-graph-dictionary-v2/notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb
