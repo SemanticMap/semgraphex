@@ -30,6 +30,7 @@ on:
       - 'notebooks/13_recursive_lossless_grammar_v2_colab.ipynb'
       - 'notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb'
       - 'notebooks/15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb'
+      - 'notebooks/16_resume_legacy_cn100k_run_colab.ipynb'
       - '.github/workflows/grammar_codec_v2_tests.yml'
   workflow_dispatch:
 
@@ -55,6 +56,7 @@ jobs:
               Path('notebooks/13_recursive_lossless_grammar_v2_colab.ipynb'),
               Path('notebooks/14_conceptnet_100k_recursive_grammar_l4_colab.ipynb'),
               Path('notebooks/15_conceptnet_100k_l4_bounded_cpu_pipeline_colab.ipynb'),
+              Path('notebooks/16_resume_legacy_cn100k_run_colab.ipynb'),
           ]
           for path in paths:
               nb = nbformat.read(path, as_version=4)
