@@ -149,3 +149,15 @@ def test_fit_produces_per_level_block_kernels(tmp_path: Path, monkeypatch):
         assert (output / level["file"]).is_file()
     first = json.loads((output / data["graphon_family"][0]["file"]).read_text())
     assert len(first["block_mass"]) == 2
+
+def test_pilot_can_limit_source_rows_for_smoke_only(tmp_path: Path):
+    source = tmp_path / "input.tsv"
+    source.write_text(
+        '/a/1\t/r/IsA\t/c/en/a\t/c/en/b\t{"weight": 1}\n'
+        '/a/2\t/r/IsA\t/c/en/b\t/c/en/c\t{"weight": 2}\n', encoding="utf-8")
+    output = tmp_path / "out"
+    assert main(["pilot", "--input", str(source), "--output", str(output),
+                 "--max-rows", "1", "--nulls", "0", "--device", "cpu"]) == 0
+    data = json.loads((output / "summary.json").read_text())
+    assert data["graph"]["edges"] == 1
+    assert data["input"]["max_rows"] == 1

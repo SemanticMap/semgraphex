@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     pilot.add_argument("--input", type=Path, required=True)
     pilot.add_argument("--output", type=Path, required=True)
     pilot.add_argument("--seed", type=int, default=42)
+    pilot.add_argument("--max-rows", type=int, default=None, help="SMOKE ONLY: physical input prefix (biased)")
     pilot.add_argument("--nulls", type=int, default=9)
     pilot.add_argument("--swaps-per-edge", type=int, default=5)
     pilot.add_argument("--workers", default="auto")
@@ -84,11 +85,13 @@ def main(argv: list[str] | None = None) -> int:
     pilot.add_argument("--gpu-batch", type=int, default=250_000)
     pilot.add_argument("--fit", action="store_true", help="Fit three graph-tool SBM variants and nulls")
     args = parser.parse_args(argv)
+    if args.max_rows is not None and args.max_rows < 1:
+        parser.error("max-rows must be positive")
     if args.nulls < 0 or args.swaps_per_edge < 0:
         parser.error("nulls and swaps-per-edge must be nonnegative")
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("output directory must be absent or empty; use a new run name")
-    graph = TypedGraph.from_assertions(stream_assertions(args.input))
+    graph = TypedGraph.from_assertions(stream_assertions(args.input, max_rows=args.max_rows))
     workers = _effective_workers(args.workers, args.nulls, graph.vertex_count, graph.edge_count)
     threads = max(1, ((os.cpu_count() or 1) - 1) // workers)
     seeds = [args.seed + i + 1 for i in range(args.nulls)]
@@ -128,7 +131,8 @@ def main(argv: list[str] | None = None) -> int:
                         node_ids=np.asarray(graph.node_ids), relation_names=np.asarray(graph.relation_names),
                         assertion_ids=np.asarray(graph.assertion_ids))
     result = {
-        "input": {"path": str(args.input), "sha256": _sha256(args.input)},
+        "input": {"path": str(args.input), "sha256": _sha256(args.input), "max_rows": args.max_rows,
+                  "selection_warning": "physical prefix only: not a representative semantic sample" if args.max_rows else None},
         "graph": {"vertices": graph.vertex_count, "edges": graph.edge_count,
                   "relations": list(graph.relation_names)},
         "projection": kernel, "p_sample_0_5": {"vertices": sampled.vertex_count,
