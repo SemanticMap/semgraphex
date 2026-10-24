@@ -42,21 +42,37 @@ def holm_adjust(pvalues: list[float]) -> list[float]:
 
 
 def paired_mrr_interval(a: list[float], b: list[float], *, seed: int,
-                        repetitions: int = 1000) -> dict[str, float]:
-    """Paired query-level bootstrap. Interpretable only conditional on this query set."""
+                        repetitions: int = 1000,
+                        clusters: list[int] | None = None) -> dict[str, float]:
+    """Paired bootstrap, clustered by source node when source IDs are supplied.
+
+    Clustering avoids treating many same-source queries as independent draws.
+    It still estimates uncertainty conditional on the particular observed graph.
+    """
     x, y = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
     if x.size != y.size or not x.size or repetitions < 20:
         raise ValueError("requires aligned nonempty queries and at least 20 bootstrap repetitions")
     if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
         raise ValueError("query ranking metrics must be finite")
     delta = x - y
+    if clusters is None:
+        index = np.arange(len(delta), dtype=np.int64)
+    else:
+        if len(clusters) != len(delta):
+            raise ValueError("cluster labels must match the query count")
+        _, index = np.unique(np.asarray(clusters), return_inverse=True)
+    sums = np.bincount(index, weights=delta)
+    sizes = np.bincount(index)
+    k = len(sums)
     rng = np.random.default_rng(seed)
     bootstrap = np.empty(repetitions)
     for i in range(repetitions):
-        bootstrap[i] = delta[rng.integers(0, len(delta), len(delta))].mean()
+        draws = rng.integers(0, k, size=k)
+        bootstrap[i] = sums[draws].sum() / sizes[draws].sum()
     low, high = np.quantile(bootstrap, [.025, .975])
     return {"mean_difference": float(delta.mean()), "ci_low": float(low),
-            "ci_high": float(high), "queries": int(len(delta))}
+            "ci_high": float(high), "queries": int(len(delta)),
+            "clusters": int(k)}
 
 
 def h1_verdict(
