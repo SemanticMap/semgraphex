@@ -401,6 +401,8 @@ def run_h1(
         p_flat=(null_report["conditional_flat_dc_sbm"]["significance"] or {}).get("p_value"),
         paired_mrr_delta=pair["mean_difference"] if pair is not None else None,
         paired_ci_low=pair["ci_low"] if pair is not None else None,
+        paired_ci_high=pair["ci_high"] if pair is not None else None,
+        control_replicates=config.null_replicates,
         noninferiority_margin=config.noninferiority_margin, alpha=config.alpha,
     )
     report = {
