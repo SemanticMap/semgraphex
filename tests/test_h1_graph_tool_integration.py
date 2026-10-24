@@ -33,8 +33,32 @@ def test_real_graph_tool_end_to_end_artifacts(tmp_path):
     import graph_tool.all  # noqa: F401
     g = planted_typed_graph(seed=10, nested=True, n_groups=4, per_group=9).graph
     report = run_h1(g, tmp_path/"real-h1",
-                    config=H1Config(seed=12, restarts=1, null_replicates=0,
+                    config=H1Config(seed=12, restarts=1, null_replicates=1,
                                     workers=1, negatives=4, bootstrap_repetitions=20))
     assert report["fit_counts"]["real"] == 3
+    assert report["fit_counts"]["null"] == 6
+    assert all(len(info["mdlgain_controls"]) == 1 for info in report["nulls"].values())
     assert report["decision"]["status"] in {"inconclusive", "not_supported"}
     assert (tmp_path/"real-h1"/"COMPLETED").exists()
+
+
+
+def test_scientific_command_line_creates_report(tmp_path):
+    from semmap_haken.hypothesis.h1_cli import main
+    from semmap_haken.conceptnet import Assertion
+    import json
+    g = planted_typed_graph(seed=10, nested=False, n_groups=4, per_group=9).graph
+    data = tmp_path / "input.tsv"
+    data.write_text("".join(
+        f"{assertion}\t{g.relation_names[int(r)]}\t{g.node_ids[int(u)]}\t"
+        f"{g.node_ids[int(v)]}\t" + json.dumps({"weight": float(weight)}) + "\n"
+        for assertion, u, v, r, weight in zip(g.assertion_ids, g.source, g.target,
+                                               g.relation, g.weight)
+    ), encoding="utf-8")
+    output = tmp_path / "cli-h1"
+    assert main(["--input", str(data), "--output", str(output),
+                 "--restarts", "1", "--nulls", "0", "--negatives", "4",
+                 "--bootstrap", "20", "--workers", "1"]) == 0
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report["counts"]["assertions"] == g.edge_count
+    assert report["decision"]["status"] in {"not_supported", "inconclusive"}
