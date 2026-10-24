@@ -73,3 +73,30 @@ def test_resume_rechecks_graph_identity(tmp_path: Path):
     with pytest.raises(ValueError, match="graph|manifest|identity"):
         run_h1(changed, tmp_path/"run", config=cfg, resume=True,
                fit_fn=fake_fit, flat_sampler=fake_flat)
+
+
+
+def test_resume_recomputes_only_failed_fit(tmp_path: Path):
+    graph = fixture_graph()
+    state = {"calls": 0, "fail": True}
+    def flaky_backend(g, *, kind, seed, threads):
+        state["calls"] += 1
+        if state["fail"] and state["calls"] == 3:
+            raise RuntimeError("simulated Colab runtime loss")
+        return {"kind": kind, "seed": seed,
+                "mdl_bits": {"SBM": 10., "DC-SBM": 9., "nested-DC-SBM": 8.}[kind],
+                "partitions": [[i%2 for i in range(g.vertex_count)]],
+                "blocks_by_level": [2]}
+    config = H1Config(seed=1, restarts=2, null_replicates=0, workers=1,
+                      negatives=3, bootstrap_repetitions=20)
+    path = tmp_path/"interrupted"
+    with pytest.raises(RuntimeError, match="simulated"):
+        run_h1(graph, path, config=config, fit_fn=flaky_backend)
+    assert (path / "manifest.json").exists()
+    assert not (path / "COMPLETED").exists()
+    assert len(list((path / "tasks").glob("*.json"))) == 2
+    state["fail"] = False
+    report = run_h1(graph, path, config=config, resume=True, fit_fn=flaky_backend)
+    assert report["fit_counts"]["real"] == 6
+    assert state["calls"] == 7  # two cached, one failed, four retried
+    assert (path / "COMPLETED").exists()
