@@ -25,3 +25,7 @@ Both notebooks default to the committed tiny TSV fixture and set `ALLOW_PRODUCTI
 The active workspace remains local for the run. Drive mounting is an explicit notebook callback, not a core import. If durable storage is requested, [`persist_paths()`](../src/semmap_haken/notebook.py) atomically copies selected light metadata after the run; it does not automatically copy heavy CSR artifacts.
 
 Each workflow displays the source, checksum/cache status, preflight result, run ID, and package-produced artifact paths. The resulting manifest/config/artifacts remain CLI-replayable through [`semmap-haken prepare`](../src/semmap_haken/cli.py).
+
+## H1 — Colab CPU/OpenMP + CUDA
+
+Open [`18_h1_nsbm_nulls_l4_12cpu_colab.ipynb`](18_h1_nsbm_nulls_l4_12cpu_colab.ipynb) to reproduce H1 on a 12-CPU budget (if allocated) with a separate micromamba `graph-tool` environment and CUDA batch block projections. The notebook fixes source SHA, runs genuine graph-tool integration tests, stages raw assertion TSV locally, persists sharded checkpoints to Drive during long experiments, and supports SMOKE/PILOT/FULL plus optional synthetic-calibration runs. **CUDA does not accelerate graph-tool nSBM**, and notebook presence is not a clean Colab Run All verification. See `docs/h1_scientific_protocol.md`.
