@@ -44,3 +44,11 @@ jobs:
           OMP_NUM_THREADS: "2"
           OPENBLAS_NUM_THREADS: "1"
         run: /usr/bin/python3 -m pytest -q tests/test_h1_graph_tool_integration.py
+      - name: Synthetic calibration CLI smoke (not a statistical power claim)
+        env:
+          PYTHONPATH: "src:."
+          OMP_NUM_THREADS: "2"
+          OPENBLAS_NUM_THREADS: "1"
+        run: |
+          /usr/bin/python3 scripts/calibrate_h1_synthetic.py --output /tmp/h1-calibration-smoke --simulations 1 --restarts 1 --nulls 0 --per-group 8 --workers 1
+          /usr/bin/python3 -c "import json; p=json.load(open('/tmp/h1-calibration-smoke/calibration.json')); assert len(p['runs']) == 2"
