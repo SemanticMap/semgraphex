@@ -135,3 +135,15 @@ def test_paired_bootstrap_groups_queries_by_source():
     assert first == second
     assert first["clusters"] == 3
     assert first["ci_low"] <= first["mean_difference"] <= first["ci_high"]
+
+
+
+def test_h1_verdict_does_not_overclaim_underpowered_nulls_or_prediction():
+    from semmap_haken.hypothesis.statistics import h1_verdict
+    base = dict(mdl_gain=40, levels=2, p_configuration=.01, p_flat=.01,
+                paired_mrr_delta=-.02, paired_ci_low=-.03,
+                paired_ci_high=.01, noninferiority_margin=.01)
+    assert h1_verdict(**base, control_replicates=3)["status"] == "inconclusive"
+    assert h1_verdict(**base, control_replicates=99)["status"] == "inconclusive"
+    worse = {**base, "paired_ci_high": -.015}
+    assert h1_verdict(**worse, control_replicates=99)["status"] == "not_supported"
