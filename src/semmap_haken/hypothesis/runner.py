@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 from multiprocessing import get_context
 from typing import Callable, Iterator
 
@@ -148,10 +149,16 @@ def _valid_task(path: Path, partition_path: Path, *, task_key: str) -> bool:
         return False
 
 
+_GRAPH_CACHE: tuple[Path, TypedGraph] | None = None
+
+
 def _fit_task(graph_path: Path, kind: str, seed: int, threads: int,
               task_path: Path, injected_fit=None) -> dict:
-    # In workers, each task reads a named graph from fast local storage via mmap.
-    graph = _load_graph(graph_path)
+    # Cache exactly one memory-mapped graph per process; never retain all nulls.
+    global _GRAPH_CACHE
+    if _GRAPH_CACHE is None or _GRAPH_CACHE[0] != graph_path:
+        _GRAPH_CACHE = (graph_path, _load_graph(graph_path))
+    graph = _GRAPH_CACHE[1]
     try:
         from threadpoolctl import threadpool_limits
         threadpool_limits(1)
@@ -270,8 +277,6 @@ def run_h1(
         workers = 1
         threads = max(1, (os.cpu_count() or 1) // workers)
     kinds = list(MODEL_KINDS)
-    seeds = {kind: [config.seed + j * 100_000 + k for k in range(config.restarts)]
-             for j, kind in enumerate(kinds) for k in []}
     # Use a single explicit, stable enumeration for every graph and null draw.
     def fit_all(where: Path, prefix: str) -> tuple[dict, dict]:
         work = []
@@ -312,35 +317,48 @@ def run_h1(
             seed = config.seed + 1000000 + 10000 * (list(controls).index(ensemble) + 1) + i
             prefix = f"null_{ensemble}_{i:04d}"
             null_file = output / "nulls" / f"{prefix}.json"
-            if null_file.exists():
-                note = json.loads(null_file.read_text(encoding="utf-8"))
-            else:
-                note = None
-            if note is None:
-                sample, diagnostic = (
-                    stub_matching_null(split.train, seed=seed) if ensemble == "configuration"
-                    else generator_flat(split.train, best_flat, seed=seed)
-                )
-                if any(not np.array_equal(a,b)
-                       for a,b in zip(typed_degrees(sample), typed_degrees(split.train))):
-                    raise AssertionError("control changed typed directed degree counts")
-                note = {"seed": seed, **diagnostic, "graph_sha256": _sha_bytes(sample)}
-                _json_atomic(null_file, note)
-            # Regenerate deterministically; disk graph persists only for this replicate.
-            sample, _ = (
-                stub_matching_null(split.train, seed=seed) if ensemble == "configuration"
-                else generator_flat(split.train, best_flat, seed=seed)
-            )
-            if _sha_bytes(sample) != note["graph_sha256"]:
-                raise RuntimeError("null generator is not reproducible for this seed")
-            sample_path = output / "data" / "current_null"
-            _save_graph(sample, sample_path)
+            saved = json.loads(null_file.read_text(encoding="utf-8")) if null_file.exists() else None
+            sample_path = output / "data" / prefix
+            task_paths = [
+                output / "tasks" / f"{_task_key(prefix, kind, k)}.json"
+                for kind in kinds for k in range(config.restarts)
+            ]
+            fully_cached = all(_valid_task(path, path.with_suffix(".npz"),
+                                           task_key=path.stem) for path in task_paths)
+            if not fully_cached:
+                if (sample_path / "ids.json").exists():
+                    sample = _load_graph(sample_path)
+                    if saved is None or _sha_bytes(sample) != saved["graph_sha256"]:
+                        raise ValueError("incomplete null sample checksum/manifest mismatch")
+                else:
+                    # Sample once; retained on interruption, discarded after the
+                    # last successful fit to avoid 2*N full-graph copies.
+                    sample, diagnostic = (
+                        stub_matching_null(split.train, seed=seed) if ensemble == "configuration"
+                        else generator_flat(split.train, best_flat, seed=seed)
+                    )
+                    if any(not np.array_equal(a,b) for a,b in
+                           zip(typed_degrees(sample), typed_degrees(split.train))):
+                        raise AssertionError("control changed typed directed degree counts")
+                    sample_hash = _sha_bytes(sample)
+                    if saved is not None and sample_hash != saved["graph_sha256"]:
+                        raise RuntimeError("null generator does not reproduce checkpointed sample")
+                    if saved is None:
+                        saved = {"seed": seed, **diagnostic, "graph_sha256": sample_hash}
+                        _json_atomic(null_file, saved)
+                    _save_graph(sample, sample_path)
             candidate, _ = fit_all(sample_path, prefix)
             controls[ensemble].append(
                 float(candidate["DC-SBM"][0]["mdl_bits"] -
                       candidate["nested-DC-SBM"][0]["mdl_bits"]))
-            null_diagnostics[ensemble].append(note)
+            null_diagnostics[ensemble].append(saved if saved is not None else
+                                               json.loads(null_file.read_text(encoding="utf-8")))
             n_ran += 3 * config.restarts
+            # Release cached graph before deleting the staging directory.
+            global _GRAPH_CACHE
+            _GRAPH_CACHE = None
+            if sample_path.exists():
+                shutil.rmtree(sample_path)
 
     # Prediction is assessed after choosing the best restart from training MDL.
     prediction = {}
