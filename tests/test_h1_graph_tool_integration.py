@@ -62,3 +62,19 @@ def test_scientific_command_line_creates_report(tmp_path):
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert report["counts"]["assertions"] == g.edge_count
     assert report["decision"]["status"] in {"not_supported", "inconclusive"}
+
+
+
+def test_real_graph_tool_spawn_parallel_restarts(tmp_path):
+    """Exercise real multi-process graph-tool fits; not just mocked CPU tasks."""
+    import graph_tool.all  # noqa: F401
+    graph = planted_typed_graph(seed=17, nested=True, n_groups=4, per_group=9).graph
+    report = run_h1(
+        graph, tmp_path / "parallel",
+        config=H1Config(seed=17, restarts=2, null_replicates=0,
+                        workers=2, negatives=4, bootstrap_repetitions=20),
+    )
+    assert report["fit_counts"]["real"] == 6
+    assert report["resource_budget"]["workers"] == 2
+    assert len(list((tmp_path / "parallel" / "tasks").glob("real-*.json"))) == 6
+    assert (tmp_path / "parallel" / "COMPLETED").exists()
