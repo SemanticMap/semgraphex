@@ -79,6 +79,7 @@ def h1_verdict(
     *, mdl_gain: float, levels: int,
     p_configuration: float | None, p_flat: float | None,
     paired_mrr_delta: float | None, paired_ci_low: float | None,
+    paired_ci_high: float | None = None, control_replicates: int | None = None,
     noninferiority_margin: float = 0.01, alpha: float = .05,
 ) -> dict[str, object]:
     """Falsifiable decision; absent validation is *not* a positive result.
@@ -94,12 +95,22 @@ def h1_verdict(
     if (p_configuration is None or p_flat is None or paired_mrr_delta is None or
         paired_ci_low is None):
         return {"status": "inconclusive", "reason": "missing calibrated controls or independent ranking"}
+    # For two Holm-corrected controls, even the best possible Monte Carlo
+    # result cannot reject if 2/(N+1) >= alpha.
+    if control_replicates is not None and (
+        control_replicates < 1 or 2.0 / (control_replicates + 1) >= alpha
+    ):
+        return {"status": "inconclusive", "reason": "too few null replicates for Holm-adjusted significance"}
     corrected = holm_adjust([p_configuration, p_flat])
     if any(p >= alpha for p in corrected):
         return {"status": "not_supported", "reason": "null ensembles do not reject simple explanations",
                 "holm_pvalues": corrected}
     if paired_ci_low < -noninferiority_margin:
-        return {"status": "not_supported", "reason": "held-out ranking fails noninferiority",
+        if paired_ci_high is None or paired_ci_high >= -noninferiority_margin:
+            return {"status": "inconclusive",
+                    "reason": "held-out ranking uncertainty crosses the noninferiority threshold",
+                    "holm_pvalues": corrected}
+        return {"status": "not_supported", "reason": "held-out ranking is inferior beyond the tolerance",
                 "holm_pvalues": corrected}
     return {"status": "supported", "reason": "MDL, both calibrated controls and held-out ranking agree",
             "holm_pvalues": corrected}
