@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 import shutil
 from multiprocessing import get_context
 from typing import Callable, Iterator
@@ -165,12 +166,15 @@ def _fit_task(graph_path: Path, kind: str, seed: int, threads: int,
     except ImportError:
         pass
     backend = fit_one if injected_fit is None else injected_fit
+    started = time.perf_counter()
     result = backend(graph, kind=kind, seed=seed, threads=threads)
+    elapsed = time.perf_counter() - started
     partitions = [np.asarray(p, dtype=np.int32) for p in result["partitions"]]
     if not partitions or any(p.shape != (graph.vertex_count,) for p in partitions):
         raise RuntimeError("fit backend returned invalid original-vertex partitions")
     data = {k: v for k, v in result.items() if k != "partitions"}
-    data.update(task=task_path.stem, levels=len(partitions))
+    data.update(task=task_path.stem, levels=len(partitions),
+                wall_seconds=float(elapsed))
     if not np.isfinite(float(data["mdl_bits"])):
         raise RuntimeError("non-finite fitted MDL")
     _npz_atomic(task_path.with_suffix(".npz"),
@@ -299,6 +303,7 @@ def run_h1(
                 "range_mdl_bits": [float(min(x["mdl_bits"] for x in info)),
                                    float(max(x["mdl_bits"] for x in info))],
                 "seed": int(best["seed"]),
+                "fit_wall_seconds": [float(x["wall_seconds"]) for x in info],
                 "blocks_by_level": [len(set(x)) for x in partitions],
             }
         return selected, grouped
