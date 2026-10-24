@@ -75,3 +75,7 @@ PYTHONPATH=src:. python scripts/calibrate_h1_synthetic.py \\
 - Модельный нулевой ансамбль условен по единственной оптимальной плоской классификации. Это не полный байесовский бутстрэп неопределённости блоков.
 - Реплицируемость на RuWordNet и независимой сети из корпуса относится к H2/H4, не к этому выпуску.
 - Нет доказательства математического обменного предела; полноразмерный ConceptNet-100k и L4-паритет отдельно не проверены.
+
+## Google Colab notebook (12 CPU target + CUDA)
+
+Launch [`notebooks/18_h1_nsbm_nulls_l4_12cpu_colab.ipynb`](../notebooks/18_h1_nsbm_nulls_l4_12cpu_colab.ipynb) from the dedicated feature branch. The notebook uses a separate `graph-tool-base=2.98` environment for CPU/OpenMP H1 optimization, CPU affinity restricted to at most 12 allocated cores, CUDA/CuPy on the Colab Python kernel for *post-inference finite W-only block projections*, local scratch, and sharded durable snapshots in `/content/drive/MyDrive/SemanticMap/colab/hypothesis/`. A GPU CUDA parity smoke and actual graph-tool integration tests precede the full run. `SMOKE` uses planted synthetic data; `PILOT` and `FULL` require a versioned original 5-column ConceptNet assertion TSV/GZ. Full scientific calibration and ConceptNet scale runs must be actually executed; no result is implied by the notebook or unit tests.
