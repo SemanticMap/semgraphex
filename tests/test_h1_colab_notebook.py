@@ -29,7 +29,7 @@ def test_h1_colab_notebook_preserves_reproducibility_and_honest_devices():
     required = (
         "SOURCE_REVISION", "RUN_PROFILE", "CPU_BUDGET = 12",
         "graph-tool-base=2.98", "semmap_haken.hypothesis.h1_cli",
-        "TASK" if False else "COMPLETED",
+        "COMPLETED",
         "restore_run", "persist_run", "SOURCE_REVISION",
         "device=\"cuda\"", "device=\"cpu\"", "np.isclose",
         "--mode", "--restarts", "--nulls", "--workers",
