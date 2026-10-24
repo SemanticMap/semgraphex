@@ -377,7 +377,8 @@ def run_h1(
     flat_ranks = prediction["DC-SBM"]["test"]["reciprocal_ranks"]
     if nested_ranks and len(nested_ranks) == len(flat_ranks):
         pair = paired_mrr_interval(nested_ranks, flat_ranks, seed=config.seed + 83,
-                                   repetitions=config.bootstrap_repetitions)
+                                   repetitions=config.bootstrap_repetitions,
+                                   clusters=prediction["nested-DC-SBM"]["test"]["query_sources"])
     else:
         pair = None
     null_report = {}
