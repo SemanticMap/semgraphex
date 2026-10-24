@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/semmap_haken/hypothesis/**'
       - 'tests/test_hypothesis_mvp.py'
+      - 'tests/test_h1_science.py'
       - 'pyproject.toml'
       - '.github/workflows/hypothesis_mvp.yml'
 jobs:
@@ -17,7 +18,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -e '.[dev]'
-      - run: python -m pytest -q tests/test_hypothesis_mvp.py
+      - run: python -m pytest -q tests/test_hypothesis_mvp.py tests/test_h1_science.py
       - run: >-
           python -m semmap_haken.hypothesis.cli pilot
           --input tests/fixtures/conceptnet_tiny.tsv
