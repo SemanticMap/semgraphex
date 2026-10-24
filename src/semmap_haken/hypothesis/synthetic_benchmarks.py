@@ -39,8 +39,22 @@ def planted_typed_graph(*, seed: int, nested: bool, n_groups: int = 4,
                                      "/r/IsA" if (i+j) % 2 else "/r/RelatedTo",
                                      f"/c/en/n{i:06}", f"/c/en/n{j:06}",
                                      1., None, None, None))
+    # Preserve all planted vertices, including true degree-zero controls.
+    # from_assertions() would otherwise silently discard isolated vertices.
+    ids = tuple(f"/c/en/n{i:06}" for i in range(n))
+    index = {node: i for i, node in enumerate(ids)}
+    relation_names = ("/r/IsA", "/r/RelatedTo")
+    graph = TypedGraph(
+        ids, relation_names,
+        np.fromiter((index[a.start_uri] for a in out), dtype=np.int64),
+        np.fromiter((index[a.end_uri] for a in out), dtype=np.int64),
+        np.fromiter((0 if a.relation_uri == "/r/IsA" else 1 for a in out),
+                    dtype=np.int32),
+        np.ones(len(out), dtype=np.float64),
+        tuple(a.assertion_uri for a in out),
+    )
     return SyntheticTruth(
-        TypedGraph.from_assertions(out),
+        graph,
         {"seed": seed, "nested": nested, "fine": fine.tolist(),
          "coarse": coarse.tolist(), "n_groups": n_groups, "per_group": per_group},
     )
