@@ -100,3 +100,15 @@ def test_resume_recomputes_only_failed_fit(tmp_path: Path):
     assert report["fit_counts"]["real"] == 6
     assert state["calls"] == 7  # two cached, one failed, four retried
     assert (path / "COMPLETED").exists()
+
+
+
+def test_resource_budget_respects_cpu_and_ram_even_with_explicit_workers(monkeypatch):
+    from semmap_haken.hypothesis import runner
+    monkeypatch.setattr(runner, "_available_cpus", lambda: 8)
+    monkeypatch.setattr(runner, "_available_memory_bytes", lambda: 600_000_000)
+    workers, threads = runner._worker_budget(32, vertices=100, edges=200, tasks=50)
+    assert workers == 1 and threads == 8
+    monkeypatch.setattr(runner, "_available_memory_bytes", lambda: 20_000_000_000)
+    assert runner._worker_budget("auto", vertices=100, edges=200, tasks=50) == (8, 1)
+    assert runner._worker_budget(2, vertices=100, edges=200, tasks=50) == (2, 4)
