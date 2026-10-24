@@ -72,13 +72,46 @@ def score_candidates(
     )
 
 
+def _negative_candidates(
+    rng: np.random.Generator, vertex_count: int, forbidden: set[int], *, count: int,
+) -> np.ndarray:
+    """Draw without O(vertex_count) candidate arrays on ordinary sparse queries.
+
+    Rejection sampling is cheap for sparse semantic graphs; a bounded full scan
+    is used only for unusually dense source/relation neighbourhoods.
+    """
+    needed = min(count, max(0, vertex_count - len(forbidden)))
+    selected: list[int] = []
+    seen: set[int] = set()
+    attempts = 0
+    while len(selected) < needed and attempts < max(256, 12 * needed):
+        batch = rng.integers(0, vertex_count, size=min(256, 4 * (needed - len(selected)) + 32))
+        attempts += len(batch)
+        for candidate in batch:
+            k = int(candidate)
+            if k not in forbidden and k not in seen:
+                selected.append(k)
+                seen.add(k)
+                if len(selected) == needed:
+                    break
+    if len(selected) < needed:
+        # Fallback supports near-complete neighborhoods without unbounded loops.
+        for k in range(vertex_count):
+            if k not in forbidden and k not in seen:
+                selected.append(k)
+                seen.add(k)
+                if len(selected) == needed:
+                    break
+    return np.asarray(selected, dtype=np.int64)
+
+
 def ranking_metrics(
     train: TypedGraph, heldout: TypedGraph, partition: np.ndarray, *,
     seed: int, negatives: int, degree_corrected: bool, known: TypedGraph | None = None,
 ) -> dict[str, object]:
     """Rank each unique true held-out triple against shared sampled unobserved targets.
 
-    \`known\` may be the full graph ONLY to exclude other true statements from
+    'known' may be the full graph ONLY to exclude other true statements from
     the *evaluation pool*. It never enters fitted propensities. Unobserved does
     not imply truly false. All compared models must receive identical seeds
     and the same heldout/query population.
@@ -98,23 +131,22 @@ def ranking_metrics(
             positive[(int(u), int(r))].add(int(v))
     queries = sorted({(int(u), int(r), int(v))
                       for u,v,r in zip(heldout.source, heldout.target, heldout.relation)})
-    all_nodes = np.arange(train.vertex_count)
     reciprocal: list[float] = []
+    query_sources: list[int] = []
     hits = []
     coverage = 0
     for u, r, v in queries:
         if u == v:
             continue
         forbidden = positive[(u, r)] | {u}
-        candidate_pool = np.setdiff1d(all_nodes, np.fromiter(forbidden, dtype=np.int64),
-                                      assume_unique=False)
-        if not candidate_pool.size:
+        other = _negative_candidates(rng, train.vertex_count, forbidden, count=negatives)
+        if not other.size:
             continue
-        other = rng.choice(candidate_pool, size=min(negatives, len(candidate_pool)), replace=False)
         scores = scorer.scores(u, r, np.concatenate(([v], other)))
         rank = 1.0 + float(np.count_nonzero(scores[1:] > scores[0])) + (
             0.5 * float(np.count_nonzero(scores[1:] == scores[0])))
         reciprocal.append(1. / rank)
+        query_sources.append(u)
         hits.append(float(rank <= 10))
         coverage += 1
     return {
@@ -122,6 +154,7 @@ def ranking_metrics(
         "mrr": float(np.mean(reciprocal)) if reciprocal else None,
         "hits_at_10": float(np.mean(hits)) if hits else None,
         "reciprocal_ranks": reciprocal,
+        "query_sources": query_sources,
         "score_kind": "smoothed_block_propensity",
         "negative_sampling": "unobserved target candidates excluding all known positives",
     }
