@@ -110,3 +110,28 @@ def test_synthetic_truth_flat_and_nested_cases():
     assert nested.truth["nested"] is True
     assert len(nested.truth["coarse"]) == 60
     assert len(set(nested.truth["coarse"])) < len(set(nested.truth["fine"]))
+
+
+
+def test_negative_candidates_do_not_enumerate_entire_large_vocabulary(monkeypatch):
+    from semmap_haken.hypothesis import predict
+    def forbid_setdiff(*args, **kwargs):
+        raise AssertionError("O(number-of-nodes) set difference per query is forbidden")
+    monkeypatch.setattr(predict.np, "setdiff1d", forbid_setdiff)
+    rng = np.random.default_rng(17)
+    choice = predict._negative_candidates(rng, 100_000, {0, 2, 3, 4, 5}, count=100)
+    assert len(choice) == 100
+    assert len(set(choice.tolist())) == 100
+    assert not set(choice.tolist()) & {0, 2, 3, 4, 5}
+
+
+def test_paired_bootstrap_groups_queries_by_source():
+    from semmap_haken.hypothesis.statistics import paired_mrr_interval
+    a = [1, .9, .9, .4, .3, .5]
+    b = [.9, .7, .8, .5, .3, .4]
+    clusters = [0, 0, 0, 1, 1, 2]
+    first = paired_mrr_interval(a, b, seed=9, repetitions=100, clusters=clusters)
+    second = paired_mrr_interval(a, b, seed=9, repetitions=100, clusters=clusters)
+    assert first == second
+    assert first["clusters"] == 3
+    assert first["ci_low"] <= first["mean_difference"] <= first["ci_high"]
