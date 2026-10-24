@@ -119,16 +119,45 @@ def _load_graph(path: Path) -> TypedGraph:
     )
 
 
-def _worker_budget(requested: int | str, *, vertices: int, edges: int, tasks: int) -> tuple[int, int]:
+def _available_cpus() -> int:
+    """Use the most restrictive host, affinity and Linux cgroup CPU limits."""
     cpus = max(1, os.cpu_count() or 1)
-    # A graph-tool state can substantially exceed raw input size.
-    estimate = max(250_000_000, (vertices * 128 + edges * 256) * 10)
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            cpus = min(cpus, len(os.sched_getaffinity(0)))
+        except OSError:
+            pass
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            cpus = min(cpus, max(1, int(np.ceil(int(quota) / int(period)))))
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    return max(1, cpus)
+
+
+def _available_memory_bytes() -> int:
+    """Respect container memory.max/current instead of only host RAM."""
     try:
         import psutil
         available = int(psutil.virtual_memory().available)
     except ImportError:
         available = 2_000_000_000
-    max_by_ram = max(1, int(available * .5 // estimate))
+    try:
+        limit = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        if limit != "max":
+            current = int(Path("/sys/fs/cgroup/memory.current").read_text().strip())
+            available = min(available, max(0, int(limit) - current))
+    except (OSError, ValueError):
+        pass
+    return available
+
+
+def _worker_budget(requested: int | str, *, vertices: int, edges: int, tasks: int) -> tuple[int, int]:
+    cpus = _available_cpus()
+    # Conservatively allow several graph-tool state copies beyond edge arrays.
+    estimate = max(250_000_000, (vertices * 128 + edges * 256) * 10)
+    max_by_ram = max(1, int(_available_memory_bytes() * .5 // estimate))
     cap = min(max_by_ram, max(1, tasks), cpus)
     workers = min(cap, cpus if requested == "auto" else requested)
     threads = max(1, cpus // workers)
