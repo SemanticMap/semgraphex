@@ -130,3 +130,22 @@ def test_inference_dependency_message_or_results():
         assert set(result["mdl_bits"]) == {"SBM", "DC-SBM", "nested-DC-SBM"}
         assert all(np.isfinite(list(result["mdl_bits"].values())))
         assert all(len(level) == graph.vertex_count for level in result["partitions"])
+
+def test_fit_produces_per_level_block_kernels(tmp_path: Path, monkeypatch):
+    from semmap_haken.hypothesis import cli
+    source = tmp_path / "typed.tsv"
+    source.write_text(
+        '/a/1\t/r/IsA\t/c/en/a\t/c/en/b\t{"weight": 1}\n'
+        '/a/2\t/r/IsA\t/c/en/b\t/c/en/c\t{"weight": 2}\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "fit_models", lambda graph, **kw: {
+        "mdl_bits": {"SBM": 12., "DC-SBM": 9., "nested-DC-SBM": 8.},
+        "partitions": [[0, 1, 1], [0, 0, 0]], "blocks_by_level": [2, 1]})
+    output = tmp_path / "fit"
+    assert cli.main(["pilot", "--input", str(source), "--output", str(output),
+                     "--nulls", "0", "--device", "cpu", "--fit"]) == 0
+    data = json.loads((output / "summary.json").read_text())
+    assert len(data["graphon_family"]) == 2
+    for level in data["graphon_family"]:
+        assert (output / level["file"]).is_file()
+    first = json.loads((output / data["graphon_family"][0]["file"]).read_text())
+    assert len(first["block_mass"]) == 2

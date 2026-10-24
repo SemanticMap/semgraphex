@@ -106,6 +106,23 @@ def main(argv: list[str] | None = None) -> int:
     else:
         controls = [worker_fn(job) for job in jobs]
     args.output.mkdir(parents=True, exist_ok=True)
+    graphon_family = []
+    if model_result is not None:
+        for level, membership in enumerate(model_result["partitions"]):
+            block_kernel = estimate_block_kernel(
+                graph, np.asarray(membership, dtype=np.int64),
+                device=args.device, batch_size=args.gpu_batch,
+            )
+            file_name = f"graphon_level_{level:03d}.json"
+            (args.output / file_name).write_text(
+                json.dumps(block_kernel, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            graphon_family.append({
+                "level": level, "file": file_name,
+                "blocks": len(block_kernel["block_mass"]),
+                "nonempty_block_pairs": len(block_kernel["entries"]),
+                "backend": block_kernel["backend"],
+            })
     np.savez_compressed(args.output / "typed_graph.npz", source=graph.source,
                         target=graph.target, relation=graph.relation, weight=graph.weight,
                         node_ids=np.asarray(graph.node_ids), relation_names=np.asarray(graph.relation_names),
@@ -119,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         "nulls": {"count": args.nulls, "workers": workers, "threads_per_fit": threads,
                   "replicates": controls},
         "fit": model_result,
+        "graphon_family": graphon_family,
         "null_significance": (
             {"observed_mdl_gain_bits": model_result["mdl_bits"]["DC-SBM"] - model_result["mdl_bits"]["nested-DC-SBM"],
              "null_mdl_gains_bits": [rep["fit"]["DC-SBM"] - rep["fit"]["nested-DC-SBM"] for rep in controls],

@@ -34,7 +34,7 @@ semmap-hypothesis pilot \
   --nulls 99 --workers auto --device auto --fit
 ```
 
-Outputs: `typed_graph.npz` (full assertion IDs and typed edge records), `summary.json` (input SHA-256, hardware choice, worker budget, per-relation controls, optional MDL scores), `COMPLETED` written last. Run with a new output name rather than silently overwriting old evidence. Input is currently materialized in RAM — start with a 10k-node pilot; large 100k/1M memory scaling is **not yet verified**. Use fast Colab-local scratch storage and sync only completed artifacts to Drive.
+Outputs: `typed_graph.npz` (full assertion IDs and typed edge records), optional `graphon_level_*.json` for every inferred nSBM level, `summary.json` (input SHA-256, hardware choice, worker budget, per-relation controls, optional MDL scores), `COMPLETED` written last. Run with a new output name rather than silently overwriting old evidence. Input is currently materialized in RAM — start with a 10k-node pilot; large 100k/1M memory scaling is **not yet verified**. Use fast Colab-local scratch storage and sync only completed artifacts to Drive.
 
 ## Concurrency contract
 
