@@ -6,6 +6,7 @@ weights are deliberately excluded from this H1 topology/multiplicity model.
 from __future__ import annotations
 
 import os
+import inspect
 from typing import Literal
 
 import numpy as np
@@ -64,11 +65,21 @@ def fit_one(
     gt.seed_rng(int(seed))
     gt.openmp_set_num_threads(int(threads))
     g, rel = _graph_tool_graph(graph, gt)
-    args = {"ec": rel, "independent": independent_layers,
-            "deg_corr": kind != "SBM"}
+    # graph-tool 2.59 (Ubuntu 24.04) uses NestedBlockState's
+    # base_type/state_args and LayeredBlockState(layers=True);
+    # graph-tool 2.98+ uses base_state/base_state_args and independent=True.
+    # Avoid silently discarded keyword arguments that change the model family.
+    modern = "base_state" in inspect.signature(gt.minimize_nested_blockmodel_dl).parameters
+    args = {"ec": rel, "deg_corr": kind != "SBM"}
+    args.update({"independent": independent_layers} if modern else
+                {"layers": independent_layers})
     if kind == "nested-DC-SBM":
-        state = gt.minimize_nested_blockmodel_dl(
-            g, base_state=gt.LayeredBlockState, base_state_args=args)
+        if modern:
+            state = gt.minimize_nested_blockmodel_dl(
+                g, base_state=gt.LayeredBlockState, base_state_args=args)
+        else:
+            state = gt.minimize_nested_blockmodel_dl(
+                g, state_args={"base_type": gt.LayeredBlockState, "state_args": args})
         levels = _compact_levels(state.get_bs(), graph.vertex_count)
     else:
         state = gt.minimize_blockmodel_dl(
