@@ -133,7 +133,8 @@ def ranking_metrics(
                       for u,v,r in zip(heldout.source, heldout.target, heldout.relation)})
     reciprocal: list[float] = []
     query_sources: list[int] = []
-    hits = []
+    eligible_hits_10: list[float] = []
+    by_relation: dict[str, dict[str, object]] = {}
     coverage = 0
     for u, r, v in queries:
         if u == v:
@@ -145,16 +146,44 @@ def ranking_metrics(
         scores = scorer.scores(u, r, np.concatenate(([v], other)))
         rank = 1.0 + float(np.count_nonzero(scores[1:] > scores[0])) + (
             0.5 * float(np.count_nonzero(scores[1:] == scores[0])))
-        reciprocal.append(1. / rank)
+        rr = 1. / rank
+        reciprocal.append(rr)
         query_sources.append(u)
-        hits.append(float(rank <= 10))
+        relation_name = train.relation_names[r].rsplit("/", 1)[-1]
+        group = by_relation.setdefault(relation_name, {
+            "queries": 0, "reciprocal_ranks": [], "eligible_hits_at_10": [],
+        })
+        group["queries"] += 1
+        group["reciprocal_ranks"].append(rr)
+        # With <=10 total candidates Hits@10 is identically 1, regardless
+        # of predictive quality. Never report that trivial score.
+        if len(other) >= 10:
+            eligible_hits_10.append(float(rank <= 10))
+            group["eligible_hits_at_10"].append(float(rank <= 10))
         coverage += 1
+    summarized_relations = {
+        name: {
+            "queries": int(group["queries"]),
+            "mrr": float(np.mean(group["reciprocal_ranks"])),
+            "hits_at_10": (
+                float(np.mean(group["eligible_hits_at_10"]))
+                if group["eligible_hits_at_10"] else None
+            ),
+            "hits_at_10_queries": len(group["eligible_hits_at_10"]),
+        }
+        for name, group in sorted(by_relation.items())
+    }
     return {
         "queries": coverage,
         "mrr": float(np.mean(reciprocal)) if reciprocal else None,
-        "hits_at_10": float(np.mean(hits)) if hits else None,
+        "hits_at_10": (
+            float(np.mean(eligible_hits_10)) if eligible_hits_10 else None
+        ),
+        "hits_at_10_queries": len(eligible_hits_10),
+        "by_relation": summarized_relations,
         "reciprocal_ranks": reciprocal,
         "query_sources": query_sources,
         "score_kind": "smoothed_block_propensity",
         "negative_sampling": "unobserved target candidates excluding all known positives",
+        "ranking_scope": "sampled unobserved candidates; not all-entity ranking",
     }

@@ -67,7 +67,8 @@ def test_prediction_scores_and_ranking_are_train_only():
     metric = ranking_metrics(split.train, split.test, partition, seed=5, negatives=4,
                              degree_corrected=True, known=graph)
     assert 0 <= metric["mrr"] <= 1
-    assert 0 <= metric["hits_at_10"] <= 1
+    assert metric["hits_at_10"] is None  # 4 alternatives make Hits@10 vacuous
+    assert metric["hits_at_10_queries"] == 0
     assert metric["queries"] > 0
     assert metric["score_kind"] == "smoothed_block_propensity"
 

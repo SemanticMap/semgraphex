@@ -53,6 +53,7 @@ semmap-wishart = "semmap_haken.wishart_cli:main"
 semmap-wishart-colab = "semmap_haken.wishart_colab_cli:main"
 semmap-hypothesis = "semmap_haken.hypothesis.cli:main"
 semmap-h1 = "semmap_haken.hypothesis.h1_cli:main"
+semmap-conceptnet-10k = "semmap_haken.hypothesis.conceptnet_10k:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]

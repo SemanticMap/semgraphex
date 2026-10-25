@@ -20,6 +20,7 @@ def planted_typed_graph(*, seed: int, nested: bool, n_groups: int = 4,
     if n_groups < 2 or per_group < 2:
         raise ValueError("need at least two groups of at least two nodes")
     rng = np.random.default_rng(seed)
+    relation_rng = np.random.default_rng(np.random.SeedSequence([seed, 20261025]))
     n = n_groups * per_group
     fine = np.repeat(np.arange(n_groups), per_group)
     coarse = fine // 2
@@ -36,7 +37,7 @@ def planted_typed_graph(*, seed: int, nested: bool, n_groups: int = 4,
                 prob = .008
             if rng.random() < prob:
                 out.append(Assertion(f"/a/syn/{len(out)}",
-                                     "/r/IsA" if (i+j) % 2 else "/r/RelatedTo",
+                                     "/r/IsA" if relation_rng.random() < 0.5 else "/r/RelatedTo",
                                      f"/c/en/n{i:06}", f"/c/en/n{j:06}",
                                      1., None, None, None))
     # Preserve all planted vertices, including true degree-zero controls.
@@ -56,5 +57,6 @@ def planted_typed_graph(*, seed: int, nested: bool, n_groups: int = 4,
     return SyntheticTruth(
         graph,
         {"seed": seed, "nested": nested, "fine": fine.tolist(),
-         "coarse": coarse.tolist(), "n_groups": n_groups, "per_group": per_group},
+         "coarse": coarse.tolist(), "n_groups": n_groups, "per_group": per_group,
+         "relation_assignment": "seeded_independent_draw"},
     )
