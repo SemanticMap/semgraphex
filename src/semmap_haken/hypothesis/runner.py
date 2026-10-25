@@ -23,6 +23,7 @@ from .graph import TypedGraph
 from .inference import fit_one, MODEL_KINDS
 from .nulls import stub_matching_null, flat_dc_sbm_null, typed_degrees
 from .predict import ranking_metrics
+from .hierarchy_validation import hierarchy_restart_stability
 from .splits import split_graph
 from .statistics import (empirical_upper_tail, paired_mrr_interval,
                          h1_verdict, nontrivial_levels)
@@ -338,6 +339,19 @@ def run_h1(
         return selected, grouped
 
     real, real_summary = fit_all(train_path, "real")
+    # Interpretability diagnostics are separate from the MDL selection rule:
+    # equal block counts do not mean equal partitions across restarts.
+    restart_hierarchies = []
+    for restart in range(config.restarts):
+        path = output / "tasks" / f"{_task_key('real', 'nested-DC-SBM', restart)}.npz"
+        with np.load(path, allow_pickle=False) as saved:
+            restart_hierarchies.append([
+                np.asarray(saved[f"p{level}"], dtype=np.int64).tolist()
+                for level in range(len(saved.files))
+            ])
+    real_summary["nested-DC-SBM"]["restart_stability"] = (
+        hierarchy_restart_stability(restart_hierarchies)
+    )
     train_mdl_gain = (real["DC-SBM"][0]["mdl_bits"] -
                       real["nested-DC-SBM"][0]["mdl_bits"])
     best_flat = np.asarray(real["DC-SBM"][1][0], dtype=np.int64)
@@ -442,6 +456,15 @@ def run_h1(
                    "validation": split.validation.edge_count, "test": split.test.edge_count,
                    "split_groups": split.group_counts},
         "fits": real_summary, "observed_mdl_gain_bits": float(train_mdl_gain),
+        "relations": {
+            name.rsplit("/", 1)[-1]: {
+                "full": int(np.count_nonzero(graph.relation == index)),
+                "train": int(np.count_nonzero(split.train.relation == index)),
+                "validation": int(np.count_nonzero(split.validation.relation == index)),
+                "test": int(np.count_nonzero(split.test.relation == index)),
+            }
+            for index, name in enumerate(graph.relation_names)
+        },
         "prediction": prediction, "paired_test_mrr": pair, "nulls": null_report,
         "fit_counts": {"real": 3 * config.restarts, "null": n_ran},
         "resource_budget": {"workers": workers, "threads_per_fit": threads},
