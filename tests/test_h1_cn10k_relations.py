@@ -131,3 +131,26 @@ def test_hits_at_10_reports_inapplicable_case_and_relation_breakdown():
     assert 0 <= long["hits_at_10"] <= 1
     assert set(long["by_relation"]) == {"IsA","PartOf"}
     assert sum(d["queries"] for d in long["by_relation"].values()) == long["queries"]
+
+
+
+def test_sampler_handles_actual_10k_vertex_budget(tmp_path: Path):
+    """10k genuine selected nodes: scalable, not merely a 32-node smoke."""
+    source=tmp_path / "ring.tsv"
+    relations=("RelatedTo", "IsA", "PartOf", "UsedFor")
+    with source.open("w", encoding="utf-8") as stream:
+        for i in range(10_500):
+            stream.write(
+                f"/a/ring/{i}\t/r/{relations[i%len(relations)]}\t"
+                f"/c/en/r{i:05d}\t/c/en/r{(i+1)%10500:05d}\t"
+                '{"weight":1.0}\n'
+            )
+    dest=tmp_path/"cn10k.tsv"
+    result=prepare_conceptnet_sample(
+        source, dest, nodes=10_000, seed=18,
+        relations=relations, max_assertions=20_000)
+    assert result["selected_nodes"] == 10_000
+    assert sum(result["by_relation"].values()) == result["selected_assertions"]
+    assert all(result["by_relation"][r] > 0 for r in relations)
+    assert len({uri for a in __import__("semmap_haken.conceptnet",fromlist=["stream_assertions"]).stream_assertions(dest)
+                for uri in (a.start_uri,a.end_uri)}) == 10_000
