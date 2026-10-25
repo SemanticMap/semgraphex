@@ -29,3 +29,12 @@ Each workflow displays the source, checksum/cache status, preflight result, run 
 ## H1 — Colab CPU/OpenMP + CUDA
 
 Open [`18_h1_nsbm_nulls_l4_12cpu_colab.ipynb`](18_h1_nsbm_nulls_l4_12cpu_colab.ipynb) to reproduce H1 on a 12-CPU budget (if allocated) with a separate micromamba `graph-tool` environment and CUDA batch block projections. The notebook fixes source SHA, runs genuine graph-tool integration tests, stages raw assertion TSV locally, persists sharded checkpoints to Drive during long experiments, and supports SMOKE/PILOT/FULL plus optional synthetic-calibration runs. **CUDA does not accelerate graph-tool nSBM**, and notebook presence is not a clean Colab Run All verification. See `docs/h1_scientific_protocol.md`.
+
+
+## ConceptNet-10k relation-aware H1 experiment
+
+Use [19_h1_conceptnet_10k_relations_colab.ipynb](19_h1_conceptnet_10k_relations_colab.ipynb) to prepare **exactly 10,000 English ConceptNet vertices** from a genuine five-column ConceptNet assertion TSV/TSV.GZ, preserving assertion IDs, directions, weights and independent relation labels. The default eight relation layers are RelatedTo, IsA, PartOf, UsedFor, HasProperty, HasA, Synonym, Causes. Missing input relations fail clearly; remove unavailable relations in the configuration instead of silently substituting data.
+
+The notebook is pinned to a new tested code revision, uses CPU/OpenMP on at most 12 granted cores for the layer-aware SBM/DC-SBM/nSBM, and GPU/CuPy only for independently validated W-only block-projection calculations. Two control ensembles, restart stability ARI, per-relation MRR/Hits@10 and optional planted-hierarchy recovery calibration are included.
+
+Change CONCEPTNET_TSV_ON_DRIVE in the first configuration cell to your raw source file. QUICK (2 restarts, 3 nulls per ensemble) is an **engineering test only**; VALIDATION (3, 49) and FULL (10, 99) are much more expensive and need separate power/false-positive calibration. All runs get a new RUN_ID and can resume from Drive snapshots; prior 100k pilot artifacts are never reused.
