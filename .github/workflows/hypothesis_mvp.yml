@@ -10,6 +10,7 @@ on:
       - 'tests/test_h1_runner.py'
       - 'tests/test_h1_colab_notebook.py'
       - 'tests/test_h1_cn10k_relations.py'
+      - 'tests/test_h1_cn10k_notebook.py'
       - 'notebooks/19_h1_conceptnet_10k_relations_colab.ipynb'
       - 'src/semmap_haken/hypothesis/conceptnet_10k.py'
       - 'src/semmap_haken/hypothesis/hierarchy_validation.py'
@@ -26,7 +27,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -e '.[dev]'
-      - run: python -m pytest -q tests/test_hypothesis_mvp.py tests/test_h1_science.py tests/test_h1_runner.py tests/test_h1_colab_notebook.py tests/test_h1_cn10k_relations.py
+      - run: python -m pytest -q tests/test_hypothesis_mvp.py tests/test_h1_science.py tests/test_h1_runner.py tests/test_h1_colab_notebook.py tests/test_h1_cn10k_relations.py tests/test_h1_cn10k_notebook.py
       - run: >-
           python -m semmap_haken.hypothesis.cli pilot
           --input tests/fixtures/conceptnet_tiny.tsv
