@@ -205,6 +205,7 @@ def prepare_conceptnet_sample(
         "output_path": str(dest),
         "sha256": _hash(dest),
         "seed": int(seed), "language": language,
+        "min_weight": float(min_weight),
         "selected_nodes": int(nodes),
         "available_vertices": len(names),
         "eligible_assertions": int(accepted - loops),
