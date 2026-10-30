@@ -316,6 +316,8 @@ def run_recursive(
             np.array([e.weight for e in edges], dtype=np.float64),
             tuple(str(e.edge_id) for e in edges),
         )
+        from .runner import _sha_bytes
+        current_hash = _sha_bytes(current)
         degree, _ = _degree(current, device)
         views = {"full": _views(current, None)["full"]}
         extract = max(1, cpu_budget // 3)
@@ -331,11 +333,13 @@ def run_recursive(
             min_figure_nodes=min_figure_nodes, extraction_workers=extract,
             match_workers=match, node_types=node_types,
             checkpoint_dir=directory / f"scan_{level:03d}",
-            identity={**identity, "level": level, "source_n": n},
+            identity={**identity, "level": level,
+                      "source_n": n, "current_graph_sha256": current_hash},
         )
         figures, selection = _select(
             scan_rows, counts, dictionary, graph=current,
             min_support=min_support, max_figures=max_figures,
+            records=edges,
         )
         types_by_nodes = {nodes: type_id for type_id, nodes in scan_rows}
         candidates = [
@@ -373,6 +377,7 @@ def run_recursive(
         if restored_n != graph.vertex_count or restored_ids != ids:
             raise AssertionError("recursive archive changed original identifiers")
         _assert_records(restored, original)
+        transition.unlink(missing_ok=True)  # delta is now embedded in verified ZIP
         gain = valid.stat().st_size - candidate.stat().st_size
         attempted.append({"scale": level, "figures": len(figures),
                           "decision": "accepted" if gain > 0 else "not_smaller",
