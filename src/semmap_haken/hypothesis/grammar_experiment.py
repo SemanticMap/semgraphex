@@ -175,7 +175,9 @@ def _fit_partition(
                    if 1 < len(set(p)) < graph.vertex_count]
     if not informative:
         raise RuntimeError("nested DC-SBM yielded no informative partition")
-    return informative[0], {
+    np.savez_compressed(out / "nsbm_partitions.npz",
+                        **{f"level_{i:03d}": p for i, p in enumerate(informative)})
+    return informative, {
         "best_mdl_bits": best["mdl_bits"],
         "all_mdl_bits": [float(x["mdl_bits"]) for x in results],
         "blocks_by_level": [len(set(p)) for p in partitions],
@@ -189,14 +191,16 @@ def _discover(
     labels: np.ndarray | None, degree: np.ndarray, *,
     budget: int, max_ego_nodes: int, min_figure_nodes: int,
     seed: int, extraction_workers: int,
+    node_types: dict[int, str] | None = None,
 ) -> GraphDictionary:
     dictionary = GraphDictionary(boundary_sensitive=False)
     centers = _centers(graph, labels, budget, degree, seed)
     # Use the full view plus within-block view only when we have nSBM labels.
     for view in views.values():
-        rows = view.extract_centers(centers, radius=1,
-                                    max_ego_nodes=max_ego_nodes,
-                                    workers=extraction_workers)
+        rows = view.extract_centers(
+            centers, radius=1, max_ego_nodes=max_ego_nodes,
+            symbol_types=node_types, workers=extraction_workers,
+        )
         for candidate in rows:
             if len(candidate.nodes) >= min_figure_nodes:
                 dictionary.resolve_or_create(candidate, level=0)
@@ -208,6 +212,7 @@ def _scan(
     n: int, batch: int, max_ego_nodes: int, min_figure_nodes: int,
     extraction_workers: int, match_workers: int,
     checkpoint_dir: Path, identity: dict, checkpoint_hook=None,
+    node_types: dict[int, str] | None = None,
 ) -> tuple[list[tuple[str, tuple[int, ...]]], Counter, dict]:
     """Bounded VF2 census with resumable, content-verified 4k-node shards.
 
@@ -246,7 +251,7 @@ def _scan(
                                             dtype=np.int64)
                         candidates = tuple(x for x in view.extract_centers(
                             centers, radius=1, max_ego_nodes=max_ego_nodes,
-                            workers=extraction_workers,
+                            workers=extraction_workers, symbol_types=node_types,
                         ) if len(x.nodes) >= min_figure_nodes)
                         for j in range(0, len(candidates), 32):
                             piece = candidates[j:j + 32]
@@ -520,7 +525,8 @@ def run(
     graph: TypedGraph, out: str | Path, *, profile: str = "10k",
     seed: int = 42, restarts: int = 3, cpu_budget: int = 12,
     device: str = "auto", modes: Sequence[str] = ("nsbm", "plain", "shuffled", "wishart", "nsbm_wishart"),
-    resume: bool = False, partition: np.ndarray | None = None,
+    resume: bool = False, partition: np.ndarray | Sequence[np.ndarray] | None = None,
+    recursive: bool = True, max_recursive_levels: int = 3,
     discovery: int | None = None, max_ego_nodes: int = 7,
     min_figure_nodes: int = 3, min_support: int = 3,
 ) -> dict:
@@ -532,7 +538,8 @@ def run(
     if not modes or any(x not in ("nsbm", "plain", "shuffled", "wishart", "nsbm_wishart") for x in modes):
         raise ValueError("unknown compression method (nsbm/plain/shuffled/wishart/nsbm_wishart)")
     if (restarts < 1 or cpu_budget < 1 or min_support < 1 or
-            max_ego_nodes < min_figure_nodes or min_figure_nodes < 2):
+            max_ego_nodes < min_figure_nodes or min_figure_nodes < 2 or
+            max_recursive_levels < 1):
         raise ValueError("invalid experiment parameters")
     cpu_budget = min(cpu_budget, _available_cpus())
     target = Path(out)
@@ -543,6 +550,8 @@ def run(
         "discovery": discovery or PROFILE[profile]["discovery"],
         "max_ego_nodes": max_ego_nodes, "min_figure_nodes": min_figure_nodes,
         "min_support": min_support,
+        "recursive": bool(recursive),
+        "max_recursive_levels": int(max_recursive_levels),
     }
     manifest = {"schema": "nsbm-huffman-experiment-v1",
                 "git_revision": _git_revision(), "graph_sha256": hash_graph,
@@ -553,7 +562,13 @@ def run(
             raise ValueError("RESUME manifest/input/code/config mismatch")
         if (target / "COMPLETED").is_file() and (target / "report.json").is_file():
             prior = json.loads((target / "report.json").read_text(encoding="utf-8"))
-            if all(verify_artifacts(prior["methods"][m], target) for m in modes):
+            ok = all(verify_artifacts(prior["methods"][m], target) for m in modes)
+            if ok and recursive and "nsbm" in modes:
+                rec = prior.get("recursive") or {}
+                path = Path(rec.get("archive", "missing"))
+                ok = (path.is_file() and rec.get("archive_sha256") ==
+                      sha256_file(path))
+            if ok:
                 return prior
             (target / "COMPLETED").unlink()  # rebuild corrupt finished archive
 
@@ -565,17 +580,28 @@ def run(
     started = time.perf_counter()
     degree, degree_backend = _degree(graph, device)
     fit = None
+    all_partitions: list[np.ndarray] = []
     if partition is None and any(m in ("nsbm", "shuffled", "nsbm_wishart") for m in modes):
-        partition, fit = _fit_partition(
+        all_partitions, fit = _fit_partition(
             graph, target, restarts=restarts, seed=seed, cpu_budget=cpu_budget
         )
+        partition = all_partitions[0]
         np.save(target / "partition.npy", partition, allow_pickle=False)
         _write_json(target / "fit_summary.json", fit)
     elif partition is not None:
-        partition = np.asarray(partition, dtype=np.int32)
-        if partition.shape != (graph.vertex_count,) or np.any(partition < 0):
+        array = np.asarray(partition, dtype=np.int32)
+        if array.ndim == 1:
+            all_partitions = [array]
+        elif array.ndim == 2:
+            all_partitions = list(array)
+        else:
+            raise ValueError("partitions must be one- or two-dimensional")
+        if any(p.shape != (graph.vertex_count,) or np.any(p < 0)
+               for p in all_partitions):
             raise ValueError("invalid supplied partition")
-        fit = {"source": "external (smoke or precomputed)", "blocks": len(set(partition))}
+        partition = all_partitions[0]
+        fit = {"source": "external (smoke or precomputed)",
+               "blocks_by_level": [len(set(p)) for p in all_partitions]}
     if partition is not None and fit is None:
         fit = json.loads((target / "fit_summary.json").read_text())
     projection = None
@@ -610,10 +636,24 @@ def run(
             batch=PROFILE[profile]["batch"], graph_hash=hash_graph,
             device=device, records=records, full_view=shared_full_view,
         )
+    recursive_result = None
+    if recursive and "nsbm" in modes and all_partitions:
+        from .recursive_codec import run_recursive
+        recursive_result = run_recursive(
+            graph, all_partitions, target / "recursive",
+            seed=seed, cpu_budget=cpu_budget, discovery=config["discovery"],
+            max_figures=PROFILE[profile]["max_figures"],
+            max_ego_nodes=max_ego_nodes,
+            min_figure_nodes=min_figure_nodes, min_support=min_support,
+            batch=PROFILE[profile]["batch"], device=device,
+            graph_hash=hash_graph, code_revision=_git_revision(),
+            max_levels=max_recursive_levels, resume=resume,
+        )
     output = {
         "status": "complete", "counts": {"vertices": graph.vertex_count,
             "assertions": graph.edge_count, "relations": len(graph.relation_names)},
         "fit": fit, "projection": projection,
+        "recursive": recursive_result,
         "degree_backend": degree_backend, "cpu_budget": cpu_budget,
         "baseline": {"archive_bytes": baseline["archive_bytes"],
                      "full_bundle_bytes": baseline_bundle},
@@ -646,6 +686,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-ego-nodes", type=int, default=7)
     ap.add_argument("--min-figure-nodes", type=int, default=3)
     ap.add_argument("--min-support", type=int, default=3)
+    ap.add_argument("--max-recursive-levels", type=int, default=3)
+    ap.add_argument("--no-recursive", action="store_true")
     args = ap.parse_args(argv)
     graph = TypedGraph.from_assertions(stream_assertions(args.input))
     results = run(
@@ -655,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
         resume=args.mode == "RESUME", discovery=args.discovery,
         max_ego_nodes=args.max_ego_nodes, min_figure_nodes=args.min_figure_nodes,
         min_support=args.min_support,
+        recursive=not args.no_recursive,
+        max_recursive_levels=args.max_recursive_levels,
     )
     print(json.dumps({"status": results["status"],
                       "counts": results["counts"],
