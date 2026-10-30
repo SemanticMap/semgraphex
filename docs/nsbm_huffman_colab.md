@@ -14,3 +14,9 @@ Open the [10k/100k Colab notebook](https://colab.research.google.com/github/Sema
 **GPU honesty:** CUDA handles degree-batch ranking and W block-intensity projection, not graph-tool inference or VF2. Smaller 10k graphs can be CPU bound. Exact semantic assertion/weight storage may dominate. The `wishart` mode is a first-level typed-WL + Wishart density-mode **proposal** using the identical exact codec and source graph. It is not the older recursive Wishart pipeline from PR #13. That full matched comparison remains a separate follow-up; legacy runs with aggregated edges are not comparable as exact assertion archives.
 
 Source document: [experiment plan](nsbm_huffman_compression_plan.md).
+
+## Version 2 priorities
+- **Independent controls**: `wishart` uses no nSBM membership, `nsbm_wishart` is explicitly a hybrid. All methods scan the same full-graph candidate space and use the same discovery limit; search time is reported separately.
+- **Measured acceptance**: after non-overlap resolution, whole symbol families enter the grammar only when the actual exact Huffman ZIP shrinks. Source-level port records, post-selection support, and code lengths are reported. ZIP/DEFLATE remains a separate ablation.
+- **Recursion**: up to three informative nSBM scales, source-level `EdgeRecord` IDs and binary64 weights preserved, each reverse transition verified. A next level is retained only if its consolidated exact hierarchy archive is smaller. If no level wins, this is an explicit negative result, not a bug.
+- **Recovery**: per-4k-centre VF2 scan shards, SHA-256 of every published grammar bundle and recursive checkpoint. Corruption, partial temporary files and revision mismatch never count as successful RESUME.
