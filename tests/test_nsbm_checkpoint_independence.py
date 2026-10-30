@@ -97,3 +97,20 @@ def test_corrupt_zip_after_completed_forces_repair(tmp_path):
     assert again["status"] == "complete"
     assert verify_artifacts(again["methods"]["nsbm"], out)
     assert (out / "COMPLETED").is_file()
+
+
+def test_scan_parallel_matches_serial(tmp_path):
+    graph = sample()
+    degree, _ = _degree(graph, "cpu")
+    views = {"full": _views(graph, None)["full"]}
+    dictionary = _discover(graph, views, None, degree, budget=12,
+                           max_ego_nodes=5, min_figure_nodes=3,
+                           seed=3, extraction_workers=1)
+    options = dict(views=views, dictionary=dictionary, n=graph.vertex_count,
+                   batch=2, max_ego_nodes=5, min_figure_nodes=3,
+                   extraction_workers=1, identity={"source": "small-graph"})
+    serial = _scan(**options, match_workers=1,
+                   checkpoint_dir=tmp_path / "serial")
+    parallel = _scan(**options, match_workers=2,
+                     checkpoint_dir=tmp_path / "parallel")
+    assert serial[:2] == parallel[:2]
