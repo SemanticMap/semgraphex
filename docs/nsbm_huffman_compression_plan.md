@@ -1,0 +1,35 @@
+# SemMap: nSBM-guided lossless graph grammar + Huffman (CN10k → CN100k)
+
+## Цель
+Проверить, даёт ли nSBM статистически воспроизводимый выигрыш **фактического размера точного архива** семантической сети по сравнению с компактным несинтаксическим форматом и словарём Wishart, при сопоставимых входных данных, кодеке и вычислительном бюджете. Отдельно оценить эффект явного Huffman-кодирования символов.
+
+## База
+- H1 / ConceptNet-10k: `feature/h1-cn10k-relation-aware-validation`, закреплённый эксперимент `a936578...` (модель, разбиения, контрольные графы).
+- Exact grammar v2: `feature/recursive-lossless-graph-dictionary-v2` / PR #13. Сохраняем decoder-first архитектуру и проверки.
+- Не смешивать graph-tool nSBM MDL и измеренный размер ZIP-архива. Не считать число кластеров компрессией.
+
+## Контракт точности
+Строки утверждений (включая кратные), направления, relation ID, веса binary64, исходные node IDs, исходные assertion IDs и порядок утверждений должны переживать round trip. Сравнивать полные архивы на **одной схеме сохранённых полей**. Источниковые текстовые метаданные вне выбранной схемы фиксировать явно, без фиктивной претензии на их восстановление.
+
+## Этапы разработки
+1. **Интегрировать H1 в grammar-v2**, не создавать второй компрессор и не копировать Wishart-оркестратор. Проверить совместимость зависимостей и тестов.
+2. **Адаптер typed assertions → exact EdgeRecord**, сохранить связи с node/assertion identifiers; создать воспроизводимый бинарный/текстовый комплект контрольного архива.
+3. **nSBM-вход:** best-MDL nested-DC-SBM по полному графу для сжатия; сохранить partitions, seeds, модель и конфигурацию. Отдельно предобученные H1 train-partitions допускаются только для smoke.
+4. **nSBM-guided candidate search:** balanced selection по блокам + внутри- и межблочные ego views, ограничение размера фигуры; контроль без блоков и с перемешанной разметкой. Полный census для частот принятых exact-форм, не оценивать частоты только по discovery sample.
+5. **Exact grammar selection:** использовать существующие портовые интерфейсы, shape/variant IDs, exact VF2; отбирать непересекающиеся фигуры, штрафовать дорогие порты/остатки, измерять реальные байты.
+6. **Huffman реальный поток:** отдельный канонический код символов для `occurrences`, таблица длин включена в архив; равноправный varint-контроль и декодер. Измерять дополнительно raw-stream и итоговые ZIP bytes — DEFLATE уже содержит Huffman и может оказаться эффективнее.
+7. **Верификация:** exact round trip, malformed bitstream, multiple relation, loops, multiedges, binary64, node/assertion IDs, беззнаковые/знаковые разности, RESUME и идентичность данных.
+8. **Experiment matrix:** compact exact baseline; plain exact grammar; Wishart-guided exact grammar; nSBM-guided varint; nSBM-guided Huffman; random-label control. Одна и та же source graph и codec contract.
+9. **Результаты:** archive bytes, ratio vs compact, bits/assertion, shape reuse, cost dictionary/ports/residuals, MDL как отдельный показатель, runtime, peak RAM, GPU/CPU use, reproducibility by seeds.
+10. **Colab T4/L4:** тонкий ноутбук (profile 10k | 100k) с фиксированным git revision, micromamba/graph-tool CPU, GPU CuPy-постобработка только там, где используется, CPU worker budget по affinity/cgroup, local staging → Drive checkpoint, NEW/RESUME, smoke, полный benchmark и отчёт.
+11. **Масштабирование:** CN10k до оптимизации 100k; CPU/GPU profiling и bounded batches, никаких dense NxN аллокаций, честный отчёт по предельному размеру.
+
+## Ограничение сложности
+Новые модули — лишь маленькая CLI/экспериментальная связка, адаптер и Huffman-кодек; reuse existing grammar_codec/grammar_streams/graph_mdl/hypothesis.inference. Не вводить абстрактный plugin framework, новый orchestration service, отдельную реализацию VF2 или второй архивный формат.
+
+## Критерии приёмки
+- Полный файл архива читается новым декодером; исходные утверждения совпадают на уровне указанного контракта.
+- Код работает на маленьком синтетическом графе без GPU и на реальных 10k с CUDA T4/L4 для поддерживаемых этапов; отсутствует ложный claim о GPU-nSBM.
+- Суммарный CPU budget не превышает фактически доступные ядра, новые процессы создаются через spawn при CUDA.
+- Замеры не подменяются прогнозом MDL; отрицательный эффект Huffman/ nSBM публикуется наравне с положительным.
+- Отдельный ноутбук воспроизводимо переходит 10k→100k изменением одного профиля и RUN_ID.
