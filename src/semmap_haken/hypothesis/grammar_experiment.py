@@ -6,6 +6,7 @@ projection, not for nSBM/VF2. All claims refer to measured exact archive bytes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from collections import Counter
 import io
 import json
@@ -33,6 +34,9 @@ from semmap_haken.wishart_parallel import (
 )
 
 from .graph import TypedGraph
+from .scan_checkpoint import (
+    atomic_json, load_shard, save_shard, sha256_file, verify_artifacts,
+)
 from .projection import estimate_block_kernel
 from .runner import (
     _available_cpus, _best_fit, _git_revision, _parallel_fit,
@@ -56,13 +60,8 @@ def edge_records(graph: TypedGraph) -> tuple[EdgeRecord, ...]:
     )
 
 
-def _write_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
-                    + "\n", encoding="utf-8")
-    os.replace(temp, path)
-
+# One atomic writer for reports and checkpoints.
+_write_json = atomic_json
 
 def _degree(graph: TypedGraph, device: str) -> tuple[np.ndarray, str]:
     """Compute directed-incidence counts; seed-based sampling remains on CPU."""
@@ -207,43 +206,81 @@ def _scan(
     views: dict[str, EgoExtractor], dictionary: GraphDictionary, *,
     n: int, batch: int, max_ego_nodes: int, min_figure_nodes: int,
     extraction_workers: int, match_workers: int,
-) -> tuple[list[tuple[str, tuple[int, ...]]], Counter]:
-    """Bounded batches: native CSR extraction threads + spawn VF2 processes."""
+    checkpoint_dir: Path, identity: dict, checkpoint_hook=None,
+) -> tuple[list[tuple[str, tuple[int, ...]]], Counter, dict]:
+    """Bounded VF2 census with resumable, content-verified 4k-node shards.
+
+    Corrupt/torn shards are recomputed. Dictionary, source, config, view
+    and revision are all included in each checkpoint identity.
+    """
     rows: list[tuple[str, tuple[int, ...]]] = []
     counts: Counter[str] = Counter()
     seen: set[tuple[int, ...]] = set()
+    chunk_span = batch * max(1, 4096 // batch)
+    reused, rebuilt = 0, 0
+    dictionary_digest = hashlib.sha256(json.dumps(
+        [(key, dictionary.types[key].fingerprint,
+          dictionary.types[key].prototype) for key in sorted(dictionary.types)],
+        sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
 
-    for view in views.values():
-        with spawn_pool(workers=match_workers, initializer=initialize_match_worker,
-                        initargs=(dictionary,)) if match_workers > 1 else _LocalMatcher(dictionary) as pool:
-            for start in range(0, n, batch):
-                centers = np.arange(start, min(n, start + batch), dtype=np.int64)
-                candidates = view.extract_centers(
-                    centers, radius=1, max_ego_nodes=max_ego_nodes,
-                    workers=extraction_workers,
-                )
-                candidates = tuple(x for x in candidates
-                                   if len(x.nodes) >= min_figure_nodes)
-                if not candidates:
-                    continue
-                chunks = [candidates[i:i + 32] for i in range(0, len(candidates), 32)]
-                if match_workers > 1:
-                    future = [pool.submit(match_chunk, chunk) for chunk in chunks]
-                    answers = [f.result() for f in future]
+    for view_name, view in views.items():
+        with (spawn_pool(workers=match_workers, initializer=initialize_match_worker,
+                         initargs=(dictionary,))
+              if match_workers > 1 else _LocalMatcher(dictionary)) as pool:
+            for chunk_start in range(0, n, chunk_span):
+                chunk_stop = min(n, chunk_start + chunk_span)
+                shard = checkpoint_dir / f"{view_name}_{chunk_start:08d}.json"
+                shard_identity = {
+                    **identity, "view": view_name, "dictionary": dictionary_digest,
+                    "start": chunk_start, "stop": chunk_stop,
+                    "batch": batch, "ego": max_ego_nodes,
+                    "minimum_nodes": min_figure_nodes,
+                }
+                saved = load_shard(shard, identity=shard_identity)
+                if saved is None:
+                    materialized: list[list] = []
+                    for start in range(chunk_start, chunk_stop, batch):
+                        centers = np.arange(start, min(chunk_stop, start + batch),
+                                            dtype=np.int64)
+                        candidates = tuple(x for x in view.extract_centers(
+                            centers, radius=1, max_ego_nodes=max_ego_nodes,
+                            workers=extraction_workers,
+                        ) if len(x.nodes) >= min_figure_nodes)
+                        for j in range(0, len(candidates), 32):
+                            piece = candidates[j:j + 32]
+                            if match_workers > 1:
+                                matches = pool.submit(match_chunk, piece).result()
+                            else:
+                                matches = pool.match(piece)
+                            for candidate, match in zip(piece, matches, strict=True):
+                                if match is not None:
+                                    materialized.append([
+                                        str(match[0]),
+                                        [int(node) for node in candidate.nodes],
+                                    ])
+                    save_shard(shard, identity=shard_identity, rows=materialized)
+                    saved = materialized
+                    rebuilt += 1
                 else:
-                    answers = [pool.match(chunk) for chunk in chunks]
-                for chunk, matches in zip(chunks, answers):
-                    for candidate, match in zip(chunk, matches):
-                        if match is None:
-                            continue
-                        nodes = tuple(int(v) for v in candidate.nodes)
-                        if nodes in seen:
-                            continue
-                        seen.add(nodes)
-                        type_id = str(match[0])
-                        rows.append((type_id, nodes))
-                        counts[type_id] += 1
-    return rows, counts
+                    reused += 1
+                for type_id, nodes in saved:
+                    key = tuple(nodes)
+                    if key in seen:
+                        continue
+                    if type_id not in dictionary.types:
+                        raise ValueError("scan shard references unknown symbol")
+                    seen.add(key)
+                    rows.append((str(type_id), key))
+                    counts[str(type_id)] += 1
+                if checkpoint_hook is not None:
+                    checkpoint_hook(shard)
+    return rows, counts, {
+        "checkpoint_shards_reused": reused,
+        "checkpoint_shards_computed": rebuilt,
+        "checkpoint_directory": str(checkpoint_dir),
+    }
+
 
 
 class _LocalMatcher:
@@ -365,13 +402,14 @@ def _bundle(
         "graph_sha256": graph_hash,
     }
     path = output
-    with zipfile.ZipFile(path, "w") as out:
+    pending = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(pending, "w") as out:
         out.writestr("codec.zip", codec_path.read_bytes(),
                      compress_type=zipfile.ZIP_STORED)
         out.writestr("source_ids.json", json.dumps(metadata, ensure_ascii=False,
                       separators=(",", ":")).encode("utf-8"),
                      compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
-    with zipfile.ZipFile(path) as test:
+    with zipfile.ZipFile(pending) as test:
         ids = json.loads(test.read("source_ids.json"))
         n, edges = decode_grammar(io.BytesIO(test.read("codec.zip"))) if (
             codec_path.name.startswith("grammar_")
@@ -380,6 +418,7 @@ def _bundle(
             raise AssertionError("full bundle edge roundtrip mismatch")
         if tuple(ids["node_ids"]) != graph.node_ids or tuple(ids["assertion_ids"]) != graph.assertion_ids:
             raise AssertionError("full bundle identifiers mismatch")
+    os.replace(pending, path)
     return path.stat().st_size
 
 
@@ -399,9 +438,12 @@ def _compress_method(
     if method == "shuffled":
         rng = np.random.default_rng(seed + 1001)
         labels = rng.permutation(labels) if labels is not None else None
-    elif method == "plain":
+    elif method in ("plain", "wishart"):
         labels = None
-    views = _views(graph, labels, full_view)
+    # Identical full-graph census and candidate limit for every strategy.
+    # nSBM only changes the proposal ranking; independent Wishart never
+    # receives nSBM partitions.
+    views = {"full": full_view}
     match_workers = min(max(1, cpu_budget * 2 // 3), 8)
     extraction_workers = max(1, cpu_budget - match_workers)
     dictionary = _discover(
@@ -409,14 +451,18 @@ def _compress_method(
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         seed=seed, extraction_workers=extraction_workers,
     )
-    rows, counts = _scan(
+    rows, counts, scan_meta = _scan(
         views, dictionary, n=graph.vertex_count, batch=batch,
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         extraction_workers=extraction_workers, match_workers=match_workers,
+        checkpoint_dir=out / "scan" / method,
+        identity={"graph": graph_hash, "method": method, "seed": seed,
+                  "discovery": discovery, "selection": "full_census_v2",
+                  "git_revision": _git_revision()},
     )
     wishart = None
     allowed = None
-    if method == "wishart":
+    if method in ("wishart", "nsbm_wishart"):
         allowed, wishart = _wishart_allowed(
             dictionary, device=device, workers=match_workers
         )
@@ -436,6 +482,8 @@ def _compress_method(
         results[coding] = {
             "archive_bytes": report["archive_bytes"],
             "full_bundle_bytes": bundle_bytes,
+            "archive_sha256": sha256_file(path),
+            "bundle_sha256": sha256_file(out / f"bundle_{method}_{coding}.zip"),
             "ratio_vs_binary_edges": report["compression_ratio_binary_baseline"],
             "roundtrip_exact": report["roundtrip_exact"],
             "shapes": report["shapes"],
@@ -444,6 +492,10 @@ def _compress_method(
         }
     result = {
         "method": method, "selection": selection,
+        "search": {"discovery_budget": discovery,
+                   "full_scan_centers": graph.vertex_count,
+                   "used_nsbm_labels": method in ("nsbm", "nsbm_wishart", "shuffled"),
+                   "scan_checkpoint": scan_meta},
         "wishart": wishart, "coding": results,
         "budget": {"cpu": cpu_budget, "vf2_processes": match_workers,
                    "ego_extraction_threads": extraction_workers},
@@ -456,7 +508,7 @@ def _compress_method(
 def run(
     graph: TypedGraph, out: str | Path, *, profile: str = "10k",
     seed: int = 42, restarts: int = 3, cpu_budget: int = 12,
-    device: str = "auto", modes: Sequence[str] = ("nsbm", "plain", "shuffled", "wishart"),
+    device: str = "auto", modes: Sequence[str] = ("nsbm", "plain", "shuffled", "wishart", "nsbm_wishart"),
     resume: bool = False, partition: np.ndarray | None = None,
     discovery: int | None = None, max_ego_nodes: int = 7,
     min_figure_nodes: int = 3, min_support: int = 3,
@@ -466,8 +518,8 @@ def run(
     expected = PROFILE[profile]["vertices"]
     if expected is not None and graph.vertex_count != expected:
         raise ValueError(f"profile {profile} requires exactly {expected} vertices")
-    if not modes or any(x not in ("nsbm", "plain", "shuffled", "wishart") for x in modes):
-        raise ValueError("methods must be a nonempty subset of nsbm/plain/shuffled/wishart")
+    if not modes or any(x not in ("nsbm", "plain", "shuffled", "wishart", "nsbm_wishart") for x in modes):
+        raise ValueError("unknown compression method (nsbm/plain/shuffled/wishart/nsbm_wishart)")
     if (restarts < 1 or cpu_budget < 1 or min_support < 1 or
             max_ego_nodes < min_figure_nodes or min_figure_nodes < 2):
         raise ValueError("invalid experiment parameters")
@@ -488,8 +540,12 @@ def run(
     if resume:
         if not manifest_path.is_file() or json.loads(manifest_path.read_text()) != manifest:
             raise ValueError("RESUME manifest/input/code/config mismatch")
-        if (target / "COMPLETED").is_file():
-            return json.loads((target / "report.json").read_text(encoding="utf-8"))
+        if (target / "COMPLETED").is_file() and (target / "report.json").is_file():
+            prior = json.loads((target / "report.json").read_text(encoding="utf-8"))
+            if all(verify_artifacts(prior["methods"][m], target) for m in modes):
+                return prior
+            (target / "COMPLETED").unlink()  # rebuild corrupt finished archive
+
     else:
         if target.exists() and any(target.iterdir()):
             raise ValueError("NEW requires empty or absent run directory")
@@ -498,7 +554,7 @@ def run(
     started = time.perf_counter()
     degree, degree_backend = _degree(graph, device)
     fit = None
-    if partition is None and any(m in ("nsbm", "shuffled") for m in modes):
+    if partition is None and any(m in ("nsbm", "shuffled", "nsbm_wishart") for m in modes):
         partition, fit = _fit_partition(
             graph, target, restarts=restarts, seed=seed, cpu_budget=cpu_budget
         )
@@ -528,16 +584,10 @@ def run(
         stage_path = target / f"method_{mode}.json"
         if resume and stage_path.is_file():
             obj = json.loads(stage_path.read_text())
-            if all(
-                (target / f"bundle_{mode}_{c}.zip").is_file()
-                and zipfile.is_zipfile(target / f"bundle_{mode}_{c}.zip")
-                and (target / f"bundle_{mode}_{c}.zip").stat().st_size ==
-                    obj["coding"][c]["full_bundle_bytes"]
-                for c in ("varint", "huffman")
-            ):
+            if verify_artifacts(obj, target):
                 results[mode] = obj
                 continue
-        if mode in ("nsbm", "shuffled") and partition is None:
+        if mode in ("nsbm", "shuffled", "nsbm_wishart") and partition is None:
             raise RuntimeError("nSBM and shuffled baselines require partition")
         results[mode] = _compress_method(
             graph, target, method=mode,
@@ -580,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--restarts", type=int, default=3)
     ap.add_argument("--cpu-budget", type=int, default=12)
     ap.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    ap.add_argument("--methods", default="nsbm,plain,shuffled,wishart")
+    ap.add_argument("--methods", default="nsbm,plain,shuffled,wishart,nsbm_wishart")
     ap.add_argument("--discovery", type=int)
     ap.add_argument("--max-ego-nodes", type=int, default=7)
     ap.add_argument("--min-figure-nodes", type=int, default=3)
