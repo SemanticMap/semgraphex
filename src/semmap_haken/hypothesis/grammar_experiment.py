@@ -353,47 +353,88 @@ def _wishart_allowed(dictionary: GraphDictionary, *, device: str, workers: int):
 def _select(
     rows: list[tuple[str, tuple[int, ...]]], counts: Counter,
     dictionary: GraphDictionary, *, graph: TypedGraph, min_support: int,
-    max_figures: int,
-    allowed_types: set[str] | None = None,
+    max_figures: int, allowed_types: set[str] | None = None,
+    records: tuple[EdgeRecord, ...] | None = None,
 ) -> tuple[list[tuple[int, ...]], dict]:
+    """Rank using *actual* record-level interfaces, then prevent overlaps.
+
+    This is not the accept/reject criterion: prune_by_archive_bytes() makes
+    that decision using fully serialized Huffman ZIPs and final frequencies.
+    """
+    from semmap_haken.grammar_binary import encoded_uvarint_size
+    records = records if records is not None else edge_records(graph)
     eligible = {t: f for t, f in counts.items()
                 if f >= min_support and (allowed_types is None or t in allowed_types)}
     codes = build_canonical_huffman_codes(eligible)
-    total = len(eligible)
+    incident: list[list[EdgeRecord]] = [[] for _ in range(graph.vertex_count)]
+    for edge in records:
+        incident[edge.source].append(edge)
+        if edge.target != edge.source:
+            incident[edge.target].append(edge)
+    endpoint_bits = 8 * encoded_uvarint_size(max(0, graph.vertex_count-1))
+    record_bits = 8 * encoded_uvarint_size(max(0, graph.edge_count-1))
+    relation_bits = 8 * encoded_uvarint_size(max(0, len(graph.relation_names)-1))
+    raw_per_edge = record_bits + 2 * endpoint_bits + relation_bits + 64
+
     scored = []
+    true_gain: dict[int, float] = {}
     for i, (type_id, nodes) in enumerate(rows):
         support = eligible.get(type_id, 0)
         if not support:
             continue
-        cost = estimate_grammar_occurrence_cost(
-            dictionary.representative(type_id), occurrence_nodes=nodes,
-            support=support, graph_node_count=graph.vertex_count,
-            relation_count=len(graph.relation_names),
-            edge_record_count=graph.edge_count,
-            type_code_bits=len(codes[type_id]) if type_id in codes
-            else max(1, int(np.ceil(np.log2(max(2, total))))),
+        node_set = set(nodes)
+        touched = {edge.edge_id: edge
+                   for node in nodes for edge in incident[node]}
+        internal = sum(
+            edge.source in node_set and edge.target in node_set
+            for edge in touched.values()
         )
-        if cost.gain_bits > 0:
-            scored.append(MdlOccurrence(
-                dictionary_type_id=type_id, candidate_index=i,
-                nodes=nodes, raw_bits=cost.raw_bits, encoded_bits=cost.encoded_bits
-            ))
+        external = len(touched) - internal
+        prototype = dictionary.representative(type_id)
+        # Rule definition is paid once, and amortized over *scanned*
+        # occurrences here. Accepted frequencies are recomputed after
+        # overlap resolution in the measured codec selection.
+        rule_estimate = (prototype.adjacency.nnz
+                         * (2 * 8 * encoded_uvarint_size(len(nodes)-1)
+                            + relation_bits) + len(nodes) * 8) / support
+        raw_bits = (internal + external) * raw_per_edge
+        coded = (
+            len(nodes) * endpoint_bits
+            + len(codes[type_id]) + rule_estimate
+            + internal * (record_bits + 64)
+            + external * (record_bits + endpoint_bits + relation_bits + 8 + 64)
+        )
+        gain = float(raw_bits - coded)
+        true_gain[i] = gain
+        # Do not use a lossy logical proxy as a hard reject. Only an actual
+        # smaller ZIP may enter the final vocabulary.
+        priority = max(1e-3, gain)
+        scored.append(MdlOccurrence(
+            dictionary_type_id=type_id, candidate_index=i,
+            nodes=nodes, raw_bits=max(1.0, coded) + priority,
+            encoded_bits=max(1.0, coded),
+        ))
     selected = select_nonoverlapping_mdl(scored)
-    selected = sorted(selected, key=lambda x: (-x.mdl_gain, x.candidate_index))
-    selected = selected[:max_figures]
+    selected = sorted(selected, key=lambda x: (-true_gain[x.candidate_index],
+                                               x.candidate_index))[:max_figures]
+    selected_freq = Counter(rows[item.candidate_index][0] for item in selected)
+    final_codes = build_canonical_huffman_codes(selected_freq)
     return [tuple(item.nodes) for item in selected], {
+        "selection_objective": "record-accurate port proxy, measured ZIP acceptance",
         "dictionary_types": len(dictionary.types),
         "full_scan_occurrences": len(rows),
-        "eligible_types": total,
-        "scored_positive": len(scored),
-        "accepted_figures": len(selected),
+        "eligible_types": len(eligible),
+        "scored_candidates": len(scored),
+        "nonoverlapping_figures": len(selected),
+        "accepted_figures": len(selected),  # overwritten after measured pruning
         "covered_vertices": sum(len(item.nodes) for item in selected),
-        "estimated_mdl_gain_bits": sum(x.mdl_gain for x in selected),
-        "selection_huffman_mean_bits": (
-            sum(eligible[k] * len(v) for k, v in codes.items()) /
-            sum(eligible.values()) if eligible else None
-        ),
+        "estimated_mdl_gain_bits": sum(true_gain[item.candidate_index] for item in selected),
+        "post_overlap_type_counts": dict(sorted(selected_freq.items())),
+        "post_overlap_huffman_code_lengths": {
+            key: len(code) for key, code in sorted(final_codes.items())
+        },
     }
+
 
 
 def _bundle(
@@ -474,7 +515,7 @@ def _compress_method(
         )
     figures, selection = _select(
         rows, counts, dictionary, graph=graph, min_support=min_support,
-        max_figures=max_figures, allowed_types=allowed,
+        max_figures=max_figures, allowed_types=allowed, records=records,
     )
     type_by_nodes = {nodes: type_id for type_id, nodes in rows}
     figures, measured = prune_by_archive_bytes(
