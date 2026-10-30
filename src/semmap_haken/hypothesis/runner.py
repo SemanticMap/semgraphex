@@ -174,6 +174,11 @@ def _valid_task(path: Path, partition_path: Path, *, task_key: str) -> bool:
         return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        expected_sha = data.get("partition_sha256")
+        if not isinstance(expected_sha, str):
+            return False
+        if hashlib.sha256(partition_path.read_bytes()).hexdigest() != expected_sha:
+            return False
         with np.load(partition_path, allow_pickle=False) as arrays:
             return data["task"] == task_key and len(arrays.files) == data["levels"]
     except (ValueError, OSError, KeyError, json.JSONDecodeError):
@@ -209,6 +214,9 @@ def _fit_task(graph_path: Path, kind: str, seed: int, threads: int,
         raise RuntimeError("non-finite fitted MDL")
     _npz_atomic(task_path.with_suffix(".npz"),
                 {f"p{i}": p for i, p in enumerate(partitions)})
+    data["partition_sha256"] = hashlib.sha256(
+        task_path.with_suffix(".npz").read_bytes()
+    ).hexdigest()
     _json_atomic(task_path, data)
     return data
 
