@@ -278,10 +278,24 @@ def _wishart_allowed(dictionary: GraphDictionary, *, device: str, workers: int):
     reps = [dictionary.representative(key) for key in ids]
     features = typed_wl_features(reps, iterations=2, dimension=256,
                                  workers=max(1, min(workers, 4)))
-    neighbors = _knn_from_features(
-        features, k=min(8, len(ids) - 1), metric="cosine",
-        device=device, min_gpu_types=16,
-    )
+    if device == "cpu":
+        neighbors = _knn_from_features(
+            features, k=min(8, len(ids) - 1), metric="cosine", device="cpu"
+        )
+    else:
+        try:
+            from semmap_haken.wishart_gpu import cupy_cosine_neighbors
+            indices, distances, metadata = cupy_cosine_neighbors(
+                features, k=min(8, len(ids) - 1)
+            )
+            from semmap_haken.wishart_metrics import NeighborGraph
+            neighbors = NeighborGraph(indices, distances, metadata)
+        except (ImportError, RuntimeError):
+            if device == "cuda":
+                raise
+            neighbors = _knn_from_features(
+                features, k=min(8, len(ids) - 1), metric="cosine", device="cpu"
+            )
     clusters = wishart_cluster(neighbors.indices, neighbors.distances,
                                significance=0.35, min_cluster_size=2)
     accepted = {type_id for type_id, label in zip(ids, clusters.labels) if label >= 0}
