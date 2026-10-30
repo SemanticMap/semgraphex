@@ -88,7 +88,8 @@ def _degree(graph: TypedGraph, device: str) -> tuple[np.ndarray, str]:
     ).astype(np.int64), "cpu"
 
 
-def _views(graph: TypedGraph, labels: np.ndarray | None) -> dict[str, EgoExtractor]:
+def _views(graph: TypedGraph, labels: np.ndarray | None,
+           full_view: EgoExtractor | None = None) -> dict[str, EgoExtractor]:
     n = graph.vertex_count
     row = np.asarray(graph.source, dtype=np.int64)
     col = np.asarray(graph.target, dtype=np.int64)
@@ -114,7 +115,7 @@ def _views(graph: TypedGraph, labels: np.ndarray | None) -> dict[str, EgoExtract
         return EgoExtractor(support, layers)
 
     all_edges = np.ones(graph.edge_count, dtype=bool)
-    result = {"full": build(all_edges)}
+    result = {"full": full_view if full_view is not None else build(all_edges)}
     if labels is not None:
         result["within"] = build(labels[row] == labels[col])
     return result
@@ -340,7 +341,7 @@ def _select(
 
 def _bundle(
     output: Path, codec_path: Path, graph: TypedGraph,
-    graph_hash: str,
+    graph_hash: str, records: tuple[EdgeRecord, ...],
 ) -> int:
     """Same identifier sidecar for every method; no metadata cost omission."""
     metadata = {
@@ -361,7 +362,7 @@ def _bundle(
         n, edges = decode_grammar(io.BytesIO(test.read("codec.zip"))) if (
             codec_path.name.startswith("grammar_")
         ) else _decode_baseline_bytes(test.read("codec.zip"))
-        if n != graph.vertex_count or edges != edge_records(graph):
+        if n != graph.vertex_count or edges != records:
             raise AssertionError("full bundle edge roundtrip mismatch")
         if tuple(ids["node_ids"]) != graph.node_ids or tuple(ids["assertion_ids"]) != graph.assertion_ids:
             raise AssertionError("full bundle identifiers mismatch")
@@ -378,6 +379,7 @@ def _compress_method(
     degree: np.ndarray, seed: int, discovery: int, max_figures: int,
     max_ego_nodes: int, min_figure_nodes: int, min_support: int,
     cpu_budget: int, batch: int, graph_hash: str, device: str,
+    records: tuple[EdgeRecord, ...], full_view: EgoExtractor,
 ) -> dict:
     started = time.perf_counter()
     if method == "shuffled":
@@ -385,7 +387,7 @@ def _compress_method(
         labels = rng.permutation(labels) if labels is not None else None
     elif method == "plain":
         labels = None
-    views = _views(graph, labels)
+    views = _views(graph, labels, full_view)
     match_workers = min(max(1, cpu_budget * 2 // 3), 8)
     extraction_workers = max(1, cpu_budget - match_workers)
     dictionary = _discover(
@@ -408,7 +410,6 @@ def _compress_method(
         rows, counts, dictionary, graph=graph, min_support=min_support,
         max_figures=max_figures, allowed_types=allowed,
     )
-    records = edge_records(graph)
     results = {}
     for coding in ("varint", "huffman"):
         path = out / f"grammar_{method}_{coding}.zip"
@@ -416,7 +417,7 @@ def _compress_method(
             graph.vertex_count, records, figures, path, symbol_coding=coding
         )
         bundle_bytes = _bundle(
-            out / f"bundle_{method}_{coding}.zip", path, graph, graph_hash
+            out / f"bundle_{method}_{coding}.zip", path, graph, graph_hash, records
         )
         results[coding] = {
             "archive_bytes": report["archive_bytes"],
@@ -503,17 +504,23 @@ def run(
                       "nonzero_entries": len(projected["entries"])}
         _write_json(target / "empirical_W.json", projected)
     records = edge_records(graph)
+    shared_full_view = _views(graph, None)["full"]
     baseline_path = target / "binary_exact.zip"
     baseline = encode_edge_baseline(graph.vertex_count, records, baseline_path)
     baseline_bundle = _bundle(target / "bundle_binary_exact.zip", baseline_path,
-                              graph, hash_graph)
+                              graph, hash_graph, records)
     results = {}
     for mode in modes:
         stage_path = target / f"method_{mode}.json"
         if resume and stage_path.is_file():
             obj = json.loads(stage_path.read_text())
-            if all((target / f"bundle_{mode}_{c}.zip").is_file()
-                   for c in ("varint", "huffman")):
+            if all(
+                (target / f"bundle_{mode}_{c}.zip").is_file()
+                and zipfile.is_zipfile(target / f"bundle_{mode}_{c}.zip")
+                and (target / f"bundle_{mode}_{c}.zip").stat().st_size ==
+                    obj["coding"][c]["full_bundle_bytes"]
+                for c in ("varint", "huffman")
+            ):
                 results[mode] = obj
                 continue
         if mode in ("nsbm", "shuffled") and partition is None:
@@ -525,7 +532,8 @@ def run(
             max_figures=PROFILE[profile]["max_figures"],
             max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
             min_support=min_support, cpu_budget=cpu_budget,
-            batch=PROFILE[profile]["batch"], graph_hash=hash_graph, device=device,
+            batch=PROFILE[profile]["batch"], graph_hash=hash_graph,
+            device=device, records=records, full_view=shared_full_view,
         )
     output = {
         "status": "complete", "counts": {"vertices": graph.vertex_count,
