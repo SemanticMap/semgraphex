@@ -11,6 +11,6 @@ Open the [10k/100k Colab notebook](https://colab.research.google.com/github/Sema
 7. For 100k: `PROFILE="100k"`, set `INPUT_PATHS["100k"]` to a prepared relation-stratified 100k TSV. The notebook uses a distinct run folder automatically; `RUN_MODE="NEW"`.
 8. The experiment does not assert nSBM gain from node count reduction or entropy proxies. Primary metric: complete bundle ZIP bytes over a compact exact baseline at the same record/identifier fidelity.
 
-**GPU honesty:** CUDA handles degree-batch ranking and W block-intensity projection, not graph-tool inference or VF2. Smaller 10k graphs can be CPU bound. Exact semantic assertion/weight storage may dominate. A full Wishart matched comparison on this same assertion-preserving graph is a separate follow-up; legacy Wishart outputs with aggregated edges cannot be used as the primary lossless baseline.
+**GPU honesty:** CUDA handles degree-batch ranking and W block-intensity projection, not graph-tool inference or VF2. Smaller 10k graphs can be CPU bound. Exact semantic assertion/weight storage may dominate. The `wishart` mode is a first-level typed-WL + Wishart density-mode **proposal** using the identical exact codec and source graph. It is not the older recursive Wishart pipeline from PR #13. That full matched comparison remains a separate follow-up; legacy runs with aggregated edges are not comparable as exact assertion archives.
 
 Source document: [experiment plan](nsbm_huffman_compression_plan.md).
