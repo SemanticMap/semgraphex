@@ -246,25 +246,30 @@ def _scan(
                 saved = load_shard(shard, identity=shard_identity)
                 if saved is None:
                     materialized: list[list] = []
+                    candidates = []
                     for start in range(chunk_start, chunk_stop, batch):
                         centers = np.arange(start, min(chunk_stop, start + batch),
                                             dtype=np.int64)
-                        candidates = tuple(x for x in view.extract_centers(
+                        candidates.extend(x for x in view.extract_centers(
                             centers, radius=1, max_ego_nodes=max_ego_nodes,
                             workers=extraction_workers, symbol_types=node_types,
                         ) if len(x.nodes) >= min_figure_nodes)
-                        for j in range(0, len(candidates), 32):
-                            piece = candidates[j:j + 32]
-                            if match_workers > 1:
-                                matches = pool.submit(match_chunk, piece).result()
-                            else:
-                                matches = pool.match(piece)
-                            for candidate, match in zip(piece, matches, strict=True):
-                                if match is not None:
-                                    materialized.append([
-                                        str(match[0]),
-                                        [int(node) for node in candidate.nodes],
-                                    ])
+                    # The old submit(...).result() loop serialized every VF2
+                    # chunk. map() schedules independent matching chunks across
+                    # CPU workers and returns deterministic original order.
+                    pieces = [tuple(candidates[j:j+32])
+                              for j in range(0, len(candidates), 32)]
+                    matched_chunks = (
+                        pool.map(match_chunk, pieces) if match_workers > 1
+                        else map(pool.match, pieces)
+                    )
+                    for piece, matches in zip(pieces, matched_chunks, strict=True):
+                        for candidate, match in zip(piece, matches, strict=True):
+                            if match is not None:
+                                materialized.append([
+                                    str(match[0]),
+                                    [int(node) for node in candidate.nodes],
+                                ])
                     save_shard(shard, identity=shard_identity, rows=materialized)
                     saved = materialized
                     rebuilt += 1
