@@ -47,6 +47,7 @@ from .grammar_streams import (
     write_ports as _write_ports_compact,
     write_residual as _write_residual_compact,
 )
+from .grammar_huffman import encode_symbols, decode_symbols
 from .grammar_types import (
     GrammarRule,
     InterfaceVariant,
@@ -591,8 +592,11 @@ def encode_grammar(
     *,
     node_types: Mapping[int, str] | None = None,
     grammar_relations: Iterable[str] | None = None,
+    symbol_coding: str = "varint",
 ) -> dict[str, object]:
     """Encode a graph exactly using reusable shapes, ports, and residuals."""
+    if symbol_coding not in ("varint", "huffman"):
+        raise ValueError("symbol_coding must be varint or huffman")
     codec_started = time.perf_counter()
     records = tuple(edges)
     _validate_records(vertex_count, records)
@@ -732,6 +736,7 @@ def encode_grammar(
         "non_grammar_relations_as_residual": grammar_relation_set is not None,
         "record_order": record_order,
         "stream_layout": COMPACT_STREAM_LAYOUT,
+        "symbol_coding": symbol_coding,
         "shape_count": len(shapes),
         "variant_count": len(variants),
         "occurrence_count": len(occurrences),
@@ -775,8 +780,14 @@ def encode_grammar(
         variant_map = {variant.variant_id: variant for variant in variants}
         archive.writestr(
             "occurrences.bin",
-            _write_occurrences_compact(occurrences, shape_map),
+            _write_occurrences_compact(
+                occurrences, shape_map, omit_symbols=symbol_coding == "huffman"
+            ),
         )
+        if symbol_coding == "huffman":
+            archive.writestr(
+                "symbols.huff", encode_symbols([o.symbol_id for o in occurrences])
+            )
         archive.writestr(
             "internal.bin",
             _write_internal_compact(internal_payload, occurrences, shape_map),
@@ -841,6 +852,7 @@ def encode_grammar(
             "variants.json",
             "rules.json",
             "occurrences.bin",
+            "symbols.huff",
         )
     )
     payload_bytes = sum(
@@ -852,6 +864,7 @@ def encode_grammar(
     archive_bytes = target.stat().st_size
     return {
         "format": FORMAT,
+        "symbol_coding": symbol_coding,
         "archive_bytes": archive_bytes,
         # Backward-compatible alias for historical reports.
         "baseline_bytes": baseline_json_bytes,
@@ -923,6 +936,10 @@ def decode_grammar(
         internal_data = archive.read("internal.bin")
         ports_data = archive.read("ports.bin")
         residual_data = archive.read("residual.bin")
+        symbol_coding = manifest.get("symbol_coding", "varint")
+        if symbol_coding not in ("varint", "huffman"):
+            raise ValueError("unsupported symbol coding")
+        symbols_data = archive.read("symbols.huff") if symbol_coding == "huffman" else None
 
     relations = tuple(str(item) for item in manifest["relations"])
     shapes = {
@@ -952,6 +969,7 @@ def decode_grammar(
         occurrence_rows = _read_occurrences_compact(
             occurrences_data,
             shapes,
+            symbols=decode_symbols(symbols_data) if symbols_data is not None else None,
         )
         internal = _read_internal_compact(
             internal_data,
