@@ -55,7 +55,9 @@ def load_shard(path: Path, *, identity: dict) -> list | None:
 
 def verify_artifacts(report: dict, base: Path) -> bool:
     """Check both archive hashes; filesize alone cannot detect corruption."""
-    for name, values in report.get("coding", {}).items():
+    if not isinstance(report, dict) or set(report.get("coding", {})) != {"varint", "huffman"}:
+        return False
+    for name, values in report["coding"].items():
         for prefix, path in (
             ("archive", base / f"grammar_{report['method']}_{name}.zip"),
             ("bundle", base / f"bundle_{report['method']}_{name}.zip"),
