@@ -20,3 +20,27 @@ Source document: [experiment plan](nsbm_huffman_compression_plan.md).
 - **Measured acceptance**: after non-overlap resolution, whole symbol families enter the grammar only when the actual exact Huffman ZIP shrinks. Source-level port records, post-selection support, and code lengths are reported. ZIP/DEFLATE remains a separate ablation.
 - **Recursion**: up to three informative nSBM scales, source-level `EdgeRecord` IDs and binary64 weights preserved, each reverse transition verified. A next level is retained only if its consolidated exact hierarchy archive is smaller. If no level wins, this is an explicit negative result, not a bug.
 - **Recovery**: per-4k-centre VF2 scan shards, SHA-256 of every published grammar bundle and recursive checkpoint. Corruption, partial temporary files and revision mismatch never count as successful RESUME.
+
+
+## CUDA/cuBLAS fix (30.10.2026)
+
+Prior Colab V3 checked only `cupy.cuda.runtime.getDeviceCount()`, which
+can succeed even when `libcublas.so.12` is absent. Updated notebook installs
+`cupy` together with `cuda-version=12` from **conda-forge**, rather than
+the pip wheel `cupy-cuda12x` without CUDA dependencies. Conda supplies the
+matching CUDA runtime/cuBLAS packages. An existing environment is left intact
+if a real `2 × 2` CuPy matrix multiplication works; otherwise the notebook
+removes the legacy pip CuPy wheel, installs conda CUDA components, and retests.
+
+`GPU_SUBPROCESS_ENV` includes `ENV_ROOT/lib` in `LD_LIBRARY_PATH` for
+both preflight and the long-running CLI process. `GPU_REQUIRED=True` fails
+**before** nSBM if GPU matrix multiplication remains broken; no silent
+CPU substitution. Only the repeated version-change notice from NetworkX
+3.5 is filtered in the CLI process.
+
+**Resume existing V3:** the notebook intentionally keeps
+`SOURCE_REVISION = 02a03e035e0268e96544f59895752fc22f60f97a`
+and the same `RUN_ID`. After this environment-only repair, set
+`RUN_MODE="RESUME"` (not `NEW`) to reuse completed checkpoints in Google
+Drive. Do not alter the stored run manifest. A code-revision or scientific
+configuration change requires a new `RUN_ID`.
