@@ -71,6 +71,46 @@ def resolve_device(
     return "cuda" if cuda_available else "cpu"
 
 
+def cupy_cosine_neighbors(
+    features: sparse.spmatrix | np.ndarray, *, k: int,
+    query_batch_size: int = 128,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Bounded GPU cosine matrix products, deterministic CPU stable top-k.
+
+    Reuses the CuPy runtime already required for W projection. CPU sorting is
+    intentional to avoid GPU tie-order differences across T4/L4 hardware.
+    """
+    import cupy as cp
+    if cp.cuda.runtime.getDeviceCount() < 1:
+        raise RuntimeError("CUDA device is unavailable")
+    n = int(features.shape[0])
+    if n < 2:
+        return (np.empty((n, 0), dtype=np.int64),
+                np.empty((n, 0), dtype=np.float64),
+                {"backend": "cupy_cuda", "device": "cuda"})
+    k = max(1, min(k, n - 1))
+    if query_batch_size < 1:
+        raise ValueError("query_batch_size must be positive")
+    dense = features.toarray() if sparse.issparse(features) else np.asarray(features)
+    matrix = cp.asarray(dense, dtype=cp.float32)
+    matrix /= cp.maximum(cp.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
+    indices = np.empty((n, k), dtype=np.int64)
+    distances = np.empty((n, k), dtype=np.float64)
+    for start in range(0, n, query_batch_size):
+        stop = min(n, start + query_batch_size)
+        block = cp.asnumpy(cp.maximum(0, 1.0 - cp.clip(
+            matrix[start:stop] @ matrix.T, -1.0, 1.0
+        )))
+        block[np.arange(stop - start), np.arange(start, stop)] = np.inf
+        order = np.argsort(block, axis=1, kind="stable")[:, :k]
+        indices[start:stop] = order
+        distances[start:stop] = np.take_along_axis(block, order, axis=1)
+    return indices, distances, {
+        "backend": "cupy_cuda", "device": "cuda", "precision": "float32",
+        "query_batch_size": int(query_batch_size), "candidate_count": n,
+    }
+
+
 def cuda_cosine_neighbors(
     features: sparse.spmatrix | np.ndarray,
     *,
