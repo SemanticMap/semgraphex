@@ -39,11 +39,11 @@ def test_smoke_nsbm_plain_shuffle_all_exact(tmp_path):
     labels = np.array([0] * 4 + [1] * 4 + [2] * 4, dtype=np.int32)
     result = run(graph, tmp_path / "run", profile="smoke", seed=3,
                  partition=labels, cpu_budget=2, device="cpu",
-                 modes=("nsbm", "plain", "shuffled"), max_ego_nodes=5,
+                 modes=("nsbm", "plain", "shuffled", "wishart"), max_ego_nodes=5,
                  min_figure_nodes=3, min_support=1)
     assert result["status"] == "complete"
     assert (tmp_path / "run" / "COMPLETED").exists()
-    assert set(result["ratios_full_bundle"]) == {"nsbm", "plain", "shuffled"}
+    assert set(result["ratios_full_bundle"]) == {"nsbm", "plain", "shuffled", "wishart"}
     for mode in ("nsbm", "plain", "shuffled"):
         for coding in ("varint", "huffman"):
             n, rows = decode_grammar(tmp_path / "run" / f"grammar_{mode}_{coding}.zip")

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import hashlib
 import io
 import json
 import os
@@ -23,12 +22,12 @@ from semmap_haken.conceptnet import stream_assertions
 from semmap_haken.exact_edge_baseline import encode_edge_baseline
 from semmap_haken.grammar_codec import decode_grammar, encode_grammar
 from semmap_haken.grammar_cost import estimate_grammar_occurrence_cost
-from semmap_haken.grammar_huffman import encode_symbols
 from semmap_haken.graph_dictionary import GraphDictionary
 from semmap_haken.graph_mdl import (MdlOccurrence, build_canonical_huffman_codes,
                                    select_nonoverlapping_mdl)
 from semmap_haken.graphex_components import EdgeRecord
-from semmap_haken.wishart_metrics import EgoExtractor
+from semmap_haken.wishart_metrics import EgoExtractor, typed_wl_features, _knn_from_features
+from semmap_haken.wishart_cluster import wishart_cluster
 from semmap_haken.wishart_parallel import (
     initialize_match_worker, match_chunk, spawn_pool,
 )
@@ -55,14 +54,6 @@ def edge_records(graph: TypedGraph) -> tuple[EdgeRecord, ...]:
             zip(graph.source, graph.target, graph.relation, graph.weight)
         )
     )
-
-
-def _sha_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -274,12 +265,41 @@ class _LocalMatcher:
         return tuple(matches)
 
 
+def _wishart_allowed(dictionary: GraphDictionary, *, device: str, workers: int):
+    """Actual Wishart density-mode probe over typed-WL exact-type representatives.
+
+    This is a first-level matched-codec comparator, not the full recursive
+    Wishart hierarchy from PR #13. Non-significant density modes are rejected.
+    """
+    ids = sorted(dictionary.types)
+    if len(ids) < 3:
+        return set(ids), {"cluster_count": 0, "status": "insufficient types"}
+    reps = [dictionary.representative(key) for key in ids]
+    features = typed_wl_features(reps, iterations=2, dimension=256,
+                                 workers=max(1, min(workers, 4)))
+    neighbors = _knn_from_features(
+        features, k=min(8, len(ids) - 1), metric="cosine",
+        device=device, min_gpu_types=16,
+    )
+    clusters = wishart_cluster(neighbors.indices, neighbors.distances,
+                               significance=0.35, min_cluster_size=2)
+    accepted = {type_id for type_id, label in zip(ids, clusters.labels) if label >= 0}
+    return accepted, {
+        "cluster_count": clusters.cluster_count,
+        "accepted_types": len(accepted),
+        "noise_types": len(ids) - len(accepted),
+        "neighbor_backend": neighbors.metadata,
+    }
+
+
 def _select(
     rows: list[tuple[str, tuple[int, ...]]], counts: Counter,
     dictionary: GraphDictionary, *, graph: TypedGraph, min_support: int,
     max_figures: int,
+    allowed_types: set[str] | None = None,
 ) -> tuple[list[tuple[int, ...]], dict]:
-    eligible = {t: f for t, f in counts.items() if f >= min_support}
+    eligible = {t: f for t, f in counts.items()
+                if f >= min_support and (allowed_types is None or t in allowed_types)}
     codes = build_canonical_huffman_codes(eligible)
     total = len(eligible)
     scored = []
@@ -357,7 +377,7 @@ def _compress_method(
     graph: TypedGraph, out: Path, *, method: str, labels: np.ndarray | None,
     degree: np.ndarray, seed: int, discovery: int, max_figures: int,
     max_ego_nodes: int, min_figure_nodes: int, min_support: int,
-    cpu_budget: int, batch: int, graph_hash: str,
+    cpu_budget: int, batch: int, graph_hash: str, device: str,
 ) -> dict:
     started = time.perf_counter()
     if method == "shuffled":
@@ -378,9 +398,15 @@ def _compress_method(
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         extraction_workers=extraction_workers, match_workers=match_workers,
     )
+    wishart = None
+    allowed = None
+    if method == "wishart":
+        allowed, wishart = _wishart_allowed(
+            dictionary, device=device, workers=match_workers
+        )
     figures, selection = _select(
         rows, counts, dictionary, graph=graph, min_support=min_support,
-        max_figures=max_figures,
+        max_figures=max_figures, allowed_types=allowed,
     )
     records = edge_records(graph)
     results = {}
@@ -403,7 +429,7 @@ def _compress_method(
         }
     result = {
         "method": method, "selection": selection,
-        "coding": results,
+        "wishart": wishart, "coding": results,
         "budget": {"cpu": cpu_budget, "vf2_processes": match_workers,
                    "ego_extraction_threads": extraction_workers},
         "seconds": time.perf_counter() - started,
@@ -415,7 +441,7 @@ def _compress_method(
 def run(
     graph: TypedGraph, out: str | Path, *, profile: str = "10k",
     seed: int = 42, restarts: int = 3, cpu_budget: int = 12,
-    device: str = "auto", modes: Sequence[str] = ("nsbm", "plain", "shuffled"),
+    device: str = "auto", modes: Sequence[str] = ("nsbm", "plain", "shuffled", "wishart"),
     resume: bool = False, partition: np.ndarray | None = None,
     discovery: int | None = None, max_ego_nodes: int = 7,
     min_figure_nodes: int = 3, min_support: int = 3,
@@ -425,8 +451,8 @@ def run(
     expected = PROFILE[profile]["vertices"]
     if expected is not None and graph.vertex_count != expected:
         raise ValueError(f"profile {profile} requires exactly {expected} vertices")
-    if not modes or any(x not in ("nsbm", "plain", "shuffled") for x in modes):
-        raise ValueError("methods must be a nonempty subset of nsbm/plain/shuffled")
+    if not modes or any(x not in ("nsbm", "plain", "shuffled", "wishart") for x in modes):
+        raise ValueError("methods must be a nonempty subset of nsbm/plain/shuffled/wishart")
     if (restarts < 1 or cpu_budget < 1 or min_support < 1 or
             max_ego_nodes < min_figure_nodes or min_figure_nodes < 2):
         raise ValueError("invalid experiment parameters")
@@ -457,7 +483,7 @@ def run(
     started = time.perf_counter()
     degree, degree_backend = _degree(graph, device)
     fit = None
-    if partition is None and any(m != "plain" for m in modes):
+    if partition is None and any(m in ("nsbm", "shuffled") for m in modes):
         partition, fit = _fit_partition(
             graph, target, restarts=restarts, seed=seed, cpu_budget=cpu_budget
         )
@@ -490,7 +516,7 @@ def run(
                    for c in ("varint", "huffman")):
                 results[mode] = obj
                 continue
-        if mode != "plain" and partition is None:
+        if mode in ("nsbm", "shuffled") and partition is None:
             raise RuntimeError("nSBM and shuffled baselines require partition")
         results[mode] = _compress_method(
             graph, target, method=mode,
@@ -499,7 +525,7 @@ def run(
             max_figures=PROFILE[profile]["max_figures"],
             max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
             min_support=min_support, cpu_budget=cpu_budget,
-            batch=PROFILE[profile]["batch"], graph_hash=hash_graph,
+            batch=PROFILE[profile]["batch"], graph_hash=hash_graph, device=device,
         )
     output = {
         "status": "complete", "counts": {"vertices": graph.vertex_count,
@@ -532,7 +558,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--restarts", type=int, default=3)
     ap.add_argument("--cpu-budget", type=int, default=12)
     ap.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    ap.add_argument("--methods", default="nsbm,plain,shuffled")
+    ap.add_argument("--methods", default="nsbm,plain,shuffled,wishart")
     ap.add_argument("--discovery", type=int)
     ap.add_argument("--max-ego-nodes", type=int, default=7)
     ap.add_argument("--min-figure-nodes", type=int, default=3)
