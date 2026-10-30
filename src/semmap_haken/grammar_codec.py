@@ -148,22 +148,6 @@ def _shape_signature(
     )
 
 
-def _external_for_figure(
-    figure_index: int,
-    owner: Mapping[int, int],
-    records: tuple[EdgeRecord, ...],
-) -> list[EdgeRecord]:
-    result: list[EdgeRecord] = []
-    for edge in records:
-        source_owner = owner.get(int(edge.source))
-        target_owner = owner.get(int(edge.target))
-        if source_owner == figure_index and target_owner == figure_index:
-            continue
-        if source_owner == figure_index or target_owner == figure_index:
-            result.append(edge)
-    return result
-
-
 def _port_profile(
     ordered_fine_nodes: tuple[int, ...],
     external: list[EdgeRecord],
@@ -412,6 +396,19 @@ def _canonicalize_shapes(
     variant_ids: dict[tuple[int, tuple[PortSpec, ...]], int] = {}
     occurrences: list[Occurrence] = []
     internal_payload: list[InternalEdgePayload] = []
+    # One streaming pass, not one O(E) scan for every accepted figure.
+    internal_by_owner: dict[int, list[EdgeRecord]] = defaultdict(list)
+    external_by_owner: dict[int, list[EdgeRecord]] = defaultdict(list)
+    for edge in records:
+        left = owner.get(int(edge.source))
+        right = owner.get(int(edge.target))
+        if left is not None and left == right:
+            internal_by_owner[left].append(edge)
+        else:
+            if left is not None:
+                external_by_owner[left].append(edge)
+            if right is not None and right != left:
+                external_by_owner[right].append(edge)
 
     node_match = nx.algorithms.isomorphism.categorical_node_match(
         "symbol_type", "ATOM"
@@ -421,23 +418,10 @@ def _canonicalize_shapes(
     )
 
     for occurrence_id, nodes in enumerate(groups):
-        internal = [
-            edge for edge in records
-            if owner.get(int(edge.source)) == occurrence_id
-            and owner.get(int(edge.target)) == occurrence_id
-            and (
-                grammar_relations is None
-                or str(edge.relation) in grammar_relations
-            )
-        ]
-        external = [
-            edge
-            for edge in _external_for_figure(occurrence_id, owner, records)
-            if (
-                grammar_relations is None
-                or str(edge.relation) in grammar_relations
-            )
-        ]
+        internal = [edge for edge in internal_by_owner[occurrence_id]
+                    if grammar_relations is None or str(edge.relation) in grammar_relations]
+        external = [edge for edge in external_by_owner[occurrence_id]
+                    if grammar_relations is None or str(edge.relation) in grammar_relations]
         graph = _shape_graph(nodes, internal, node_types)
         signature = _shape_signature(graph, internal)
 
