@@ -145,8 +145,6 @@ def _state(path: Path):
         for level, prefix in enumerate(manifest["transitions"]):
             files = {name: z.read(prefix + "/" + name)
                      for name in DELTA_NAMES if prefix + "/" + name in z.namelist()}
-            with zipfile.ZipFile(io.BytesIO()) as _unused:
-                pass
             # Read occurrences directly from the level files, including Huffman.
             temp = io.BytesIO()
             with zipfile.ZipFile(temp, "w") as sub:
@@ -237,6 +235,8 @@ def _valid_checkpoint(path: Path, meta: Path, *, identity: dict,
         if data.get("identity") != identity or data.get("sha256") != sha256_file(path):
             return False
         n, edges, ids = decode_recursive(path)
+        if ids.get("graph_sha256") != identity["graph_sha256"]:
+            return False
         if n != expected_n:
             return False
         _assert_records(edges, expected_edges)
@@ -262,8 +262,9 @@ def run_recursive(
     directory.mkdir(parents=True, exist_ok=True)
     original = edge_records(graph)
     names = graph.relation_names
-    ids = {"node_ids": graph.node_ids, "assertion_ids": graph.assertion_ids,
-           "relation_names": names, "graph_sha256": graph_hash}
+    ids = {"node_ids": list(graph.node_ids),
+           "assertion_ids": list(graph.assertion_ids),
+           "relation_names": list(names), "graph_sha256": graph_hash}
     identity = {
         "graph_sha256": graph_hash, "code_revision": code_revision,
         "seed": seed, "max_levels": max_levels,
