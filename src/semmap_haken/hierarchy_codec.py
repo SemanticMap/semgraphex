@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 from scipy import sparse
 
+from .grammar_huffman import decode_symbols
 from .exact_edge_baseline import encode_edge_baseline_bytes
 from .grammar_binary import (
     bits_to_float,
@@ -183,6 +184,8 @@ def _decode_transition_delta(
     occurrences_data: bytes,
     internal_data: bytes,
     ports_data: bytes,
+    symbols_data: bytes | None = None,
+    preserve_ids: bool = False,
 ) -> tuple[int, tuple[EdgeRecord, ...]]:
     source_n = int(manifest["vertex_count"])
     relations = tuple(str(value) for value in manifest["relations"])
@@ -216,8 +219,8 @@ def _decode_transition_delta(
     stream_layout = manifest.get("stream_layout")
     if stream_layout == COMPACT_STREAM_LAYOUT:
         occurrence_rows = _read_occurrences_compact(
-            occurrences_data,
-            shapes,
+            occurrences_data, shapes,
+            symbols=decode_symbols(symbols_data) if symbols_data is not None else None,
         )
         internal_rows = _read_internal_compact(
             internal_data,
@@ -243,7 +246,14 @@ def _decode_transition_delta(
         [tuple(row.shape_to_fine_nodes) for row in occurrence_rows],
     )
 
-    rows: list[tuple[int, int, str, float]] = []
+    rows: list = []
+
+    def emit(edge_id: int, source: int, target: int, relation: str, weight: float) -> None:
+        if preserve_ids:
+            rows.append(EdgeRecord(int(edge_id), int(source), int(target),
+                                   str(relation), float(weight)))
+        else:
+            rows.append((int(source), int(target), str(relation), float(weight)))
 
     # Edges whose coarse endpoints are both untouched singletons have a
     # one-to-one preimage under sum aggregation and need no transition payload.
@@ -257,7 +267,7 @@ def _decode_transition_delta(
             raise ValueError(
                 "target edge references a coarse node absent from transition partition"
             ) from error
-        rows.append((source, target, edge.relation, edge.weight))
+        emit(edge.edge_id, source, target, edge.relation, edge.weight)
 
     for item in internal_rows:
         occurrence = occurrences.get(item.occurrence_id)
@@ -271,14 +281,8 @@ def _decode_transition_delta(
         shape_edge = shape.edges[item.shape_edge_index]
         source = occurrence.shape_to_fine_nodes[shape_edge.source]
         target = occurrence.shape_to_fine_nodes[shape_edge.target]
-        rows.append(
-            (
-                source,
-                target,
-                relations[shape_edge.relation_id],
-                bits_to_float(item.weight_bits),
-            )
-        )
+        emit(item.edge_id, source, target,
+             relations[shape_edge.relation_id], bits_to_float(item.weight_bits))
 
     for item in port_rows:
         occurrence = occurrences.get(item.occurrence_id)
@@ -298,15 +302,14 @@ def _decode_transition_delta(
             source, target = local, item.external_endpoint
         else:
             source, target = item.external_endpoint, local
-        rows.append(
-            (
-                source,
-                target,
-                relations[item.relation_id],
-                bits_to_float(item.weight_bits),
-            )
-        )
+        emit(item.edge_id, source, target,
+             relations[item.relation_id], bits_to_float(item.weight_bits))
 
+    if preserve_ids:
+        ordered = tuple(sorted(rows, key=lambda edge: edge.edge_id))
+        if len({e.edge_id for e in ordered}) != len(ordered):
+            raise ValueError("recursive delta duplicates original edge IDs")
+        return source_n, ordered
     return source_n, _normalized_records(rows)
 
 
