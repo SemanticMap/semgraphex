@@ -606,17 +606,20 @@ def run(
     if resume:
         if not manifest_path.is_file() or json.loads(manifest_path.read_text()) != manifest:
             raise ValueError("RESUME manifest/input/code/config mismatch")
-        if (target / "COMPLETED").is_file() and (target / "report.json").is_file():
-            prior = json.loads((target / "report.json").read_text(encoding="utf-8"))
-            ok = all(verify_artifacts(prior["methods"][m], target) for m in modes)
-            if ok and recursive and "nsbm" in modes:
-                rec = prior.get("recursive") or {}
-                path = Path(rec.get("archive", "missing"))
-                ok = (path.is_file() and rec.get("archive_sha256") ==
-                      sha256_file(path))
-            if ok:
-                return prior
-            (target / "COMPLETED").unlink()  # rebuild corrupt finished archive
+        if (target / "COMPLETED").is_file():
+            try:
+                prior = json.loads((target / "report.json").read_text(encoding="utf-8"))
+                ok = all(verify_artifacts(prior["methods"][m], target) for m in modes)
+                if ok and recursive and "nsbm" in modes:
+                    rec = prior.get("recursive") or {}
+                    path = Path(rec.get("archive", "missing"))
+                    ok = (path.is_file() and rec.get("archive_sha256") ==
+                          sha256_file(path))
+                if ok:
+                    return prior
+            except (ValueError, OSError, KeyError, TypeError):
+                pass
+            (target / "COMPLETED").unlink()  # repair corrupt/incomplete report
 
     else:
         if target.exists() and any(target.iterdir()):
@@ -666,10 +669,14 @@ def run(
     for mode in modes:
         stage_path = target / f"method_{mode}.json"
         if resume and stage_path.is_file():
-            obj = json.loads(stage_path.read_text())
-            if verify_artifacts(obj, target):
-                results[mode] = obj
-                continue
+            try:
+                obj = json.loads(stage_path.read_text())
+                if verify_artifacts(obj, target):
+                    results[mode] = obj
+                    continue
+            except (ValueError, OSError, KeyError, TypeError):
+                pass  # incomplete report is not a valid checkpoint
+
         if mode in ("nsbm", "shuffled", "nsbm_wishart") and partition is None:
             raise RuntimeError("nSBM and shuffled baselines require partition")
         results[mode] = _compress_method(
