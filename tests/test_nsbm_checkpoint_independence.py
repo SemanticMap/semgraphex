@@ -114,3 +114,18 @@ def test_scan_parallel_matches_serial(tmp_path):
     parallel = _scan(**options, match_workers=2,
                      checkpoint_dir=tmp_path / "parallel")
     assert serial[:2] == parallel[:2]
+
+
+def test_resume_repairs_truncated_json_metadata(tmp_path):
+    graph = sample()
+    out = tmp_path / "torn"
+    args = dict(profile="smoke", seed=15, cpu_budget=1, device="cpu",
+                modes=("plain",), discovery=6, min_support=1)
+    run(graph, out, **args)
+    (out / "method_plain.json").write_bytes(b'{incomplete')
+    (out / "report.json").write_bytes(b'{incomplete')
+    (out / "method_plain.json.tmp").write_bytes(b'{not published')
+    repaired = run(graph, out, resume=True, **args)
+    assert repaired["status"] == "complete"
+    assert verify_artifacts(repaired["methods"]["plain"], out)
+    assert (out / "COMPLETED").exists()
