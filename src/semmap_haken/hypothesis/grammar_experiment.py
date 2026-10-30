@@ -34,6 +34,7 @@ from semmap_haken.wishart_parallel import (
 )
 
 from .graph import TypedGraph
+from .grammar_selection import prune_by_archive_bytes
 from .scan_checkpoint import (
     atomic_json, load_shard, save_shard, sha256_file, verify_artifacts,
 )
@@ -469,6 +470,16 @@ def _compress_method(
     figures, selection = _select(
         rows, counts, dictionary, graph=graph, min_support=min_support,
         max_figures=max_figures, allowed_types=allowed,
+    )
+    type_by_nodes = {nodes: type_id for type_id, nodes in rows}
+    figures, measured = prune_by_archive_bytes(
+        vertex_count=graph.vertex_count, records=records,
+        candidates=[(type_by_nodes[tuple(nodes)], tuple(nodes)) for nodes in figures],
+        workspace=out,
+    )
+    selection.update(
+        accepted_figures=len(figures),
+        measured_codec_pruning=measured,
     )
     results = {}
     for coding in ("varint", "huffman"):
