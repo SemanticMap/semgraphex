@@ -155,15 +155,17 @@ def _state(path: Path):
             assignments, _, _ = _partition_from_occurrence_nodes(
                 len(members), [tuple(o.shape_to_fine_nodes) for o in occurrences])
             grouped = defaultdict(list)
+            children = defaultdict(list)
             for old, new in enumerate(assignments):
                 grouped[int(new)].extend(members[old])
+                children[int(new)].append(old)
             next_types = {}
             shape_by_nodes = {
                 frozenset(o.shape_to_fine_nodes): int(o.symbol_id)
                 for o in occurrences
             }
             for coarse, original_members in sorted(grouped.items()):
-                child_nodes = [i for i, b in enumerate(assignments) if b == coarse]
+                child_nodes = children[coarse]
                 if len(child_nodes) > 1:
                     next_types[coarse] = f"L{level}_S{shape_by_nodes[frozenset(child_nodes)]}"
                 elif child_nodes[0] in types:
