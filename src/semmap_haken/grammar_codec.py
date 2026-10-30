@@ -47,7 +47,6 @@ from .grammar_streams import (
     write_ports as _write_ports_compact,
     write_residual as _write_residual_compact,
 )
-from .grammar_huffman import encode_symbols, decode_symbols
 from .grammar_types import (
     GrammarRule,
     InterfaceVariant,
@@ -146,6 +145,22 @@ def _shape_signature(
         relations,
         degrees,
     )
+
+
+def _external_for_figure(
+    figure_index: int,
+    owner: Mapping[int, int],
+    records: tuple[EdgeRecord, ...],
+) -> list[EdgeRecord]:
+    result: list[EdgeRecord] = []
+    for edge in records:
+        source_owner = owner.get(int(edge.source))
+        target_owner = owner.get(int(edge.target))
+        if source_owner == figure_index and target_owner == figure_index:
+            continue
+        if source_owner == figure_index or target_owner == figure_index:
+            result.append(edge)
+    return result
 
 
 def _port_profile(
@@ -396,19 +411,6 @@ def _canonicalize_shapes(
     variant_ids: dict[tuple[int, tuple[PortSpec, ...]], int] = {}
     occurrences: list[Occurrence] = []
     internal_payload: list[InternalEdgePayload] = []
-    # One streaming pass, not one O(E) scan for every accepted figure.
-    internal_by_owner: dict[int, list[EdgeRecord]] = defaultdict(list)
-    external_by_owner: dict[int, list[EdgeRecord]] = defaultdict(list)
-    for edge in records:
-        left = owner.get(int(edge.source))
-        right = owner.get(int(edge.target))
-        if left is not None and left == right:
-            internal_by_owner[left].append(edge)
-        else:
-            if left is not None:
-                external_by_owner[left].append(edge)
-            if right is not None and right != left:
-                external_by_owner[right].append(edge)
 
     node_match = nx.algorithms.isomorphism.categorical_node_match(
         "symbol_type", "ATOM"
@@ -418,10 +420,23 @@ def _canonicalize_shapes(
     )
 
     for occurrence_id, nodes in enumerate(groups):
-        internal = [edge for edge in internal_by_owner[occurrence_id]
-                    if grammar_relations is None or str(edge.relation) in grammar_relations]
-        external = [edge for edge in external_by_owner[occurrence_id]
-                    if grammar_relations is None or str(edge.relation) in grammar_relations]
+        internal = [
+            edge for edge in records
+            if owner.get(int(edge.source)) == occurrence_id
+            and owner.get(int(edge.target)) == occurrence_id
+            and (
+                grammar_relations is None
+                or str(edge.relation) in grammar_relations
+            )
+        ]
+        external = [
+            edge
+            for edge in _external_for_figure(occurrence_id, owner, records)
+            if (
+                grammar_relations is None
+                or str(edge.relation) in grammar_relations
+            )
+        ]
         graph = _shape_graph(nodes, internal, node_types)
         signature = _shape_signature(graph, internal)
 
@@ -576,11 +591,8 @@ def encode_grammar(
     *,
     node_types: Mapping[int, str] | None = None,
     grammar_relations: Iterable[str] | None = None,
-    symbol_coding: str = "varint",
 ) -> dict[str, object]:
     """Encode a graph exactly using reusable shapes, ports, and residuals."""
-    if symbol_coding not in ("varint", "huffman"):
-        raise ValueError("symbol_coding must be varint or huffman")
     codec_started = time.perf_counter()
     records = tuple(edges)
     _validate_records(vertex_count, records)
@@ -720,7 +732,6 @@ def encode_grammar(
         "non_grammar_relations_as_residual": grammar_relation_set is not None,
         "record_order": record_order,
         "stream_layout": COMPACT_STREAM_LAYOUT,
-        "symbol_coding": symbol_coding,
         "shape_count": len(shapes),
         "variant_count": len(variants),
         "occurrence_count": len(occurrences),
@@ -764,14 +775,8 @@ def encode_grammar(
         variant_map = {variant.variant_id: variant for variant in variants}
         archive.writestr(
             "occurrences.bin",
-            _write_occurrences_compact(
-                occurrences, shape_map, omit_symbols=symbol_coding == "huffman"
-            ),
+            _write_occurrences_compact(occurrences, shape_map),
         )
-        if symbol_coding == "huffman":
-            archive.writestr(
-                "symbols.huff", encode_symbols([o.symbol_id for o in occurrences])
-            )
         archive.writestr(
             "internal.bin",
             _write_internal_compact(internal_payload, occurrences, shape_map),
@@ -836,7 +841,6 @@ def encode_grammar(
             "variants.json",
             "rules.json",
             "occurrences.bin",
-            "symbols.huff",
         )
     )
     payload_bytes = sum(
@@ -848,7 +852,6 @@ def encode_grammar(
     archive_bytes = target.stat().st_size
     return {
         "format": FORMAT,
-        "symbol_coding": symbol_coding,
         "archive_bytes": archive_bytes,
         # Backward-compatible alias for historical reports.
         "baseline_bytes": baseline_json_bytes,
@@ -920,10 +923,6 @@ def decode_grammar(
         internal_data = archive.read("internal.bin")
         ports_data = archive.read("ports.bin")
         residual_data = archive.read("residual.bin")
-        symbol_coding = manifest.get("symbol_coding", "varint")
-        if symbol_coding not in ("varint", "huffman"):
-            raise ValueError("unsupported symbol coding")
-        symbols_data = archive.read("symbols.huff") if symbol_coding == "huffman" else None
 
     relations = tuple(str(item) for item in manifest["relations"])
     shapes = {
@@ -953,7 +952,6 @@ def decode_grammar(
         occurrence_rows = _read_occurrences_compact(
             occurrences_data,
             shapes,
-            symbols=decode_symbols(symbols_data) if symbols_data is not None else None,
         )
         internal = _read_internal_compact(
             internal_data,

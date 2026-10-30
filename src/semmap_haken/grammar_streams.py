@@ -36,8 +36,6 @@ STREAM_LAYOUT = "grouped_delta_v1"
 def write_occurrences(
     rows: Sequence[Occurrence],
     shapes: Mapping[int, InternalShape],
-    *,
-    omit_symbols: bool = False,
 ) -> bytes:
     """Encode occurrence IDs and node counts implicitly from stream order/rule."""
     out = io.BytesIO()
@@ -55,8 +53,7 @@ def write_occurrences(
             raise ValueError("occurrence node mapping differs from shape arity")
         symbol_id = int(row.symbol_id)
         variant_id = int(row.variant_id)
-        if not omit_symbols:
-            write_svarint(out, symbol_id - previous_symbol)
+        write_svarint(out, symbol_id - previous_symbol)
         write_svarint(out, variant_id - previous_variant)
         previous_symbol = symbol_id
         previous_variant = variant_id
@@ -76,20 +73,15 @@ def write_occurrences(
 def read_occurrences(
     data: bytes,
     shapes: Mapping[int, InternalShape],
-    *,
-    symbols: Sequence[int] | None = None,
 ) -> tuple[Occurrence, ...]:
     stream = io.BytesIO(data)
     count = read_uvarint(stream)
-    if symbols is not None and len(symbols) != count:
-        raise ValueError("Huffman symbol count differs from occurrence count")
     rows: list[Occurrence] = []
     previous_anchor = 0
     previous_symbol = 0
     previous_variant = 0
     for occurrence_id in range(count):
-        symbol_id = (int(symbols[occurrence_id]) if symbols is not None
-                     else previous_symbol + read_svarint(stream))
+        symbol_id = previous_symbol + read_svarint(stream)
         variant_id = previous_variant + read_svarint(stream)
         if symbol_id < 0 or variant_id < 0:
             raise ValueError("negative decoded symbol or variant ID")
