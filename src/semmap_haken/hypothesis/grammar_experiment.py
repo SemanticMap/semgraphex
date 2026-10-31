@@ -547,7 +547,7 @@ def _compress_method(
 ) -> dict:
     started = time.perf_counter()
     phases: dict[str, float] = {}
-    def report(phase, done=1, total=1, fraction=0.0):
+    def emit_progress(phase, done=1, total=1, fraction=0.0):
         if progress_hook is not None:
             progress_hook(phase, done, total, fraction)
     if method == "shuffled":
@@ -567,14 +567,14 @@ def _compress_method(
         seed=seed, extraction_workers=extraction_workers,
     )
     phases["discovery"] = time.perf_counter() - discovery_started
-    report("discovery", fraction=0.12)
+    emit_progress("discovery", fraction=0.12)
     extraction_workers, match_workers = _vf2_cpu_plan(cpu_budget, dictionary)
     rows, counts, scan_meta = _scan(
         views, dictionary, n=graph.vertex_count, batch=batch,
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         extraction_workers=extraction_workers, match_workers=match_workers,
         checkpoint_dir=out / "scan" / method,
-        progress_hook=lambda done, total: report("VF2", done, total,
+        progress_hook=lambda done, total: emit_progress("VF2", done, total,
                                                  0.12 + 0.58 * done / max(1, total)),
         identity={"graph": graph_hash, "method": method, "seed": seed,
                   "discovery": discovery, "selection": "full_census_v2",
@@ -583,7 +583,7 @@ def _compress_method(
     phases["scan_wall"] = scan_meta["wall_seconds"]
     phases["extraction"] = scan_meta["extraction_seconds"]
     phases["vf2"] = scan_meta["vf2_seconds"]
-    report("scan_completed", fraction=0.70)
+    emit_progress("scan_completed", fraction=0.70)
     wishart_started = time.perf_counter()
     wishart = None
     allowed = None
@@ -598,18 +598,18 @@ def _compress_method(
         max_figures=max_figures, allowed_types=allowed, records=records,
     )
     phases["selection"] = time.perf_counter() - selection_started
-    report("selection", fraction=0.78)
+    emit_progress("selection", fraction=0.78)
     type_by_nodes = {nodes: type_id for type_id, nodes in rows}
     pruning_started = time.perf_counter()
     figures, measured = prune_by_archive_bytes(
         vertex_count=graph.vertex_count, records=records,
         candidates=[(type_by_nodes[tuple(nodes)], tuple(nodes)) for nodes in figures],
         workspace=out,
-        progress_hook=lambda done, total: report("measured_pruning", done, total,
+        progress_hook=lambda done, total: emit_progress("measured_pruning", done, total,
                                                  0.78 + 0.10 * done / max(1, total)),
     )
     phases["measured_pruning"] = time.perf_counter() - pruning_started
-    report("measured_pruning", fraction=0.88)
+    emit_progress("measured_pruning", fraction=0.88)
     selection.update(
         accepted_figures=len(figures),
         measured_codec_pruning=measured,
@@ -636,7 +636,7 @@ def _compress_method(
             "stream_bytes": report["entry_compressed_bytes"],
         }
     phases["archives_and_validation"] = time.perf_counter() - encoding_started
-    report("archives", fraction=0.99)
+    emit_progress("archives", fraction=0.99)
     phases["total_wall"] = time.perf_counter() - started
     result = {
         "method": method, "selection": selection,
