@@ -158,6 +158,7 @@ def _centers(
 
 def _fit_partition(
     graph: TypedGraph, out: Path, *, restarts: int, seed: int, cpu_budget: int,
+    progress_hook=None,
 ) -> tuple[np.ndarray, dict]:
     """Use H1's checkpointed spawn/process pool; fit the *full* source graph."""
     stage = out / "fit_data"
@@ -170,7 +171,8 @@ def _fit_partition(
              for i in range(restarts)]
     tasks = [("nested-DC-SBM", seed + i, path)
              for i, path in enumerate(paths)]
-    results = _parallel_fit(stage, tasks, workers=workers, threads=threads)
+    results = _parallel_fit(stage, tasks, workers=workers, threads=threads,
+                            progress_hook=progress_hook)
     best, partitions = _best_fit(results, paths)
     informative = [np.asarray(p, dtype=np.int32) for p in partitions
                    if 1 < len(set(p)) < graph.vertex_count]
@@ -184,6 +186,7 @@ def _fit_partition(
         "blocks_by_level": [len(set(p)) for p in partitions],
         "workers": workers, "threads_per_fit": threads,
         "selected_seed": best["seed"], "source": "full-graph nested DC-SBM",
+        "restart_wall_seconds": [float(x["wall_seconds"]) for x in results],
     }
 
 
@@ -539,8 +542,13 @@ def _compress_method(
     max_ego_nodes: int, min_figure_nodes: int, min_support: int,
     cpu_budget: int, batch: int, graph_hash: str, device: str,
     records: tuple[EdgeRecord, ...], full_view: EgoExtractor,
+    progress_hook=None,
 ) -> dict:
     started = time.perf_counter()
+    phases: dict[str, float] = {}
+    def report(phase, done=1, total=1, fraction=0.0):
+        if progress_hook is not None:
+            progress_hook(phase, done, total, fraction)
     if method == "shuffled":
         rng = np.random.default_rng(seed + 1001)
         labels = rng.permutation(labels) if labels is not None else None
@@ -550,43 +558,61 @@ def _compress_method(
     # nSBM only changes the proposal ranking; independent Wishart never
     # receives nSBM partitions.
     views = {"full": full_view}
-    match_workers = min(max(1, cpu_budget * 2 // 3), 8)
-    extraction_workers = max(1, cpu_budget - match_workers)
+    extraction_workers = max(1, cpu_budget // 3)
+    discovery_started = time.perf_counter()
     dictionary = _discover(
         graph, views, labels, degree, budget=discovery,
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         seed=seed, extraction_workers=extraction_workers,
     )
+    phases["discovery"] = time.perf_counter() - discovery_started
+    report("discovery", fraction=0.12)
+    extraction_workers, match_workers = _vf2_cpu_plan(cpu_budget, dictionary)
     rows, counts, scan_meta = _scan(
         views, dictionary, n=graph.vertex_count, batch=batch,
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         extraction_workers=extraction_workers, match_workers=match_workers,
         checkpoint_dir=out / "scan" / method,
+        progress_hook=lambda done, total: report("VF2", done, total,
+                                                 0.12 + 0.58 * done / max(1, total)),
         identity={"graph": graph_hash, "method": method, "seed": seed,
                   "discovery": discovery, "selection": "full_census_v2",
                   "git_revision": _git_revision()},
     )
+    phases["scan_wall"] = scan_meta["wall_seconds"]
+    phases["extraction"] = scan_meta["extraction_seconds"]
+    phases["vf2"] = scan_meta["vf2_seconds"]
+    report("scan_completed", fraction=0.70)
+    wishart_started = time.perf_counter()
     wishart = None
     allowed = None
     if method in ("wishart", "nsbm_wishart"):
         allowed, wishart = _wishart_allowed(
             dictionary, device=device, workers=match_workers
         )
+    phases["wishart"] = time.perf_counter() - wishart_started
+    selection_started = time.perf_counter()
     figures, selection = _select(
         rows, counts, dictionary, graph=graph, min_support=min_support,
         max_figures=max_figures, allowed_types=allowed, records=records,
     )
+    phases["selection"] = time.perf_counter() - selection_started
+    report("selection", fraction=0.78)
     type_by_nodes = {nodes: type_id for type_id, nodes in rows}
+    pruning_started = time.perf_counter()
     figures, measured = prune_by_archive_bytes(
         vertex_count=graph.vertex_count, records=records,
         candidates=[(type_by_nodes[tuple(nodes)], tuple(nodes)) for nodes in figures],
         workspace=out,
     )
+    phases["measured_pruning"] = time.perf_counter() - pruning_started
+    report("measured_pruning", fraction=0.88)
     selection.update(
         accepted_figures=len(figures),
         measured_codec_pruning=measured,
     )
     results = {}
+    encoding_started = time.perf_counter()
     for coding in ("varint", "huffman"):
         path = out / f"grammar_{method}_{coding}.zip"
         report = encode_grammar(
@@ -606,6 +632,9 @@ def _compress_method(
             "interfaces": report["interface_variants"],
             "stream_bytes": report["entry_compressed_bytes"],
         }
+    phases["archives_and_validation"] = time.perf_counter() - encoding_started
+    report("archives", fraction=0.99)
+    phases["total_wall"] = time.perf_counter() - started
     result = {
         "method": method, "selection": selection,
         "search": {"discovery_budget": discovery,
@@ -616,6 +645,7 @@ def _compress_method(
         "budget": {"cpu": cpu_budget, "vf2_processes": match_workers,
                    "ego_extraction_threads": extraction_workers},
         "seconds": time.perf_counter() - started,
+        "phase_timing_seconds": {k: round(v, 6) for k, v in phases.items()},
     }
     _write_json(out / f"method_{method}.json", result)
     return result
