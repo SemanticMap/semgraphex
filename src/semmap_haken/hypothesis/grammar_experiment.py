@@ -693,7 +693,10 @@ def run(
     recursive: bool = True, max_recursive_levels: int = 3,
     discovery: int | None = None, max_ego_nodes: int = 7,
     min_figure_nodes: int = 3, min_support: int = 3,
+    isomorphism_level: str = "recursive",
 ) -> dict:
+    if isomorphism_level not in LEVELS:
+        raise ValueError("unknown isomorphism level")
     if profile not in PROFILE:
         raise ValueError("unknown profile")
     expected = PROFILE[profile]["vertices"]
@@ -716,6 +719,7 @@ def run(
         "min_support": min_support,
         "recursive": bool(recursive),
         "max_recursive_levels": int(max_recursive_levels),
+        "isomorphism_level": isomorphism_level,
     }
     manifest = {"schema": "nsbm-huffman-experiment-v1",
                 "git_revision": _git_revision(), "graph_sha256": hash_graph,
@@ -745,13 +749,29 @@ def run(
         target.mkdir(parents=True, exist_ok=True)
         _write_json(manifest_path, manifest)
     started = time.perf_counter()
+    timing = {}
+    needs_fit = partition is None and any(m in ("nsbm", "shuffled", "nsbm_wishart") for m in modes)
+    needs_projection = needs_fit or partition is not None
+    needs_recursive = recursive and "nsbm" in modes and needs_projection
+    planned_steps = (3 + int(needs_fit) + int(needs_projection)
+                     + len(modes) + (max_recursive_levels if needs_recursive else 0))
+    progress = _RunProgress(target, planned_steps)
+    progress.event("start")
+    t0 = time.perf_counter()
     degree, degree_backend = _degree(graph, device)
+    timing["degree"] = time.perf_counter() - t0
+    progress.advance("degree")
     fit = None
     all_partitions: list[np.ndarray] = []
-    if partition is None and any(m in ("nsbm", "shuffled", "nsbm_wishart") for m in modes):
+    if needs_fit:
+        t0 = time.perf_counter()
         all_partitions, fit = _fit_partition(
-            graph, target, restarts=restarts, seed=seed, cpu_budget=cpu_budget
+            graph, target, restarts=restarts, seed=seed, cpu_budget=cpu_budget,
+            progress_hook=lambda done, total: progress.event(
+                "nSBM restarts", done / max(1, total), done, total),
         )
+        timing["nsbm_fit"] = time.perf_counter() - t0
+        progress.advance("nSBM fit")
         partition = all_partitions[0]
         np.save(target / "partition.npy", partition, allow_pickle=False)
         _write_json(target / "fit_summary.json", fit)
@@ -773,16 +793,22 @@ def run(
         fit = json.loads((target / "fit_summary.json").read_text())
     projection = None
     if partition is not None:
+        t0 = time.perf_counter()
         projected = estimate_block_kernel(graph, partition, device=device)
         projection = {"backend": projected["backend"],
                       "nonzero_entries": len(projected["entries"])}
         _write_json(target / "empirical_W.json", projected)
+        timing["block_projection"] = time.perf_counter() - t0
+        progress.advance("W projection")
+    t0 = time.perf_counter()
     records = edge_records(graph)
     shared_full_view = _views(graph, None)["full"]
     baseline_path = target / "binary_exact.zip"
     baseline = encode_edge_baseline(graph.vertex_count, records, baseline_path)
     baseline_bundle = _bundle(target / "bundle_binary_exact.zip", baseline_path,
                               graph, hash_graph, records)
+    timing["binary_baseline"] = time.perf_counter() - t0
+    progress.advance("binary baseline")
     results = {}
     for mode in modes:
         stage_path = target / f"method_{mode}.json"
@@ -791,6 +817,7 @@ def run(
                 obj = json.loads(stage_path.read_text())
                 if verify_artifacts(obj, target):
                     results[mode] = obj
+                    progress.advance(f"{mode} (checkpoint)")
                     continue
             except (ValueError, OSError, KeyError, TypeError):
                 pass  # incomplete report is not a valid checkpoint
@@ -806,10 +833,21 @@ def run(
             min_support=min_support, cpu_budget=cpu_budget,
             batch=PROFILE[profile]["batch"], graph_hash=hash_graph,
             device=device, records=records, full_view=shared_full_view,
+            progress_hook=lambda phase, done, total, fraction: progress.event(
+                f"{mode}: {phase}", fraction, done, total),
         )
+        timing[f"method_{mode}"] = results[mode]["seconds"]
+        progress.advance(f"{mode} finished")
     recursive_result = None
     if recursive and "nsbm" in modes and all_partitions:
         from .recursive_codec import run_recursive
+        def recursion_progress(level, phase, done, total):
+            if phase == "level_done":
+                progress.advance(f"recursive L{level} finished")
+            else:
+                progress.event(f"recursive L{level}: {phase}",
+                               done / max(1, total), done, total)
+        t0 = time.perf_counter()
         recursive_result = run_recursive(
             graph, all_partitions, target / "recursive",
             seed=seed, cpu_budget=cpu_budget, discovery=config["discovery"],
@@ -819,7 +857,10 @@ def run(
             batch=PROFILE[profile]["batch"], device=device,
             graph_hash=hash_graph, code_revision=_git_revision(),
             max_levels=max_recursive_levels, resume=resume,
+            isomorphism_level=isomorphism_level,
+            progress_hook=recursion_progress,
         )
+        timing["recursive"] = time.perf_counter() - t0
     output = {
         "status": "complete", "counts": {"vertices": graph.vertex_count,
             "assertions": graph.edge_count, "relations": len(graph.relation_names)},
@@ -835,10 +876,13 @@ def run(
             for m, row in results.items()
         },
         "total_wall_seconds": time.perf_counter() - started,
+        "phase_timing_seconds": {k: round(v, 6) for k, v in timing.items()},
+        "isomorphism_level": isomorphism_level,
         "warning": "One sample, experimental grammar: negative compression gains must be retained; nSBM structural MDL differs from actual archive size.",
     }
     _write_json(target / "report.json", output)
     (target / "COMPLETED").write_text("complete\n", encoding="utf-8")
+    progress.complete()
     return output
 
 
@@ -858,6 +902,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-figure-nodes", type=int, default=3)
     ap.add_argument("--min-support", type=int, default=3)
     ap.add_argument("--max-recursive-levels", type=int, default=3)
+    ap.add_argument("--isomorphism-level", choices=LEVELS, default="recursive")
     ap.add_argument("--no-recursive", action="store_true")
     args = ap.parse_args(argv)
     graph = TypedGraph.from_assertions(stream_assertions(args.input))
@@ -870,6 +915,7 @@ def main(argv: list[str] | None = None) -> int:
         min_support=args.min_support,
         recursive=not args.no_recursive,
         max_recursive_levels=args.max_recursive_levels,
+        isomorphism_level=args.isomorphism_level,
     )
     print(json.dumps({"status": results["status"],
                       "counts": results["counts"],
