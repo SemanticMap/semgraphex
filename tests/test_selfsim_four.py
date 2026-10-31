@@ -103,7 +103,7 @@ def test_nsbm_multiscale_resume_and_corruption(tmp_path,monkeypatch):
     resumed=run(graph,levels,out,resume=True,**args)
     assert resumed["identity"]==report["identity"]
     (out/"null_typed_degree_rewire_000.json").write_text("{broken")
-    (out/"COMPLETED").unlink()
+    # Even a stale COMPLETED marker must not mask a damaged null replicate.
     repaired=run(graph,levels,out,resume=True,**args)
     assert repaired["status"]=="complete"
     assert json.loads((out/"null_typed_degree_rewire_000.json").read_text())["sha256"]

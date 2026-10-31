@@ -211,7 +211,27 @@ def run(graph: TypedGraph, partitions: list[np.ndarray], output: str | Path, *,
             raise ValueError("RESUME requires identical graph, partitions, configuration and revision")
         if (target/"COMPLETED").is_file():
             cached = _recover(target/"result_checkpoint.json", identity)
-            if cached is not None:
+            verified = cached is not None and (target/"report.json").is_file()
+            # Completed results are auditable only if every replicate remains
+            # present and checksum-verified; corruption triggers re-compute.
+            if verified:
+                try:
+                    verified = json.loads(
+                        (target/"report.json").read_text(encoding="utf-8")
+                    ) == cached
+                except (ValueError, OSError):
+                    verified = False
+            if verified:
+                for kind in ("permuted_partitions","typed_degree_rewire"):
+                    for rep in range(null_repeats):
+                        tag = {**identity,"null_kind":kind,"replicate":rep}
+                        path = target/f"null_{kind}_{rep:03d}.json"
+                        if _recover(path,tag) is None:
+                            verified = False
+                            break
+                    if not verified:
+                        break
+            if verified:
                 return cached
             (target/"COMPLETED").unlink()
     else:
