@@ -134,19 +134,26 @@ def test_drive_publishes_only_verified_archives_and_completed_last(tmp_path):
     drive = tmp_path / "drive"
     archive = local / "recursive" / "level_001.zip"
     archive.parent.mkdir(parents=True)
+    log = tmp_path / "outside_run.log"
+    log.write_text("diagnostics survive on Drive\n")
     archive.write_bytes(b"sample exact recursive archive")
     sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
     (local / "progress.json").write_text('{"overall_percent":40}')
     namespace = {
         "RUN_LOCAL": local, "PERSISTENT": drive,
         "shutil": shutil, "os": os, "re": re, "json": json, "Path": Path,
-        "file_sha256": sha,
+        "file_sha256": sha, "LOG": log,
     }
     exec(compile(function, str(notebook), "exec"), namespace)
     sync = namespace["sync_checkpoint"]
 
+    # No manifest means NEW preflight never ran: do not create a fake Drive run.
+    sync()
+    assert not drive.exists()
+    (local / "manifest.json").write_text('{"run":"initialized"}')
     sync()
     assert (drive / "progress.json").exists()
+    assert (drive / "execution.log").read_text() == log.read_text()
     assert not (drive / "recursive" / "level_001.zip").exists()
     assert not (drive / "COMPLETED").exists()
     meta = archive.with_suffix(".json")
@@ -173,3 +180,32 @@ def test_drive_publishes_only_verified_archives_and_completed_last(tmp_path):
     (local / "COMPLETED").write_text("complete\n")
     sync(final=True)
     assert (drive / "COMPLETED").read_text() == "complete\n"
+
+
+
+def test_colab_new_log_is_outside_cli_output(tmp_path):
+    """Regression: subprocess redirects stdout *before* run() checks NEW."""
+    import ast
+    from pathlib import Path
+
+    notebook = Path(__file__).resolve().parents[1] / (
+        "notebooks/21_shared_shapes_t4_l4_colab.ipynb")
+    nb = json.loads(notebook.read_text(encoding="utf-8"))
+    code = "".join(nb["cells"][8]["source"])
+    assert "RUN_LOCAL.mkdir" not in code
+    tree = ast.parse(code)
+    log_assignment = next(
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "LOG"
+                for target in node.targets)
+    )
+    scope = {"SCRATCH": tmp_path, "RUN_ID": "sample-v2"}
+    log_path = eval(compile(ast.Expression(log_assignment.value),
+                            str(notebook), "eval"), scope)
+    run_dir = tmp_path / "runs" / scope["RUN_ID"]
+    assert not run_dir.exists()
+    with log_path.open("w", encoding="utf-8") as log:
+        log.write("stdout redirected")
+        assert not run_dir.exists()
+    assert log_path.read_text() == "stdout redirected"
