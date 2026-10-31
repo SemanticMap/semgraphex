@@ -56,6 +56,7 @@ semmap-hypothesis = "semmap_haken.hypothesis.cli:main"
 semmap-h1 = "semmap_haken.hypothesis.h1_cli:main"
 semmap-conceptnet-10k = "semmap_haken.hypothesis.conceptnet_10k:main"
 semmap-nsbm-huffman = "semmap_haken.hypothesis.grammar_experiment:main"
+semmap-nsbm-selfsim = "semmap_haken.hypothesis.selfsim_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
