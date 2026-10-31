@@ -605,6 +605,8 @@ def _compress_method(
         vertex_count=graph.vertex_count, records=records,
         candidates=[(type_by_nodes[tuple(nodes)], tuple(nodes)) for nodes in figures],
         workspace=out,
+        progress_hook=lambda done, total: report("measured_pruning", done, total,
+                                                 0.78 + 0.10 * done / max(1, total)),
     )
     phases["measured_pruning"] = time.perf_counter() - pruning_started
     report("measured_pruning", fraction=0.88)
@@ -841,12 +843,12 @@ def run(
     recursive_result = None
     if recursive and "nsbm" in modes and all_partitions:
         from .recursive_codec import run_recursive
-        def recursion_progress(level, phase, done, total):
+        def recursion_progress(level, phase, done, total, fraction=0.0):
             if phase == "level_done":
                 progress.advance(f"recursive L{level} finished")
             else:
                 progress.event(f"recursive L{level}: {phase}",
-                               done / max(1, total), done, total)
+                               fraction, done, total)
         t0 = time.perf_counter()
         recursive_result = run_recursive(
             graph, all_partitions, target / "recursive",
