@@ -28,6 +28,7 @@ from semmap_haken.graph_dictionary import GraphDictionary
 from semmap_haken.graph_mdl import (MdlOccurrence, build_canonical_huffman_codes,
                                    select_nonoverlapping_mdl)
 from semmap_haken.graphex_components import EdgeRecord
+from semmap_haken.shape_identity import LEVELS
 from semmap_haken.wishart_metrics import EgoExtractor, typed_wl_features, _knn_from_features
 from semmap_haken.wishart_cluster import wishart_cluster
 from semmap_haken.wishart_parallel import (
@@ -650,6 +651,39 @@ def _compress_method(
     _write_json(out / f"method_{method}.json", result)
     return result
 
+
+
+class _RunProgress:
+    """One durable progress file and bounded console event per stage."""
+
+    def __init__(self, target: Path, total_steps: int):
+        self.target = target
+        self.total = max(1, total_steps)
+        self.done = 0
+        self.started = time.perf_counter()
+
+    def event(self, phase: str, fraction: float = 0.0,
+              completed: int = 0, total: int = 1) -> None:
+        fraction = max(0.0, min(1.0, fraction))
+        payload = {
+            "phase": phase, "step": min(self.done + 1, self.total),
+            "steps_total": self.total,
+            "completed": int(completed), "total": int(total),
+            "phase_percent": round(100.0 * fraction, 2),
+            "overall_percent": round(100.0 * min(
+                self.total, self.done + fraction) / self.total, 2),
+            "elapsed_seconds": round(time.perf_counter() - self.started, 2),
+        }
+        atomic_json(self.target / "progress.json", payload)
+        print("PROGRESS " + json.dumps(payload, ensure_ascii=False), flush=True)
+
+    def advance(self, phase: str) -> None:
+        self.event(phase, 1.0, 1, 1)
+        self.done += 1
+
+    def complete(self) -> None:
+        self.done = self.total - 1
+        self.advance("completed")
 
 def run(
     graph: TypedGraph, out: str | Path, *, profile: str = "10k",
