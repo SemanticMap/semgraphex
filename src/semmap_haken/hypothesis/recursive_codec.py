@@ -424,6 +424,10 @@ def run_recursive(
         figures, measured = prune_by_archive_bytes(
             vertex_count=n, records=edges, candidates=candidates,
             workspace=directory, node_types=node_types,
+            progress_hook=(lambda done, total: progress_hook(
+                level, "measured_pruning", done, total,
+                0.78 + 0.10 * done / max(1, total))
+                if progress_hook is not None else None),
         )
         level_timing["measured_pruning"] = time.perf_counter() - pruning_started
         if progress_hook is not None:
