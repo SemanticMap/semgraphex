@@ -69,6 +69,7 @@ def prune_by_archive_bytes(
     *, vertex_count: int, records: Sequence[EdgeRecord],
     candidates: Sequence[tuple[str, tuple[int, ...]]],
     workspace: Path, node_types: Mapping[int, str] | None = None,
+    progress_hook=None,
 ) -> tuple[list[tuple[int, ...]], dict]:
     """Accept a symbol group iff its *measured Huffman ZIP* gets smaller.
 
@@ -93,7 +94,9 @@ def prune_by_archive_bytes(
         rejected_types = []
         scored = initial_cost["ranking_bits_by_type"]
         ordered = sorted(groups, key=lambda key: (-scored[key], key))
-        for type_id in ordered:
+        if progress_hook is not None:
+            progress_hook(0, len(ordered))
+        for position, type_id in enumerate(ordered, 1):
             trial_rows = active + [(type_id, nodes) for nodes in groups[type_id]]
             archive = tmp / "trial.zip"
             measured = encode_grammar(
@@ -106,6 +109,8 @@ def prune_by_archive_bytes(
                 accepted_types.append(type_id)
             else:
                 rejected_types.append(type_id)
+            if progress_hook is not None:
+                progress_hook(position, len(ordered))
         final_cost = _cost_snapshot(active, records, vertex_count)
     return [nodes for _, nodes in active], {
         "candidate_figures": len(initial),

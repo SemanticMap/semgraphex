@@ -6,6 +6,7 @@ projection, not for nSBM/VF2. All claims refer to measured exact archive bytes.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from collections import Counter
 import io
@@ -27,6 +28,7 @@ from semmap_haken.graph_dictionary import GraphDictionary
 from semmap_haken.graph_mdl import (MdlOccurrence, build_canonical_huffman_codes,
                                    select_nonoverlapping_mdl)
 from semmap_haken.graphex_components import EdgeRecord
+from semmap_haken.shape_identity import LEVELS
 from semmap_haken.wishart_metrics import EgoExtractor, typed_wl_features, _knn_from_features
 from semmap_haken.wishart_cluster import wishart_cluster
 from semmap_haken.wishart_parallel import (
@@ -41,7 +43,7 @@ from .scan_checkpoint import (
 from .projection import estimate_block_kernel
 from .runner import (
     _available_cpus, _best_fit, _git_revision, _parallel_fit,
-    _save_graph, _sha_bytes, _worker_budget,
+    _save_graph, _sha_bytes, _worker_budget, _available_memory_bytes,
 )
 
 PROFILE = {
@@ -157,6 +159,7 @@ def _centers(
 
 def _fit_partition(
     graph: TypedGraph, out: Path, *, restarts: int, seed: int, cpu_budget: int,
+    progress_hook=None,
 ) -> tuple[np.ndarray, dict]:
     """Use H1's checkpointed spawn/process pool; fit the *full* source graph."""
     stage = out / "fit_data"
@@ -169,7 +172,8 @@ def _fit_partition(
              for i in range(restarts)]
     tasks = [("nested-DC-SBM", seed + i, path)
              for i, path in enumerate(paths)]
-    results = _parallel_fit(stage, tasks, workers=workers, threads=threads)
+    results = _parallel_fit(stage, tasks, workers=workers, threads=threads,
+                            progress_hook=progress_hook)
     best, partitions = _best_fit(results, paths)
     informative = [np.asarray(p, dtype=np.int32) for p in partitions
                    if 1 < len(set(p)) < graph.vertex_count]
@@ -183,6 +187,7 @@ def _fit_partition(
         "blocks_by_level": [len(set(p)) for p in partitions],
         "workers": workers, "threads_per_fit": threads,
         "selected_seed": best["seed"], "source": "full-graph nested DC-SBM",
+        "restart_wall_seconds": [float(x["wall_seconds"]) for x in results],
     }
 
 
@@ -207,23 +212,40 @@ def _discover(
     return dictionary
 
 
+def _vf2_cpu_plan(cpu_budget: int, dictionary: GraphDictionary) -> tuple[int, int]:
+    """One CPU budget across extraction and matching, capped by free RAM."""
+    cpu = max(1, min(cpu_budget, _available_cpus()))
+    if cpu == 1:
+        return 1, 1
+    extraction = max(1, cpu // 3)
+    # Spawn replicates the (NetworkX) dictionary. Be conservative on Colab.
+    bytes_per_worker = max(256 * (1 << 20), len(dictionary.types) * (128 << 10))
+    memory_workers = max(1, int(_available_memory_bytes() * .5 // bytes_per_worker))
+    matching = max(1, min(cpu - extraction, 8, memory_workers))
+    return extraction, matching
+
+
 def _scan(
     views: dict[str, EgoExtractor], dictionary: GraphDictionary, *,
     n: int, batch: int, max_ego_nodes: int, min_figure_nodes: int,
     extraction_workers: int, match_workers: int,
     checkpoint_dir: Path, identity: dict, checkpoint_hook=None,
-    node_types: dict[int, str] | None = None,
+    node_types: dict[int, str] | None = None, progress_hook=None,
 ) -> tuple[list[tuple[str, tuple[int, ...]]], Counter, dict]:
-    """Bounded VF2 census with resumable, content-verified 4k-node shards.
+    """Bounded, ordered extraction/VF2 pipeline with verified 4k-center shards.
 
-    Corrupt/torn shards are recomputed. Dictionary, source, config, view
-    and revision are all included in each checkpoint identity.
+    One future extracts the NEXT batch while the current batch is matched in
+    existing spawned VF2 workers. No unbounded queues or nested process pools.
+    Valid RESUME shards skip both stages and still count toward progress.
     """
+    started = time.perf_counter()
     rows: list[tuple[str, tuple[int, ...]]] = []
     counts: Counter[str] = Counter()
     seen: set[tuple[int, ...]] = set()
     chunk_span = batch * max(1, 4096 // batch)
-    reused, rebuilt = 0, 0
+    reused, rebuilt, extracted, matched, completed = 0, 0, 0, 0, 0
+    extraction_seconds, vf2_seconds = 0.0, 0.0
+    total = n * len(views)
     dictionary_digest = hashlib.sha256(json.dumps(
         [(key, dictionary.types[key].fingerprint,
           dictionary.types[key].prototype) for key in sorted(dictionary.types)],
@@ -246,30 +268,56 @@ def _scan(
                 saved = load_shard(shard, identity=shard_identity)
                 if saved is None:
                     materialized: list[list] = []
-                    candidates = []
-                    for start in range(chunk_start, chunk_stop, batch):
+
+                    def extract(start: int):
+                        t0 = time.perf_counter()
                         centers = np.arange(start, min(chunk_stop, start + batch),
                                             dtype=np.int64)
-                        candidates.extend(x for x in view.extract_centers(
+                        candidates = tuple(x for x in view.extract_centers(
                             centers, radius=1, max_ego_nodes=max_ego_nodes,
                             workers=extraction_workers, symbol_types=node_types,
                         ) if len(x.nodes) >= min_figure_nodes)
-                    # The old submit(...).result() loop serialized every VF2
-                    # chunk. map() schedules independent matching chunks across
-                    # CPU workers and returns deterministic original order.
-                    pieces = [tuple(candidates[j:j+32])
-                              for j in range(0, len(candidates), 32)]
-                    matched_chunks = (
-                        pool.map(match_chunk, pieces) if match_workers > 1
-                        else map(pool.match, pieces)
-                    )
-                    for piece, matches in zip(pieces, matched_chunks, strict=True):
-                        for candidate, match in zip(piece, matches, strict=True):
-                            if match is not None:
-                                materialized.append([
-                                    str(match[0]),
-                                    [int(node) for node in candidate.nodes],
-                                ])
+                        return candidates, time.perf_counter() - t0
+
+                    def match_candidates(candidates):
+                        nonlocal vf2_seconds, matched
+                        # Only a batch's 32-candidate pieces are in flight.
+                        pieces = [tuple(candidates[j:j + 32])
+                                  for j in range(0, len(candidates), 32)]
+                        started_match = time.perf_counter()
+                        results = (pool.map(match_chunk, pieces)
+                                   if match_workers > 1 else map(pool.match, pieces))
+                        for piece, matches in zip(pieces, results, strict=True):
+                            for candidate, match in zip(piece, matches, strict=True):
+                                if match is not None:
+                                    materialized.append([
+                                        str(match[0]),
+                                        [int(node) for node in candidate.nodes],
+                                    ])
+                        vf2_seconds += time.perf_counter() - started_match
+                        matched += len(candidates)
+
+                    starts = iter(range(chunk_start, chunk_stop, batch))
+                    if match_workers > 1:
+                        # Prefetch only one batch. The single extraction task
+                        # may itself use the existing bounded CPU thread pool.
+                        with ThreadPoolExecutor(max_workers=1) as extractor:
+                            future = extractor.submit(extract, next(starts))
+                            while future is not None:
+                                candidates, elapsed = future.result()
+                                next_start = next(starts, None)
+                                future = (extractor.submit(extract, next_start)
+                                          if next_start is not None else None)
+                                extraction_seconds += elapsed
+                                extracted += len(candidates)
+                                match_candidates(candidates)
+                    else:
+                        # No extra producer thread on single-worker paths.
+                        for start in starts:
+                            candidates, elapsed = extract(start)
+                            extraction_seconds += elapsed
+                            extracted += len(candidates)
+                            match_candidates(candidates)
                     save_shard(shard, identity=shard_identity, rows=materialized)
                     saved = materialized
                     rebuilt += 1
@@ -284,14 +332,24 @@ def _scan(
                     seen.add(key)
                     rows.append((str(type_id), key))
                     counts[str(type_id)] += 1
+                completed += chunk_stop - chunk_start
                 if checkpoint_hook is not None:
                     checkpoint_hook(shard)
+                if progress_hook is not None:
+                    progress_hook(completed, total)
     return rows, counts, {
         "checkpoint_shards_reused": reused,
         "checkpoint_shards_computed": rebuilt,
         "checkpoint_directory": str(checkpoint_dir),
+        "centers_processed": completed,
+        "centers_total": total,
+        "candidates_extracted": extracted,
+        "candidates_matched": matched,
+        "extraction_seconds": round(extraction_seconds, 6),
+        "vf2_seconds": round(vf2_seconds, 6),
+        "wall_seconds": round(time.perf_counter() - started, 6),
+        "pipeline": "one_batch_prefetch" if match_workers > 1 else "sequential",
     }
-
 
 
 class _LocalMatcher:
@@ -485,8 +543,13 @@ def _compress_method(
     max_ego_nodes: int, min_figure_nodes: int, min_support: int,
     cpu_budget: int, batch: int, graph_hash: str, device: str,
     records: tuple[EdgeRecord, ...], full_view: EgoExtractor,
+    progress_hook=None,
 ) -> dict:
     started = time.perf_counter()
+    phases: dict[str, float] = {}
+    def emit_progress(phase, done=1, total=1, fraction=0.0):
+        if progress_hook is not None:
+            progress_hook(phase, done, total, fraction)
     if method == "shuffled":
         rng = np.random.default_rng(seed + 1001)
         labels = rng.permutation(labels) if labels is not None else None
@@ -496,43 +559,63 @@ def _compress_method(
     # nSBM only changes the proposal ranking; independent Wishart never
     # receives nSBM partitions.
     views = {"full": full_view}
-    match_workers = min(max(1, cpu_budget * 2 // 3), 8)
-    extraction_workers = max(1, cpu_budget - match_workers)
+    extraction_workers = max(1, cpu_budget // 3)
+    discovery_started = time.perf_counter()
     dictionary = _discover(
         graph, views, labels, degree, budget=discovery,
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         seed=seed, extraction_workers=extraction_workers,
     )
+    phases["discovery"] = time.perf_counter() - discovery_started
+    emit_progress("discovery", fraction=0.12)
+    extraction_workers, match_workers = _vf2_cpu_plan(cpu_budget, dictionary)
     rows, counts, scan_meta = _scan(
         views, dictionary, n=graph.vertex_count, batch=batch,
         max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
         extraction_workers=extraction_workers, match_workers=match_workers,
         checkpoint_dir=out / "scan" / method,
+        progress_hook=lambda done, total: emit_progress("VF2", done, total,
+                                                 0.12 + 0.58 * done / max(1, total)),
         identity={"graph": graph_hash, "method": method, "seed": seed,
                   "discovery": discovery, "selection": "full_census_v2",
                   "git_revision": _git_revision()},
     )
+    phases["scan_wall"] = scan_meta["wall_seconds"]
+    phases["extraction"] = scan_meta["extraction_seconds"]
+    phases["vf2"] = scan_meta["vf2_seconds"]
+    emit_progress("scan_completed", fraction=0.70)
+    wishart_started = time.perf_counter()
     wishart = None
     allowed = None
     if method in ("wishart", "nsbm_wishart"):
         allowed, wishart = _wishart_allowed(
             dictionary, device=device, workers=match_workers
         )
+    phases["wishart"] = time.perf_counter() - wishart_started
+    selection_started = time.perf_counter()
     figures, selection = _select(
         rows, counts, dictionary, graph=graph, min_support=min_support,
         max_figures=max_figures, allowed_types=allowed, records=records,
     )
+    phases["selection"] = time.perf_counter() - selection_started
+    emit_progress("selection", fraction=0.78)
     type_by_nodes = {nodes: type_id for type_id, nodes in rows}
+    pruning_started = time.perf_counter()
     figures, measured = prune_by_archive_bytes(
         vertex_count=graph.vertex_count, records=records,
         candidates=[(type_by_nodes[tuple(nodes)], tuple(nodes)) for nodes in figures],
         workspace=out,
+        progress_hook=lambda done, total: emit_progress("measured_pruning", done, total,
+                                                 0.78 + 0.10 * done / max(1, total)),
     )
+    phases["measured_pruning"] = time.perf_counter() - pruning_started
+    emit_progress("measured_pruning", fraction=0.88)
     selection.update(
         accepted_figures=len(figures),
         measured_codec_pruning=measured,
     )
     results = {}
+    encoding_started = time.perf_counter()
     for coding in ("varint", "huffman"):
         path = out / f"grammar_{method}_{coding}.zip"
         report = encode_grammar(
@@ -552,6 +635,9 @@ def _compress_method(
             "interfaces": report["interface_variants"],
             "stream_bytes": report["entry_compressed_bytes"],
         }
+    phases["archives_and_validation"] = time.perf_counter() - encoding_started
+    emit_progress("archives", fraction=0.99)
+    phases["total_wall"] = time.perf_counter() - started
     result = {
         "method": method, "selection": selection,
         "search": {"discovery_budget": discovery,
@@ -562,10 +648,44 @@ def _compress_method(
         "budget": {"cpu": cpu_budget, "vf2_processes": match_workers,
                    "ego_extraction_threads": extraction_workers},
         "seconds": time.perf_counter() - started,
+        "phase_timing_seconds": {k: round(v, 6) for k, v in phases.items()},
     }
     _write_json(out / f"method_{method}.json", result)
     return result
 
+
+
+class _RunProgress:
+    """One durable progress file and bounded console event per stage."""
+
+    def __init__(self, target: Path, total_steps: int):
+        self.target = target
+        self.total = max(1, total_steps)
+        self.done = 0
+        self.started = time.perf_counter()
+
+    def event(self, phase: str, fraction: float = 0.0,
+              completed: int = 0, total: int = 1) -> None:
+        fraction = max(0.0, min(1.0, fraction))
+        payload = {
+            "phase": phase, "step": min(self.done + 1, self.total),
+            "steps_total": self.total,
+            "completed": int(completed), "total": int(total),
+            "phase_percent": round(100.0 * fraction, 2),
+            "overall_percent": round(100.0 * min(
+                self.total, self.done + fraction) / self.total, 2),
+            "elapsed_seconds": round(time.perf_counter() - self.started, 2),
+        }
+        atomic_json(self.target / "progress.json", payload)
+        print("PROGRESS " + json.dumps(payload, ensure_ascii=False), flush=True)
+
+    def advance(self, phase: str) -> None:
+        self.event(phase, 1.0, 1, 1)
+        self.done += 1
+
+    def complete(self) -> None:
+        self.done = self.total - 1
+        self.advance("completed")
 
 def run(
     graph: TypedGraph, out: str | Path, *, profile: str = "10k",
@@ -575,7 +695,10 @@ def run(
     recursive: bool = True, max_recursive_levels: int = 3,
     discovery: int | None = None, max_ego_nodes: int = 7,
     min_figure_nodes: int = 3, min_support: int = 3,
+    isomorphism_level: str = "recursive",
 ) -> dict:
+    if isomorphism_level not in LEVELS:
+        raise ValueError("unknown isomorphism level")
     if profile not in PROFILE:
         raise ValueError("unknown profile")
     expected = PROFILE[profile]["vertices"]
@@ -598,6 +721,7 @@ def run(
         "min_support": min_support,
         "recursive": bool(recursive),
         "max_recursive_levels": int(max_recursive_levels),
+        "isomorphism_level": isomorphism_level,
     }
     manifest = {"schema": "nsbm-huffman-experiment-v1",
                 "git_revision": _git_revision(), "graph_sha256": hash_graph,
@@ -627,13 +751,29 @@ def run(
         target.mkdir(parents=True, exist_ok=True)
         _write_json(manifest_path, manifest)
     started = time.perf_counter()
+    timing = {}
+    needs_fit = partition is None and any(m in ("nsbm", "shuffled", "nsbm_wishart") for m in modes)
+    needs_projection = needs_fit or partition is not None
+    needs_recursive = recursive and "nsbm" in modes and needs_projection
+    planned_steps = (3 + int(needs_fit) + int(needs_projection)
+                     + len(modes) + (max_recursive_levels if needs_recursive else 0))
+    progress = _RunProgress(target, planned_steps)
+    progress.event("start")
+    t0 = time.perf_counter()
     degree, degree_backend = _degree(graph, device)
+    timing["degree"] = time.perf_counter() - t0
+    progress.advance("degree")
     fit = None
     all_partitions: list[np.ndarray] = []
-    if partition is None and any(m in ("nsbm", "shuffled", "nsbm_wishart") for m in modes):
+    if needs_fit:
+        t0 = time.perf_counter()
         all_partitions, fit = _fit_partition(
-            graph, target, restarts=restarts, seed=seed, cpu_budget=cpu_budget
+            graph, target, restarts=restarts, seed=seed, cpu_budget=cpu_budget,
+            progress_hook=lambda done, total: progress.event(
+                "nSBM restarts", done / max(1, total), done, total),
         )
+        timing["nsbm_fit"] = time.perf_counter() - t0
+        progress.advance("nSBM fit")
         partition = all_partitions[0]
         np.save(target / "partition.npy", partition, allow_pickle=False)
         _write_json(target / "fit_summary.json", fit)
@@ -655,16 +795,22 @@ def run(
         fit = json.loads((target / "fit_summary.json").read_text())
     projection = None
     if partition is not None:
+        t0 = time.perf_counter()
         projected = estimate_block_kernel(graph, partition, device=device)
         projection = {"backend": projected["backend"],
                       "nonzero_entries": len(projected["entries"])}
         _write_json(target / "empirical_W.json", projected)
+        timing["block_projection"] = time.perf_counter() - t0
+        progress.advance("W projection")
+    t0 = time.perf_counter()
     records = edge_records(graph)
     shared_full_view = _views(graph, None)["full"]
     baseline_path = target / "binary_exact.zip"
     baseline = encode_edge_baseline(graph.vertex_count, records, baseline_path)
     baseline_bundle = _bundle(target / "bundle_binary_exact.zip", baseline_path,
                               graph, hash_graph, records)
+    timing["binary_baseline"] = time.perf_counter() - t0
+    progress.advance("binary baseline")
     results = {}
     for mode in modes:
         stage_path = target / f"method_{mode}.json"
@@ -673,6 +819,7 @@ def run(
                 obj = json.loads(stage_path.read_text())
                 if verify_artifacts(obj, target):
                     results[mode] = obj
+                    progress.advance(f"{mode} (checkpoint)")
                     continue
             except (ValueError, OSError, KeyError, TypeError):
                 pass  # incomplete report is not a valid checkpoint
@@ -688,10 +835,21 @@ def run(
             min_support=min_support, cpu_budget=cpu_budget,
             batch=PROFILE[profile]["batch"], graph_hash=hash_graph,
             device=device, records=records, full_view=shared_full_view,
+            progress_hook=lambda phase, done, total, fraction: progress.event(
+                f"{mode}: {phase}", fraction, done, total),
         )
+        timing[f"method_{mode}"] = results[mode]["seconds"]
+        progress.advance(f"{mode} finished")
     recursive_result = None
     if recursive and "nsbm" in modes and all_partitions:
         from .recursive_codec import run_recursive
+        def recursion_progress(level, phase, done, total, fraction=0.0):
+            if phase == "level_done":
+                progress.advance(f"recursive L{level} finished")
+            else:
+                progress.event(f"recursive L{level}: {phase}",
+                               fraction, done, total)
+        t0 = time.perf_counter()
         recursive_result = run_recursive(
             graph, all_partitions, target / "recursive",
             seed=seed, cpu_budget=cpu_budget, discovery=config["discovery"],
@@ -701,7 +859,10 @@ def run(
             batch=PROFILE[profile]["batch"], device=device,
             graph_hash=hash_graph, code_revision=_git_revision(),
             max_levels=max_recursive_levels, resume=resume,
+            isomorphism_level=isomorphism_level,
+            progress_hook=recursion_progress,
         )
+        timing["recursive"] = time.perf_counter() - t0
     output = {
         "status": "complete", "counts": {"vertices": graph.vertex_count,
             "assertions": graph.edge_count, "relations": len(graph.relation_names)},
@@ -717,10 +878,13 @@ def run(
             for m, row in results.items()
         },
         "total_wall_seconds": time.perf_counter() - started,
+        "phase_timing_seconds": {k: round(v, 6) for k, v in timing.items()},
+        "isomorphism_level": isomorphism_level,
         "warning": "One sample, experimental grammar: negative compression gains must be retained; nSBM structural MDL differs from actual archive size.",
     }
     _write_json(target / "report.json", output)
     (target / "COMPLETED").write_text("complete\n", encoding="utf-8")
+    progress.complete()
     return output
 
 
@@ -740,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-figure-nodes", type=int, default=3)
     ap.add_argument("--min-support", type=int, default=3)
     ap.add_argument("--max-recursive-levels", type=int, default=3)
+    ap.add_argument("--isomorphism-level", choices=LEVELS, default="recursive")
     ap.add_argument("--no-recursive", action="store_true")
     args = ap.parse_args(argv)
     graph = TypedGraph.from_assertions(stream_assertions(args.input))
@@ -752,6 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         min_support=args.min_support,
         recursive=not args.no_recursive,
         max_recursive_levels=args.max_recursive_levels,
+        isomorphism_level=args.isomorphism_level,
     )
     print(json.dumps({"status": results["status"],
                       "counts": results["counts"],

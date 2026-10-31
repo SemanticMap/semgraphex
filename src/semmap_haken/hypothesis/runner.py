@@ -223,7 +223,7 @@ def _fit_task(graph_path: Path, kind: str, seed: int, threads: int,
 
 def _parallel_fit(
     graph_path: Path, tasks: list[tuple[str, int, Path]], *,
-    threads: int, workers: int, injected_fit=None,
+    threads: int, workers: int, injected_fit=None, progress_hook=None,
 ) -> list[dict]:
     """Bound futures; do not pickle million-edge graphs for every restart."""
     answers: dict[Path, dict] = {}
@@ -232,10 +232,16 @@ def _parallel_fit(
     for kind, seed, path in tasks:
         if (kind, seed, path) not in pending:
             answers[path] = json.loads(path.read_text(encoding="utf-8"))
+    completed = len(answers)
+    if progress_hook is not None:
+        progress_hook(completed, len(tasks))
     if pending:
         if workers <= 1 or injected_fit is not None:
             for kind, seed, path in pending:
                 answers[path] = _fit_task(graph_path, kind, seed, threads, path, injected_fit)
+                completed += 1
+                if progress_hook is not None:
+                    progress_hook(completed, len(tasks))
         else:
             iterator = iter(pending)
             with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn")) as pool:
@@ -255,6 +261,9 @@ def _parallel_fit(
                     for future in done:
                         path = running.pop(future)
                         answers[path] = future.result()
+                        completed += 1
+                        if progress_hook is not None:
+                            progress_hook(completed, len(tasks))
                         submit()
     return [answers[path] for _, _, path in tasks]
 

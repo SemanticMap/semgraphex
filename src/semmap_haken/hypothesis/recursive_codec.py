@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import time
 from pathlib import Path
 import zipfile
 
@@ -286,11 +287,12 @@ def run_recursive(
     max_ego_nodes: int, min_figure_nodes: int, min_support: int,
     batch: int, device: str, graph_hash: str, code_revision: str,
     max_levels: int = 3, resume: bool = False,
-    isomorphism_level: str = "recursive",
+    isomorphism_level: str = "recursive", progress_hook=None,
 ) -> dict:
     """Every accepted level must shorten the *whole* exact hierarchy ZIP."""
     from .grammar_experiment import (
         _degree, _discover, _scan, _select, _views, edge_records,
+        _vf2_cpu_plan,
     )
     from .grammar_selection import prune_by_archive_bytes
     from .graph import TypedGraph
@@ -346,8 +348,15 @@ def run_recursive(
     if registry is None:
         raise ValueError("shared-symbol runs require a v2 checkpoint; start a NEW run")
     attempted = []
+    if progress_hook is not None:
+        for accepted in range(offset):
+            progress_hook(accepted, "level_done", 1, 1, 1.0)
     stop_reason = "max_levels"
     for level in range(offset, min(max_levels, len(partitions))):
+        level_started = time.perf_counter()
+        level_timing = {}
+        if progress_hook is not None:
+            progress_hook(level, "prepare", 0, 1, 0.0)
         labels = np.asarray(partitions[level], dtype=np.int64)
         if labels.shape != (graph.vertex_count,):
             raise ValueError("nSBM partitions must cover original vertices")
@@ -366,25 +375,36 @@ def run_recursive(
         )
         from .runner import _sha_bytes
         current_hash = _sha_bytes(current)
+        discovery_started = time.perf_counter()
         degree, _ = _degree(current, device)
         views = {"full": _views(current, None)["full"]}
         extract = max(1, cpu_budget // 3)
-        match = max(1, cpu_budget - extract)
         dictionary = _discover(
             current, views, current_labels, degree, budget=discovery,
             max_ego_nodes=max_ego_nodes, min_figure_nodes=min_figure_nodes,
             seed=seed + level, extraction_workers=extract,
             node_types=node_types,
         )
-        scan_rows, counts, _ = _scan(
+        level_timing["discovery"] = time.perf_counter() - discovery_started
+        if progress_hook is not None:
+            progress_hook(level, "discovery", 1, 1, 0.12)
+        extract, match = _vf2_cpu_plan(cpu_budget, dictionary)
+        scan_rows, counts, scan_meta = _scan(
             views, dictionary, n=n, batch=batch, max_ego_nodes=max_ego_nodes,
             min_figure_nodes=min_figure_nodes, extraction_workers=extract,
             match_workers=match, node_types=node_types,
+            progress_hook=(lambda done, total: progress_hook(
+                level, "VF2", done, total, 0.12 + 0.58 * done / max(1, total))
+                if progress_hook is not None else None),
             checkpoint_dir=directory / f"scan_{level:03d}",
             identity={**identity, "level": level,
                       "symbol_registry_sha256": hashlib.sha256(registry.dumps().encode()).hexdigest(),
                       "source_n": n, "current_graph_sha256": current_hash},
         )
+        level_timing.update(scan_wall=scan_meta["wall_seconds"],
+                            extraction=scan_meta["extraction_seconds"],
+                            vf2=scan_meta["vf2_seconds"])
+        selection_started = time.perf_counter()
         figures, selection = _select(
             scan_rows, counts, dictionary, graph=current,
             min_support=min_support, max_figures=max_figures,
@@ -397,16 +417,33 @@ def run_recursive(
             if current_labels[group[0]] >= 0 and
             all(current_labels[v] == current_labels[group[0]] for v in group)
         ]
+        level_timing["selection"] = time.perf_counter() - selection_started
+        if progress_hook is not None:
+            progress_hook(level, "selection", 1, 1, 0.78)
+        pruning_started = time.perf_counter()
         figures, measured = prune_by_archive_bytes(
             vertex_count=n, records=edges, candidates=candidates,
             workspace=directory, node_types=node_types,
+            progress_hook=(lambda done, total: progress_hook(
+                level, "measured_pruning", done, total,
+                0.78 + 0.10 * done / max(1, total))
+                if progress_hook is not None else None),
         )
+        level_timing["measured_pruning"] = time.perf_counter() - pruning_started
+        if progress_hook is not None:
+            progress_hook(level, "pruning", 1, 1, 0.88)
         if not figures:
             stop_reason = "no_profitable_symbols"
             attempted.append({"scale": level, "figures": 0,
                               "decision": stop_reason, "selection": selection,
-                              "measured": measured})
+                              "measured": measured,
+                              "scan": scan_meta,
+                              "cpu": {"extract": extract, "vf2": match},
+                              "phase_timing_seconds": level_timing})
+            if progress_hook is not None:
+                progress_hook(level, "level_done", 1, 1, 1.0)
             break
+        archive_started = time.perf_counter()
         transition = directory / f"transition_{level:03d}.zip"
         encode_grammar(n, edges, figures, transition,
                        node_types=node_types, symbol_coding="huffman")
@@ -428,14 +465,23 @@ def run_recursive(
             raise AssertionError("recursive archive changed original identifiers")
         _assert_records(restored, original)
         transition.unlink(missing_ok=True)
+        level_timing["archive_and_validation"] = time.perf_counter() - archive_started
+        level_timing["total_wall"] = time.perf_counter() - level_started
+        if progress_hook is not None:
+            progress_hook(level, "archive_verified", 1, 1, 0.98)
         gain = valid.stat().st_size - candidate.stat().st_size
         attempted.append({"scale": level, "figures": len(figures),
                           "decision": "accepted" if gain > 0 else "not_smaller",
                           "saved_bytes": gain, "coarse_vertices": coarse_n,
-                          "selection": selection, "measured": measured})
+                          "selection": selection, "measured": measured,
+                          "scan": scan_meta,
+                          "cpu": {"extract": extract, "vf2": match},
+                          "phase_timing_seconds": level_timing})
         if gain <= 0:
             candidate.unlink()
             stop_reason = "no_actual_hierarchy_gain"
+            if progress_hook is not None:
+                progress_hook(level, "level_done", 1, 1, 1.0)
             break
         atomic_json(candidate.with_suffix(".json"), {
             "identity": identity, "sha256": sha256_file(candidate),
@@ -444,6 +490,8 @@ def run_recursive(
         valid, n, edges, members, node_types = (
             candidate, coarse_n, coarse_edges, new_members, next_types
         )
+        if progress_hook is not None:
+            progress_hook(level, "level_done", 1, 1, 1.0)
     # Reload the accepted snapshot: a rejected proposal must not leak symbols.
     with zipfile.ZipFile(valid) as z:
         registry = _registry(z)
