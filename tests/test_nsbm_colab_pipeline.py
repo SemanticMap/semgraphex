@@ -151,6 +151,7 @@ def test_drive_publishes_only_verified_archives_and_completed_last(tmp_path):
     sync()
     assert not drive.exists()
     (local / "manifest.json").write_text('{"run":"initialized"}')
+    (local / "execution.log").write_text("stale log from RESUME")
     sync()
     assert (drive / "progress.json").exists()
     assert (drive / "execution.log").read_text() == log.read_text()
