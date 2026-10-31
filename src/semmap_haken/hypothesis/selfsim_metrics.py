@@ -125,17 +125,23 @@ def motif_profile(directed: sparse.csr_matrix, *, seed: int, samples: int = 3000
 def structural(graph: TypedGraph, levels: list[np.ndarray], *, seed: int,
                samples: int) -> dict:
     rows = []
-    for i, labels in enumerate([np.arange(graph.vertex_count)] + levels):
-        counts = typed_counts(graph, labels)
-        C = counts.sum(axis=0)
-        b = C.shape[0]
-        adj = sparse.csr_matrix(C > 0, dtype=np.int8)
-        adj.setdiag(0)
-        adj.eliminate_zeros()
+    for i, labels in enumerate([None] + levels):
+        if labels is None:
+            b = graph.vertex_count
+            internal = int(np.count_nonzero(graph.source == graph.target))
+            adj = support(graph)  # sparse original, no R x N x N tensor
+        else:
+            counts = typed_counts(graph, labels)
+            C = counts.sum(axis=0)
+            b = C.shape[0]
+            internal = int(np.trace(C))
+            adj = sparse.csr_matrix(C > 0, dtype=np.int8)
+            adj.setdiag(0)
+            adj.eliminate_zeros()
         prof = motif_profile(adj, seed=seed, samples=samples)
         row = {"scale": "original" if i == 0 else f"blocks_{b}",
-               "blocks": b, "internal_assertions": int(np.trace(C)),
-               "internal_fraction": float(np.trace(C) / max(1, graph.edge_count)),
+               "blocks": b, "internal_assertions": internal,
+               "internal_fraction": float(internal / max(1, graph.edge_count)),
                "edge_density_no_diagonal": float(adj.nnz / max(1, b*(b-1))),
                "motifs": prof}
         rows.append(row)
