@@ -6,6 +6,7 @@ projection, not for nSBM/VF2. All claims refer to measured exact archive bytes.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from collections import Counter
 import io
@@ -41,7 +42,7 @@ from .scan_checkpoint import (
 from .projection import estimate_block_kernel
 from .runner import (
     _available_cpus, _best_fit, _git_revision, _parallel_fit,
-    _save_graph, _sha_bytes, _worker_budget,
+    _save_graph, _sha_bytes, _worker_budget, _available_memory_bytes,
 )
 
 PROFILE = {
@@ -207,23 +208,40 @@ def _discover(
     return dictionary
 
 
+def _vf2_cpu_plan(cpu_budget: int, dictionary: GraphDictionary) -> tuple[int, int]:
+    """One CPU budget across extraction and matching, capped by free RAM."""
+    cpu = max(1, min(cpu_budget, _available_cpus()))
+    if cpu == 1:
+        return 1, 1
+    extraction = max(1, cpu // 3)
+    # Spawn replicates the (NetworkX) dictionary. Be conservative on Colab.
+    bytes_per_worker = max(256 * (1 << 20), len(dictionary.types) * (128 << 10))
+    memory_workers = max(1, int(_available_memory_bytes() * .5 // bytes_per_worker))
+    matching = max(1, min(cpu - extraction, 8, memory_workers))
+    return extraction, matching
+
+
 def _scan(
     views: dict[str, EgoExtractor], dictionary: GraphDictionary, *,
     n: int, batch: int, max_ego_nodes: int, min_figure_nodes: int,
     extraction_workers: int, match_workers: int,
     checkpoint_dir: Path, identity: dict, checkpoint_hook=None,
-    node_types: dict[int, str] | None = None,
+    node_types: dict[int, str] | None = None, progress_hook=None,
 ) -> tuple[list[tuple[str, tuple[int, ...]]], Counter, dict]:
-    """Bounded VF2 census with resumable, content-verified 4k-node shards.
+    """Bounded, ordered extraction/VF2 pipeline with verified 4k-center shards.
 
-    Corrupt/torn shards are recomputed. Dictionary, source, config, view
-    and revision are all included in each checkpoint identity.
+    One future extracts the NEXT batch while the current batch is matched in
+    existing spawned VF2 workers. No unbounded queues or nested process pools.
+    Valid RESUME shards skip both stages and still count toward progress.
     """
+    started = time.perf_counter()
     rows: list[tuple[str, tuple[int, ...]]] = []
     counts: Counter[str] = Counter()
     seen: set[tuple[int, ...]] = set()
     chunk_span = batch * max(1, 4096 // batch)
-    reused, rebuilt = 0, 0
+    reused, rebuilt, extracted, matched, completed = 0, 0, 0, 0, 0
+    extraction_seconds, vf2_seconds = 0.0, 0.0
+    total = n * len(views)
     dictionary_digest = hashlib.sha256(json.dumps(
         [(key, dictionary.types[key].fingerprint,
           dictionary.types[key].prototype) for key in sorted(dictionary.types)],
@@ -246,30 +264,56 @@ def _scan(
                 saved = load_shard(shard, identity=shard_identity)
                 if saved is None:
                     materialized: list[list] = []
-                    candidates = []
-                    for start in range(chunk_start, chunk_stop, batch):
+
+                    def extract(start: int):
+                        t0 = time.perf_counter()
                         centers = np.arange(start, min(chunk_stop, start + batch),
                                             dtype=np.int64)
-                        candidates.extend(x for x in view.extract_centers(
+                        candidates = tuple(x for x in view.extract_centers(
                             centers, radius=1, max_ego_nodes=max_ego_nodes,
                             workers=extraction_workers, symbol_types=node_types,
                         ) if len(x.nodes) >= min_figure_nodes)
-                    # The old submit(...).result() loop serialized every VF2
-                    # chunk. map() schedules independent matching chunks across
-                    # CPU workers and returns deterministic original order.
-                    pieces = [tuple(candidates[j:j+32])
-                              for j in range(0, len(candidates), 32)]
-                    matched_chunks = (
-                        pool.map(match_chunk, pieces) if match_workers > 1
-                        else map(pool.match, pieces)
-                    )
-                    for piece, matches in zip(pieces, matched_chunks, strict=True):
-                        for candidate, match in zip(piece, matches, strict=True):
-                            if match is not None:
-                                materialized.append([
-                                    str(match[0]),
-                                    [int(node) for node in candidate.nodes],
-                                ])
+                        return candidates, time.perf_counter() - t0
+
+                    def match_candidates(candidates):
+                        nonlocal vf2_seconds, matched
+                        # Only a batch's 32-candidate pieces are in flight.
+                        pieces = [tuple(candidates[j:j + 32])
+                                  for j in range(0, len(candidates), 32)]
+                        started_match = time.perf_counter()
+                        results = (pool.map(match_chunk, pieces)
+                                   if match_workers > 1 else map(pool.match, pieces))
+                        for piece, matches in zip(pieces, results, strict=True):
+                            for candidate, match in zip(piece, matches, strict=True):
+                                if match is not None:
+                                    materialized.append([
+                                        str(match[0]),
+                                        [int(node) for node in candidate.nodes],
+                                    ])
+                        vf2_seconds += time.perf_counter() - started_match
+                        matched += len(candidates)
+
+                    starts = iter(range(chunk_start, chunk_stop, batch))
+                    if match_workers > 1:
+                        # Prefetch only one batch. The single extraction task
+                        # may itself use the existing bounded CPU thread pool.
+                        with ThreadPoolExecutor(max_workers=1) as extractor:
+                            future = extractor.submit(extract, next(starts))
+                            while future is not None:
+                                candidates, elapsed = future.result()
+                                next_start = next(starts, None)
+                                future = (extractor.submit(extract, next_start)
+                                          if next_start is not None else None)
+                                extraction_seconds += elapsed
+                                extracted += len(candidates)
+                                match_candidates(candidates)
+                    else:
+                        # No extra producer thread on single-worker paths.
+                        for start in starts:
+                            candidates, elapsed = extract(start)
+                            extraction_seconds += elapsed
+                            extracted += len(candidates)
+                            match_candidates(candidates)
                     save_shard(shard, identity=shard_identity, rows=materialized)
                     saved = materialized
                     rebuilt += 1
@@ -284,14 +328,24 @@ def _scan(
                     seen.add(key)
                     rows.append((str(type_id), key))
                     counts[str(type_id)] += 1
+                completed += chunk_stop - chunk_start
                 if checkpoint_hook is not None:
                     checkpoint_hook(shard)
+                if progress_hook is not None:
+                    progress_hook(completed, total)
     return rows, counts, {
         "checkpoint_shards_reused": reused,
         "checkpoint_shards_computed": rebuilt,
         "checkpoint_directory": str(checkpoint_dir),
+        "centers_processed": completed,
+        "centers_total": total,
+        "candidates_extracted": extracted,
+        "candidates_matched": matched,
+        "extraction_seconds": round(extraction_seconds, 6),
+        "vf2_seconds": round(vf2_seconds, 6),
+        "wall_seconds": round(time.perf_counter() - started, 6),
+        "pipeline": "one_batch_prefetch" if match_workers > 1 else "sequential",
     }
-
 
 
 class _LocalMatcher:
