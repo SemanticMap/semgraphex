@@ -73,7 +73,9 @@ def test_all_four_metrics_on_three_nested_scales():
     assert [x["blocks"] for x in res["structural"]["levels"]]==[24,8,4,2]
     assert [x["blocks"] for x in res["graphon"]["levels"]]==[8,4,2]
     assert res["structural"]["levels"][0]["motifs"]["sample_count"]==200
-    assert len(res["structural"]["adjacent_motif_js"])==3
+    assert len(res["structural"]["adjacent_motif_js"])==2
+    assert res["structural"]["levels"][-1]["motifs"]["sample_count"]==0
+    # Two blocks cannot contain a 3-node motif; undefined != zero similarity.
     assert len(res["graphon"]["adjacent_kernel"])==2
     assert 0<=res["graphon"]["levels"][0]["holdout_auc_conditional"]<=1
     for x in res["haken"]["levels"]:
@@ -143,3 +145,29 @@ def test_zero_wedges_and_zero_rejected_dense_nxn(monkeypatch):
     graph,levels=fixture()
     rows=structural(graph,levels,seed=1,samples=20)["levels"]
     assert rows[0]["blocks"]==graph.vertex_count
+
+
+def test_cli_on_prepared_h1_fixture(tmp_path,monkeypatch):
+    import semmap_haken.hypothesis.selfsim_experiment as ex
+    from semmap_haken.hypothesis.runner import _save_graph, _sha_bytes
+    graph,levels=fixture()
+    input_dir=tmp_path/"fit_data"
+    _save_graph(graph,input_dir)
+    partition_file=tmp_path/"partitions.npz"
+    np.savez_compressed(partition_file,
+                        **{f"level_{i:03d}":p for i,p in enumerate(levels)})
+    source=tmp_path/"source.json"
+    source.write_text(json.dumps({"graph_sha256":_sha_bytes(graph)}))
+    monkeypatch.setattr(ex,"_git_revision",lambda:"test-revision")
+    output=tmp_path/"cli"
+    args=["--graph-dir",str(input_dir),"--partitions",str(partition_file),
+          "--source-manifest",str(source),"--output",str(output),
+          "--null-repeats","0","--jobs","1","--motif-samples","20",
+          "--pair-samples","50","--box-repeats","1","--box-radii","0,1,2,3"]
+    assert ex.main(args)==0
+    assert (output/"COMPLETED").exists()
+    # A proper second CLI call requires identical mode semantics:
+    resumed=args.copy()
+    resumed[resumed.index("--null-repeats")+1]="0"
+    resumed.extend(["--mode","RESUME"])
+    assert ex.main(resumed)==0
