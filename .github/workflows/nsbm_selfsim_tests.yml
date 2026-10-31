@@ -1,0 +1,27 @@
+name: nSBM multiscale self-similarity
+on:
+  pull_request:
+  push:
+    branches: [feature/nsbm-multiscale-self-similarity]
+jobs:
+  four-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e ".[dev,notebook]"
+      - name: Structural, graphon, Haken, box-covering, nulls, RESUME tests
+        run: python -m pytest -q tests/test_selfsim_four.py
+      - name: Colab validation
+        run: |
+          python - <<'PY'
+          import ast, nbformat
+          notebook = nbformat.read('notebooks/21_nsbm_self_similarity_four_tests_colab.ipynb', as_version=4)
+          nbformat.validate(notebook)
+          for index, cell in enumerate(notebook.cells):
+              if cell.cell_type == 'code':
+                  ast.parse(cell.source, filename=f'cell-{index}')
+          print('Validated', len(notebook.cells), 'cells')
+          PY
