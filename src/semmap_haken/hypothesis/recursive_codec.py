@@ -1,18 +1,17 @@
-"""Exact multilevel nSBM grammar: final graph + reverse transition deltas.
+"""Exact multilevel nSBM grammar: shared symbols and reverse transition deltas.
 
-Uses the existing grammar v2 codec and hierarchy reverse decoder, including
-original EdgeRecord IDs/weights. Unlike legacy sum-CSR hierarchy, this format
-also retains every parallel assertion independently.
+The v2 envelope shares internal shapes. Existing grammar streams and the v1
+reverse decoder are reused; v1 archives remain readable without conversion.
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import nullcontext
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
-import tempfile
 import zipfile
 
 import numpy as np
@@ -28,31 +27,64 @@ from semmap_haken.graphex_components import EdgeRecord
 from semmap_haken.hierarchy_codec import (
     _decode_transition_delta, _partition_from_occurrence_nodes,
 )
+from semmap_haken.shape_identity import CONTRACT, LEVELS, ShapeRegistry
 from .scan_checkpoint import atomic_json, sha256_file
 
 
 FORMAT = "semmap_nsbm_exact_hierarchy_v1"
+SHARED_FORMAT = "semmap_nsbm_exact_hierarchy_v2"
 DELTA_NAMES = ("manifest.json", "shapes.json", "variants.json", "rules.json",
                "occurrences.bin", "symbols.huff", "internal.bin", "ports.bin")
 
 
-def _occurrences(z: zipfile.ZipFile):
-    from semmap_haken.grammar_streams import read_occurrences as read_compact
+def _registry(z: zipfile.ZipFile):
     manifest = json.loads(z.read("manifest.json"))
+    if manifest.get("format") == SHARED_FORMAT:
+        return ShapeRegistry.loads(z.read("dictionary.json"))
+    return None
+
+
+def _shape_rows(z: zipfile.ZipFile, prefix: str, registry: ShapeRegistry | None):
+    root = prefix + "/" if prefix else ""
+    if registry is None:
+        return json.loads(z.read(root + "shapes.json"))
+    manifest = json.loads(z.read(root + "manifest.json"))
+    return registry.expand(json.loads(z.read(root + "shape_refs.json")),
+                           manifest["relations"])
+
+
+def _occurrences(z: zipfile.ZipFile, prefix: str = "",
+                 registry: ShapeRegistry | None = None):
+    root = prefix + "/" if prefix else ""
+    manifest = json.loads(z.read(root + "manifest.json"))
     shapes = {int(s["shape_id"]): InternalShape(
         int(s["shape_id"]), tuple(s["node_types"]),
         tuple(ShapeEdge(*map(int, edge)) for edge in s["edges"]))
-        for s in json.loads(z.read("shapes.json"))}
-    symbol_bytes = z.read("symbols.huff") if manifest.get("symbol_coding") == "huffman" else None
-    return read_compact(z.read("occurrences.bin"), shapes,
-                        symbols=decode_symbols(symbol_bytes)
-                        if symbol_bytes is not None else None)
+        for s in _shape_rows(z, prefix, registry)}
+    symbols = (decode_symbols(z.read(root + "symbols.huff"))
+               if manifest.get("symbol_coding") == "huffman" else None)
+    return read_occurrences(z.read(root + "occurrences.bin"), shapes, symbols=symbols)
+
+
+def _next_types(groups, occurrences, node_types, step, shape_refs=None):
+    """One naming rule for contraction and checkpoint reconstruction."""
+    aliases = ({ref["local"]: ref["symbol"] for ref in shape_refs}
+               if shape_refs is not None else None)
+    symbols = {frozenset(item.shape_to_fine_nodes): item.symbol_id for item in occurrences}
+    result = {}
+    for coarse, children in sorted(groups.items()):
+        if len(children) > 1:
+            local = symbols[frozenset(children)]
+            result[coarse] = f"S:{aliases[local]}" if aliases is not None else f"L{step}_S{local}"
+        elif children[0] in node_types:
+            result[coarse] = node_types[children[0]]
+    return result
 
 
 def contract_records(n: int, records: tuple[EdgeRecord, ...],
                      figures: list[tuple[int, ...]],
                      node_types: dict[int, str], step: int,
-                     transition: Path):
+                     transition: Path, *, shape_refs: list[dict] | None = None):
     """Aggregate only changed-figure edges; untouched edge IDs remain stable."""
     assignment, _, _ = _partition_from_occurrence_nodes(n, figures)
     touched = {node for nodes in figures for node in nodes}
@@ -64,8 +96,7 @@ def contract_records(n: int, records: tuple[EdgeRecord, ...],
     for edge in records:
         u, v = int(assignment[edge.source]), int(assignment[edge.target])
         if edge.source not in touched and edge.target not in touched:
-            inherited.append(EdgeRecord(edge.edge_id, u, v,
-                                        edge.relation, edge.weight))
+            inherited.append(EdgeRecord(edge.edge_id, u, v, edge.relation, edge.weight))
         else:
             changed[(u, v, edge.relation)].append(float(edge.weight))
     next_id = max((row.edge_id for row in records), default=-1) + 1
@@ -76,16 +107,8 @@ def contract_records(n: int, records: tuple[EdgeRecord, ...],
         inherited.append(EdgeRecord(next_id, u, v, relation, weight))
         next_id += 1
     inherited.sort(key=lambda row: row.edge_id)
-    next_types = {}
     with zipfile.ZipFile(transition) as z:
-        symbols = {frozenset(item.shape_to_fine_nodes): item.symbol_id
-                   for item in _occurrences(z)}
-    for coarse, originals in sorted(groups.items()):
-        if len(originals) > 1:
-            symbol = symbols[frozenset(originals)]
-            next_types[coarse] = f"L{step}_S{symbol}"
-        elif originals[0] in node_types:
-            next_types[coarse] = node_types[originals[0]]
+        next_types = _next_types(groups, _occurrences(z), node_types, step, shape_refs)
     return len(groups), tuple(inherited), tuple(tuple(g) for _, g in sorted(groups.items())), next_types
 
 
@@ -100,11 +123,11 @@ def _assert_records(actual, expected):
             raise AssertionError("recursive round-trip changed an assertion")
 
 
-def _get_parts(z: zipfile.ZipFile, prefix: str):
+def _get_parts(z: zipfile.ZipFile, prefix: str, registry: ShapeRegistry | None = None):
     manifest = json.loads(z.read(prefix + "/manifest.json"))
     return {
         "manifest": manifest,
-        "shapes_raw": json.loads(z.read(prefix + "/shapes.json")),
+        "shapes_raw": _shape_rows(z, prefix, registry),
         "variants_raw": json.loads(z.read(prefix + "/variants.json")),
         "occurrences_data": z.read(prefix + "/occurrences.bin"),
         "internal_data": z.read(prefix + "/internal.bin"),
@@ -118,15 +141,15 @@ def decode_recursive(path: Path):
     """Decode every reverse delta, not merely the last transition."""
     with zipfile.ZipFile(path) as outer:
         manifest = json.loads(outer.read("manifest.json"))
-        if manifest.get("format") != FORMAT:
+        if manifest.get("format") not in (FORMAT, SHARED_FORMAT):
             raise ValueError("unsupported nSBM hierarchy version")
-        current_n, current = decode_edge_baseline(
-            io.BytesIO(outer.read("final_graph.zip")))
+        registry = _registry(outer)
+        current_n, current = decode_edge_baseline(io.BytesIO(outer.read("final_graph.zip")))
         ids = json.loads(outer.read("source_ids.json"))
         for prefix in reversed(manifest["transitions"]):
             current_n, current = _decode_transition_delta(
                 target_records=current, preserve_ids=True,
-                **_get_parts(outer, prefix)
+                **_get_parts(outer, prefix, registry)
             )
         if current_n != int(manifest["original_vertices"]):
             raise ValueError("recursive hierarchy did not reach level zero")
@@ -136,64 +159,69 @@ def decode_recursive(path: Path):
 
 
 def _state(path: Path):
-    """Reconstruct current memberships and symbol types from stored rules."""
+    """Reconstruct memberships/types directly, without building temporary ZIPs."""
     with zipfile.ZipFile(path) as z:
         manifest = json.loads(z.read("manifest.json"))
+        registry = _registry(z)
         n, edges = decode_edge_baseline(io.BytesIO(z.read("final_graph.zip")))
         members = [(i,) for i in range(int(manifest["original_vertices"]))]
         types: dict[int, str] = {}
         for level, prefix in enumerate(manifest["transitions"]):
-            files = {name: z.read(prefix + "/" + name)
-                     for name in DELTA_NAMES if prefix + "/" + name in z.namelist()}
-            # Read occurrences directly from the level files, including Huffman.
-            temp = io.BytesIO()
-            with zipfile.ZipFile(temp, "w") as sub:
-                for name, data in files.items():
-                    sub.writestr(name, data)
-            with zipfile.ZipFile(io.BytesIO(temp.getvalue())) as sub:
-                occurrences = _occurrences(sub)
+            occurrences = _occurrences(z, prefix, registry)
             assignments, _, _ = _partition_from_occurrence_nodes(
                 len(members), [tuple(o.shape_to_fine_nodes) for o in occurrences])
-            grouped = defaultdict(list)
-            children = defaultdict(list)
+            grouped, children = defaultdict(list), defaultdict(list)
             for old, new in enumerate(assignments):
                 grouped[int(new)].extend(members[old])
                 children[int(new)].append(old)
-            next_types = {}
-            shape_by_nodes = {
-                frozenset(o.shape_to_fine_nodes): int(o.symbol_id)
-                for o in occurrences
-            }
-            for coarse, original_members in sorted(grouped.items()):
-                child_nodes = children[coarse]
-                if len(child_nodes) > 1:
-                    next_types[coarse] = f"L{level}_S{shape_by_nodes[frozenset(child_nodes)]}"
-                elif child_nodes[0] in types:
-                    next_types[coarse] = types[child_nodes[0]]
+            refs = json.loads(z.read(prefix + "/shape_refs.json")) if registry is not None else None
+            types = _next_types(children, occurrences, types, level, refs)
             members = [tuple(grouped[i]) for i in range(len(grouped))]
-            types = next_types
         if len(members) != n:
             raise AssertionError("recursive membership does not fit final graph")
         return n, edges, members, types, len(manifest["transitions"])
 
 
+def _register_transition(path: Path, registry: ShapeRegistry) -> list[dict]:
+    with zipfile.ZipFile(path) as z:
+        manifest = json.loads(z.read("manifest.json"))
+        return registry.references(json.loads(z.read("shapes.json")), manifest["relations"])
+
+
 def _write_archive(previous: Path | None, *, original_ids: dict,
                    n: int, edges: tuple[EdgeRecord, ...],
                    original_count: int, original_assertions: int,
-                   output: Path, transition: Path | None = None):
-    """Persist one archive, copying only accepted deltas, with atomic publish."""
+                   output: Path, transition: Path | None = None,
+                   registry: ShapeRegistry | None = None,
+                   shape_refs: list[dict] | None = None):
+    """Atomic envelope; the supplied registry is published with its transitions.
+
+    No registry keeps the legacy writer contract for existing callers. The
+    recursive experiment supplies one registry for the entire new hierarchy.
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     prefixes = []
-    with zipfile.ZipFile(previous) if previous is not None else _NoZip() as prior:
+    with zipfile.ZipFile(previous) if previous is not None else nullcontext() as prior:
         if previous is not None:
             old_manifest = json.loads(prior.read("manifest.json"))
+            expected = SHARED_FORMAT if registry is not None else FORMAT
+            if old_manifest["format"] != expected:
+                raise ValueError("do not mix legacy and shared-symbol hierarchies")
+            if registry is not None:
+                old = json.loads(prior.read("dictionary.json"))
+                new = json.loads(registry.dumps())
+                if (new["namespace"] != old["namespace"] or
+                    new["shapes"][:len(old["shapes"])] != old["shapes"]):
+                    raise ValueError("shared dictionary must be append-only")
             prefixes = list(old_manifest["transitions"])
         prefix = None
         if transition is not None:
             prefix = f"transition_{len(prefixes):03d}_{len(prefixes)+1:03d}"
             prefixes.append(prefix)
+            if registry is not None and shape_refs is None:
+                shape_refs = _register_transition(transition, registry)
         header = {
-            "format": FORMAT,
+            "format": SHARED_FORMAT if registry is not None else FORMAT,
             "transitions": prefixes,
             "original_vertices": original_count,
             "original_assertions": original_assertions,
@@ -202,6 +230,8 @@ def _write_archive(previous: Path | None, *, original_ids: dict,
         with zipfile.ZipFile(pending, "w", compression=zipfile.ZIP_DEFLATED,
                              compresslevel=9) as outer:
             outer.writestr("manifest.json", json.dumps(header, sort_keys=True))
+            if registry is not None:
+                outer.writestr("dictionary.json", registry.dumps())
             outer.writestr("source_ids.json",
                 (prior.read("source_ids.json") if previous is not None
                  else json.dumps(original_ids, ensure_ascii=False,
@@ -214,18 +244,21 @@ def _write_archive(previous: Path | None, *, original_ids: dict,
                         outer.writestr(name, prior.read(name))
             if transition is not None:
                 with zipfile.ZipFile(transition) as delta:
+                    if registry is not None:
+                        rows = json.loads(delta.read("shapes.json"))
+                        relations = json.loads(delta.read("manifest.json"))["relations"]
+                        if registry.expand(shape_refs, relations) != rows:
+                            raise ValueError("shared references do not reconstruct local shape slots")
+                        outer.writestr(prefix + "/shape_refs.json",
+                                       json.dumps(shape_refs, separators=(",", ":")))
                     for name in DELTA_NAMES:
+                        # Rules are derivable; the exact shared shape is stored once.
+                        if registry is not None and name in ("shapes.json", "rules.json"):
+                            continue
                         if name in delta.namelist():
                             outer.writestr(prefix + "/" + name, delta.read(name))
         os.replace(pending, output)
     return output.stat().st_size
-
-
-class _NoZip:
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        return False
 
 
 def _valid_checkpoint(path: Path, meta: Path, *, identity: dict,
@@ -253,14 +286,17 @@ def run_recursive(
     max_ego_nodes: int, min_figure_nodes: int, min_support: int,
     batch: int, device: str, graph_hash: str, code_revision: str,
     max_levels: int = 3, resume: bool = False,
+    isomorphism_level: str = "recursive",
 ) -> dict:
     """Every accepted level must shorten the *whole* exact hierarchy ZIP."""
     from .grammar_experiment import (
-        PROFILE, _degree, _discover, _scan, _select, _views, edge_records,
+        _degree, _discover, _scan, _select, _views, edge_records,
     )
     from .grammar_selection import prune_by_archive_bytes
     from .graph import TypedGraph
 
+    if isomorphism_level not in LEVELS:
+        raise ValueError(f"unknown isomorphism level: {isomorphism_level!r}")
     directory.mkdir(parents=True, exist_ok=True)
     original = edge_records(graph)
     names = graph.relation_names
@@ -269,6 +305,8 @@ def run_recursive(
            "relation_names": list(names), "graph_sha256": graph_hash}
     identity = {
         "graph_sha256": graph_hash, "code_revision": code_revision,
+        "symbol_identity": CONTRACT, "hierarchy_format": SHARED_FORMAT,
+        "isomorphism_level": isomorphism_level,
         "seed": seed, "max_levels": max_levels,
         "discovery": discovery, "max_figures": max_figures,
         "max_ego_nodes": max_ego_nodes, "min_figure_nodes": min_figure_nodes,
@@ -279,6 +317,13 @@ def run_recursive(
     valid = None
     if resume:
         for archive in sorted(directory.glob("level_???.zip"), reverse=True):
+            try:
+                with zipfile.ZipFile(archive) as z:
+                    archive_format = json.loads(z.read("manifest.json")).get("format")
+            except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+                archive_format = None
+            if archive_format == FORMAT:
+                raise ValueError("legacy checkpoint: use a separate NEW directory for shared symbols")
             if _valid_checkpoint(archive, archive.with_suffix(".json"),
                                  identity=identity,
                                  expected_n=graph.vertex_count,
@@ -289,12 +334,17 @@ def run_recursive(
         valid = directory / "level_000.zip"
         _write_archive(None, original_ids=ids, n=graph.vertex_count,
                        edges=original, original_count=graph.vertex_count,
-                       original_assertions=graph.edge_count, output=valid)
+                       original_assertions=graph.edge_count, output=valid,
+                       registry=ShapeRegistry())
         atomic_json(valid.with_suffix(".json"), {
             "identity": identity, "sha256": sha256_file(valid),
             "bytes": valid.stat().st_size,
         })
     n, edges, members, node_types, offset = _state(valid)
+    with zipfile.ZipFile(valid) as z:
+        registry = _registry(z)
+    if registry is None:
+        raise ValueError("shared-symbol runs require a v2 checkpoint; start a NEW run")
     attempted = []
     stop_reason = "max_levels"
     for level in range(offset, min(max_levels, len(partitions))):
@@ -305,8 +355,6 @@ def run_recursive(
             [int(labels[g[0]]) if len({int(labels[v]) for v in g}) == 1 else -1
              for g in members], dtype=np.int32,
         )
-        # Reconstruct the exact current multigraph. All candidate methods
-        # process a sparse CSR view but exact records stay outside the CSR.
         relation_index = {r: i for i, r in enumerate(names)}
         current = TypedGraph(
             tuple(f"c{i}" for i in range(n)), names,
@@ -334,6 +382,7 @@ def run_recursive(
             match_workers=match, node_types=node_types,
             checkpoint_dir=directory / f"scan_{level:03d}",
             identity={**identity, "level": level,
+                      "symbol_registry_sha256": hashlib.sha256(registry.dumps().encode()).hexdigest(),
                       "source_n": n, "current_graph_sha256": current_hash},
         )
         figures, selection = _select(
@@ -361,8 +410,9 @@ def run_recursive(
         transition = directory / f"transition_{level:03d}.zip"
         encode_grammar(n, edges, figures, transition,
                        node_types=node_types, symbol_coding="huffman")
+        shape_refs = _register_transition(transition, registry)
         coarse_n, coarse_edges, coarse_groups, next_types = contract_records(
-            n, edges, figures, node_types, level, transition)
+            n, edges, figures, node_types, level, transition, shape_refs=shape_refs)
         new_members = [
             tuple(x for node in group for x in members[node])
             for group in coarse_groups
@@ -371,13 +421,13 @@ def run_recursive(
         _write_archive(valid, original_ids=ids, n=coarse_n,
                        edges=coarse_edges, original_count=graph.vertex_count,
                        original_assertions=graph.edge_count,
-                       output=candidate, transition=transition)
-        # Mandatory final-to-level-zero exact check before checkpoint publication.
+                       output=candidate, transition=transition,
+                       registry=registry, shape_refs=shape_refs)
         restored_n, restored, restored_ids = decode_recursive(candidate)
         if restored_n != graph.vertex_count or restored_ids != ids:
             raise AssertionError("recursive archive changed original identifiers")
         _assert_records(restored, original)
-        transition.unlink(missing_ok=True)  # delta is now embedded in verified ZIP
+        transition.unlink(missing_ok=True)
         gain = valid.stat().st_size - candidate.stat().st_size
         attempted.append({"scale": level, "figures": len(figures),
                           "decision": "accepted" if gain > 0 else "not_smaller",
@@ -394,9 +444,16 @@ def run_recursive(
         valid, n, edges, members, node_types = (
             candidate, coarse_n, coarse_edges, new_members, next_types
         )
-    summary = {"format": FORMAT, "archive": str(valid),
+    # Reload the accepted snapshot: a rejected proposal must not leak symbols.
+    with zipfile.ZipFile(valid) as z:
+        registry = _registry(z)
+    summary = {"format": SHARED_FORMAT, "archive": str(valid),
                "archive_sha256": sha256_file(valid),
                "archive_bytes": valid.stat().st_size,
+               "dictionary_namespace": registry.namespace,
+               "global_symbols": len(registry.shapes),
+               "isomorphism_level": isomorphism_level,
+               "similarity_classes": registry.classes(isomorphism_level),
                "accepted_levels": offset + sum(
                    row["decision"] == "accepted" for row in attempted),
                "attempted": attempted, "stop_reason": stop_reason,
