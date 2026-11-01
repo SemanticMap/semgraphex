@@ -77,3 +77,18 @@ blocks. Keep `FIT_RUN_ID='nsbm-fit-cn100k-01'` and use a fresh notebook
 **Run all**; `RUN_MODE=NEW` is correct if the separate four-test output
 has not yet been started. `RESUME` is only for a started four-test output.
 The nonfatal `SyntaxWarning` in `hierarchy_validation.py` is unrelated.
+
+### Fixed `ModuleNotFoundError: No module named semmap_haken` in Colab
+
+A kernel reset or cells executed out of order may leave the checked-out
+`/content/semmap_selfsim_100k_repo/src` outside `sys.path`, even after
+an earlier editable pip installation. The notebook config defines
+`require_semmap_code()`, which re-registers that path before imports in
+cells 4, 5 and 7; validates the checkout is the pinned `SOURCE_REVISION`;
+and checks that the loaded module originates in that checkout.
+
+When continuing in the same runtime after a failed cell, rerun the config
+cell, checkout/bootstrap cell 4 and then cell 5. If the source tree is
+already at the pinned revision, adding `/content/semmap_selfsim_100k_repo/src`
+to `sys.path` is sufficient. This import repair does **not** retrain nSBM.
+The saved fit remains in `FIT_STORE`.
