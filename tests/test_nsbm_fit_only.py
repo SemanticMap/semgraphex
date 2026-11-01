@@ -39,7 +39,7 @@ def test_nsbm_only_fit_resume_and_corrupt_partition(tmp_path,monkeypatch):
     def fake_fit(graph,output,*,seed,restarts,cpu_budget):
         calls.append(seed)
         _save_graph(graph,output/"fit_data")
-        labels=[np.arange(20)//2,np.arange(20)//5,np.arange(20)//10]
+        labels=[np.arange(20)//2,np.arange(20)//4,np.arange(20)//8]
         np.savez_compressed(output/"nsbm_partitions.npz",
             **{f"level_{i:03d}":x for i,x in enumerate(labels)})
         return labels,{"best_mdl_bits":3.0,"selected_seed":seed}
@@ -47,7 +47,7 @@ def test_nsbm_only_fit_resume_and_corrupt_partition(tmp_path,monkeypatch):
     monkeypatch.setattr(fitting,"_fit_partition",fake_fit)
     out=tmp_path/"fit_run"
     r=run(source,out,vertices=20,restarts=2,seed=44,cpu_budget=1)
-    assert r["block_counts"]==[10,4,2]
+    assert r["block_counts"]==[10,5,3]
     assert (out/"COMPLETED").exists()
     assert len(calls)==1
     again=run(source,out,vertices=20,restarts=2,seed=44,cpu_budget=1,
@@ -58,7 +58,7 @@ def test_nsbm_only_fit_resume_and_corrupt_partition(tmp_path,monkeypatch):
     (out/"nsbm_partitions.npz").write_bytes(arr)
     repaired=run(source,out,vertices=20,restarts=2,seed=44,cpu_budget=1,
                  resume=True)
-    assert len(calls)==2 and repaired["block_counts"]==[10,4,2]
+    assert len(calls)==2 and repaired["block_counts"]==[10,5,3]
     assert (out/"COMPLETED").exists()
     with pytest.raises(ValueError,match="mismatch"):
         run(source,out,vertices=20,restarts=2,seed=45,cpu_budget=1,
