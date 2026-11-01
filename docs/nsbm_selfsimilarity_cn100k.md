@@ -55,3 +55,25 @@ fitted on the full original graph. Do not interpret it as independent
 predictive quality.
 
 See `docs/nsbm_multiscale_selfsimilarity.md` for scientific definitions.
+
+### Repair: missing `/content/.../fit_data/ids.json` despite COMPLETED
+
+This error arose because the notebook previously treated the existence of a
+`COMPLETED` marker as proof that the temporary Colab VM had a local copy of
+all fit artifacts. A Drive snapshot may be complete while the VM is new,
+interrupted, or previous staging cells were skipped.
+
+The fixed notebook now uses `stage_fit_snapshot` both before the fit decision
+and immediately before four-test evaluation. It copies from Google Drive to
+`/content` with atomic replacements, compares file hashes, reconstructs the
+exact graph digest from all saved input identifiers and assertion arrays,
+checks nSBM partition digest and block counts, and reuses the completed model.
+If the snapshot is incomplete, it reports missing files rather than claiming
+success. No need to rerun nSBM after a verified complete fit.
+
+For the existing completed run, the inspected Drive `fit_summary.json` reports
+100000 vertices, 536128 directed typed assertions and 94→28→8→2 nested
+blocks. Keep `FIT_RUN_ID='nsbm-fit-cn100k-01'` and use a fresh notebook
+**Run all**; `RUN_MODE=NEW` is correct if the separate four-test output
+has not yet been started. `RESUME` is only for a started four-test output.
+The nonfatal `SyntaxWarning` in `hierarchy_validation.py` is unrelated.
