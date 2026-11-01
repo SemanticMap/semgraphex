@@ -123,3 +123,37 @@ def ensure_verified_fit_snapshot(remote: str | Path, local: str | Path, *,
             "fit from the correct Google Drive folder."
         )
     return status
+
+
+
+def load_verified_fit_bundle(remote: str | Path, local: str | Path, *,
+                             expected_vertices: int = 100_000):
+    """Stage and load the *same* snapshot, not stale notebook GRAPH_DIR state.
+
+    Return the verified graph, original-vertex partitions, source manifest,
+    fit summary, and staging status in one call. An incomplete snapshot raises
+    before metrics are attempted. nSBM is never refitted by this function.
+    """
+    status = ensure_verified_fit_snapshot(remote, local,
+                                          expected_vertices=expected_vertices)
+    root = Path(local)
+    graph_dir = root/"fit_data"
+    id_path = graph_dir/"ids.json"
+    if not id_path.is_file():
+        raise FileNotFoundError(
+            f"After staging, expected IDs at {id_path}. "
+            "The local scratch directory may have been cleared by another "
+            "cell or execution. Do not rerun nSBM; restore Drive artifacts."
+        )
+    graph = _load_graph(graph_dir)
+    manifest = json.loads((root/"manifest.json").read_text(encoding="utf-8"))
+    summary = json.loads((root/"fit_summary.json").read_text(encoding="utf-8"))
+    with np.load(root/"nsbm_partitions.npz", allow_pickle=False) as archive:
+        keys = sorted(k for k in archive.files if k.startswith("level_"))
+        levels = validate_levels([archive[k] for k in keys],
+                                 graph.vertex_count)
+    if _sha_bytes(graph) != manifest.get("graph_sha256"):
+        raise ValueError("Input graph differs from nSBM fit manifest")
+    if [len(set(x)) for x in levels] != summary.get("block_counts"):
+        raise ValueError("Loaded nSBM partition hierarchy differs from summary")
+    return graph, levels, manifest, summary, status

@@ -12,7 +12,7 @@ from semmap_haken.hypothesis.graph import TypedGraph
 from semmap_haken.hypothesis.runner import _save_graph, _sha_bytes
 from semmap_haken.hypothesis.scan_checkpoint import sha256_file, atomic_json
 from semmap_haken.hypothesis.selfsim_colab_io import (
-    FIT_FILES, ensure_verified_fit_snapshot, stage_fit_snapshot,
+    FIT_FILES, ensure_verified_fit_snapshot, stage_fit_snapshot, load_verified_fit_bundle,
 )
 
 
@@ -103,3 +103,20 @@ def test_required_files_are_explicit():
     assert "fit_data/ids.json" in FIT_FILES
     assert "nsbm_partitions.npz" in FIT_FILES
     assert "fit_summary.json" in FIT_FILES
+
+
+def test_load_snapshot_as_one_operation_after_local_files_disappear(tmp_path):
+    remote = tmp_path/"drive"/"fit"
+    local = tmp_path/"runtime"/"fit"
+    _fixture(remote)
+    # An interrupted Colab may have a stale marker, but not IDs.
+    local.mkdir(parents=True)
+    (local/"COMPLETED").write_text("complete\\n")
+    graph, levels, meta, summary, status = load_verified_fit_bundle(
+        remote,local,expected_vertices=20
+    )
+    assert status["ready"]
+    assert graph.vertex_count==20
+    assert [len(set(p)) for p in levels]==[10,5,3]
+    assert summary["identity"]==meta
+    assert (local/"fit_data"/"ids.json").is_file()
