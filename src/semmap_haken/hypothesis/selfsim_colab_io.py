@@ -64,7 +64,8 @@ def stage_fit_snapshot(
     # must not cause fitting to be skipped.
     (local/"COMPLETED").unlink(missing_ok=True)
     missing = [relative for relative in FIT_FILES
-               if not (local/relative).is_file()]
+               if not (local/relative).is_file()
+               or not (remote/relative).is_file()]
     if missing:
         return {"ready": False, "staged_files": copied,
                 "reason": "missing required nSBM files", "missing": missing}
