@@ -18,10 +18,14 @@ jobs:
         run: |
           python - <<'PY'
           import ast, nbformat
-          notebook = nbformat.read('notebooks/21_nsbm_self_similarity_four_tests_colab.ipynb', as_version=4)
-          nbformat.validate(notebook)
-          for index, cell in enumerate(notebook.cells):
-              if cell.cell_type == 'code':
-                  ast.parse(cell.source, filename=f'cell-{index}')
-          print('Validated', len(notebook.cells), 'cells')
+          for path in (
+              'notebooks/21_nsbm_self_similarity_four_tests_colab.ipynb',
+              'notebooks/22_nsbm_self_similarity_cn100k_colab.ipynb',
+          ):
+              notebook = nbformat.read(path, as_version=4)
+              nbformat.validate(notebook)
+              for index, cell in enumerate(notebook.cells):
+                  if cell.cell_type == 'code':
+                      ast.parse(cell.source, filename=f'{path}:cell-{index}')
+              print('Validated', path, len(notebook.cells), 'cells')
           PY
