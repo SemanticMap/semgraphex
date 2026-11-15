@@ -14,7 +14,7 @@ FILENAME = "conceptnet_normalized.db"
 # Observed public dataset HEAD commit; pin for reproducible experiments.
 REVISION = "4d3fd17e80543e88d9823e2f4fe47901dcf9a4e6"
 REQUIRED_TABLES = {
-    "node_norm": {"node_pk", "node_url", "language"},
+    "node_norm": {"node_pk", "node_url"},
     "rel_norm": {"rel_pk", "rel_url"},
     "edge_norm": {"start_fk", "end_fk", "rel_fk", "weight"},
 }
@@ -33,16 +33,26 @@ def inspect_database(path: str | Path) -> dict:
             found = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
             if not wanted <= found:
                 raise ValueError(f"{table}: missing columns {sorted(wanted - found)}")
+        # Language is encoded in the canonical URI. Some SQLite snapshots
+        # omit the redundant node_norm.language column described in the card.
+        # GLOB enables efficient prefix lookup on the indexed node_url.
         sample = conn.execute(
-            "SELECT node_url FROM node_norm WHERE language='en' LIMIT 1").fetchone()
-        if sample is None or "/c/en/" not in sample[0]:
-            raise ValueError("The normalized database has no English concepts")
+            "SELECT node_url FROM node_norm "
+            "WHERE node_url GLOB 'http://conceptnet.io/c/en/*' "
+            "OR node_url GLOB 'https://conceptnet.io/c/en/*' LIMIT 1"
+        ).fetchone()
+        if sample is None:
+            raise ValueError("The normalized database has no English ConceptNet URIs")
         # Indexes on start_fk/end_fk matter for multi-document random access.
         indices = [row[1] for row in conn.execute(
             "PRAGMA index_list(edge_norm)")]
+        has_language = "language" in {
+            column[1] for column in conn.execute("PRAGMA table_info(node_norm)")
+        }
     return {"path": str(source), "size_bytes": source.stat().st_size,
             "format": "hf-normalized-5.5", "dataset": REPO_ID,
-            "dataset_revision": REVISION, "edge_indices": indices}
+            "dataset_revision": REVISION, "edge_indices": indices,
+            "node_language_column": has_language}
 
 
 def download_database(*, cache_dir: str | Path,
