@@ -85,15 +85,23 @@ def prepare_zip(archive: Path, destination: Path, *, max_docs: int | None,
 
 def preflight_english(documents):
     """Prevent silent invalid English mapping of a Cyrillic-dominant corpus."""
-    samples = "".join(doc.text[:50000] for doc in documents[:min(100,len(documents))])
-    alpha = [c for c in samples if c.isalpha()]
-    cyr = sum("\u0400" <= c <= "\u052f" for c in alpha)
-    fraction = cyr / max(len(alpha), 1)
-    print(f"[preflight] Cyrillic fraction in sampled alphabetic characters: {fraction:.2%}")
-    if fraction > .05:
-        raise ValueError("The corpus appears to include substantial Cyrillic text. "
-                         "ConceptNet Local is English-only; use another adapter "
-                         "for Russian rather than silently mapping to /c/en.")
+    checked_letters = 0
+    checked_cyrillic = 0
+    mixed = []
+    for document in documents:
+        sample = document.text[:20000]
+        letters = sum(c.isalpha() for c in sample)
+        cyrillic = sum("\u0400" <= c <= "\u052f" for c in sample)
+        checked_letters += letters
+        checked_cyrillic += cyrillic
+        if letters >= 10 and cyrillic / letters > .05:
+            mixed.append(document.doc_id)
+    fraction = checked_cyrillic / max(checked_letters, 1)
+    print(f"[preflight] Cyrillic fraction across sampled documents: {fraction:.2%}")
+    if mixed:
+        raise ValueError("Detected Cyrillic text in documents (first 8): "
+                         + repr(mixed[:8]) + ". ConceptNet Local is English-only; "
+                         "Russian documents require a different adapter.")
     return fraction
 
 
