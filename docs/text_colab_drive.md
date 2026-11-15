@@ -1,7 +1,16 @@
+> **Исправленная версия (рекомендуется):** [новый чистый Colab-ноутбук](https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature%2Ftext-corpus-colab-drive-resume/notebooks/11_text_corpus_hf55_colab_clean.ipynb) — без monkey-patch.
+> Для нормализованного ConceptNet колонка `node_norm.language` теперь необязательна:
+> язык определяется из URI `/c/en/...`; при этом таблицы `node_norm/rel_norm/edge_norm`
+> и их действительно необходимые поля по-прежнему проверяются.
+> При повторной попытке инициализации `progress.json` без `run.json` разрешён,
+> если в папке ещё нет опубликованных документов. Данные без контракта не принимаются
+> автоматически. Существующие папки экспериментов не удаляйте. Старый ноутбук 10
+> содержал динамические патчи и **не предназначен для запуска**.
+
 # Colab: Txt.zip → Hugging Face ConceptNet normalized → DuckDB/Parquet → Drive
 
-Notebook: `notebooks/10_text_corpus_conceptnet_local_drive.ipynb`. 
-Open it directly: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/text-corpus-colab-drive-resume/notebooks/10_text_corpus_conceptnet_local_drive.ipynb
+Notebook: `notebooks/11_text_corpus_hf55_colab_clean.ipynb` (рекомендуется). 
+Open it directly: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/text-corpus-colab-drive-resume/notebooks/11_text_corpus_hf55_colab_clean.ipynb
 
 ## Fixed sources and result folder
 
