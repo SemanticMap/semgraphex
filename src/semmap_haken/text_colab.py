@@ -172,7 +172,8 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
             memory_limit: str = "1GB", max_edges_per_document: int = 20_000_000,
             max_docs: int | None = None, max_doc_bytes: int = 64_000_000,
             max_total_bytes: int = 4_000_000_000,
-            spacy_model: str | None = None):
+            spacy_model: str | None = None,
+            database_version: str = 'user-supplied'):
     label = safe_label(label)
     source = Path(archive).resolve(strict=True)
     database = Path(database).resolve(strict=True)
@@ -204,6 +205,7 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         "source_drive_file_id": "1I8dYdI4eLVmlhZjNewxl63EGgJKLmDqR",
         "source_archive_sha256": archive_digest,
         "selection": selection, "conceptnet_database_sha256": sha256(database),
+        "conceptnet_database_version": database_version,
         "workers_are_runtime_only": True,
         "document_language": "en",
         "spacy_model": spacy_model,
@@ -237,7 +239,8 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
                       workers=workers, threads_per_worker=threads_per_worker,
                       memory_limit=memory_limit,
                       max_edges_per_document=max_edges_per_document,
-                      spacy_model=spacy_model)
+                      spacy_model=spacy_model,
+                      database_version=database_version)
     start = time.monotonic()
     published = 0
     completed = 0
@@ -296,7 +299,12 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--archive", required=True)
-    p.add_argument("--database", required=True)
+    p.add_argument("--database", help="Existing ConceptNet SQLite path")
+    p.add_argument("--hf-db", action="store_true",
+                   help="Download pinned cstr/conceptnet-normalized-multi to Colab local SSD")
+    p.add_argument("--hf-revision", default=None,
+                   help="Optional pinned Hugging Face dataset revision")
+    p.add_argument("--database-version", default="user-supplied")
     p.add_argument("--drive-parent", required=True)
     p.add_argument("--label", required=True)
     p.add_argument("--workspace", default="/content/semmap-text-corpus")
@@ -307,12 +315,26 @@ def main(argv=None):
     p.add_argument("--max-docs", type=int)
     p.add_argument("--spacy-model")
     a = p.parse_args(argv)
-    result = execute(a.archive, a.database, a.drive_parent, a.label,
+    if a.hf_db and a.database:
+        p.error("Choose either --hf-db or --database, not both")
+    if not a.hf_db and not a.database:
+        p.error("Supply --hf-db for automatic download or --database")
+    database, dbversion = a.database, a.database_version
+    if a.hf_db:
+        from .text_hf import REVISION, download_database
+        revision = a.hf_revision or REVISION
+        info = download_database(cache_dir=Path(a.workspace) / "hf-cache",
+                                 revision=revision)
+        database = info["path"]
+        dbversion = "cstr/conceptnet-normalized-multi@" + revision
+        print("[hf] Local SQLite:", database, flush=True)
+    result = execute(a.archive, database, a.drive_parent, a.label,
                      workspace=a.workspace, workers=a.workers,
                      threads_per_worker=a.threads_per_worker,
                      memory_limit=a.memory_limit,
                      max_edges_per_document=a.max_edges_per_document,
-                     max_docs=a.max_docs, spacy_model=a.spacy_model)
+                     max_docs=a.max_docs, spacy_model=a.spacy_model,
+                     database_version=dbversion)
     print(json.dumps({"documents": len(result["documents"]),
                       "edges": result["edge_count"]}, sort_keys=True))
 
