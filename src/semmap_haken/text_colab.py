@@ -143,6 +143,31 @@ def checkpoint_document(local_root: Path, drive_root: Path, report: dict):
     return True
 
 
+def validate_fresh_experiment_folder(drive_root: Path):
+    """Resume a failed setup without run.json only when no graph was published.
+
+    progress.json is written by our own exception handler, even before the
+    initial run.json is created. It is harmless diagnostic state, not a
+    checkpoint. Published documents without their run contract must instead
+    remain untouched: we cannot prove they came from this code and database.
+    """
+    allowed = {"experiment.json", "progress.json", "documents"}
+    unexpected = sorted(p.name for p in drive_root.iterdir() if p.name not in allowed)
+    if unexpected:
+        raise ValueError("Drive output has unexpected files without run.json: "
+                         + repr(unexpected) + ". Existing data was not modified.")
+    docs = drive_root / "documents"
+    if docs.exists():
+        for child in docs.iterdir():
+            if child.is_dir() and child.name.startswith(".partial-"):
+                continue  # incomplete staging from killed FUSE copy, never trusted
+            raise ValueError(
+                "Drive has document data but no run.json; cannot validate "
+                "the original run contract. Preserve the folder and choose "
+                "a new experiment label or recover a matching run.json: "
+                + str(child))
+
+
 def restore_documents(local_root: Path, drive_root: Path):
     remote = drive_root / "documents"
     if not remote.exists():
@@ -230,9 +255,7 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         print(f"[resume] Restored {restored} documents")
         resume = True
     else:
-        if any(x.name != "experiment.json" for x in drive_root.iterdir()
-               if x.name != "documents"):
-            raise ValueError("Drive output has unexpected files without run.json")
+        validate_fresh_experiment_folder(drive_root)
         resume = False
 
     options = Options(database=str(database), output=str(local_root),
