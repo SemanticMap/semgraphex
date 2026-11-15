@@ -1,5 +1,15 @@
 # Корпус текстов → графы вхождений ConceptNet
 
+> **Обновление для Colab (Hugging Face):** готовая база скачивается автоматически
+> из [cstr/conceptnet-normalized-multi](https://huggingface.co/datasets/cstr/conceptnet-normalized-multi)
+> в `/content/semmap-hf-cache` через `huggingface_hub`.
+> Этой базе нужна схема `node_norm/rel_norm/edge_norm`, а не `concepts/relations`;
+> `open_conceptnet()` автоматически выбирает соответствующий адаптер.
+> Описание ручной базы ConceptNet Local ниже оставлено для совместимости.
+> Полный запуск в Colab описан в [text_colab_drive.md](text_colab_drive.md).
+> Исходный фильтр Hugging Face исключает полный русский граф.
+
+
 Основа: `bb91cbdbbd53ae48d64bd048aace8b94c0d186d1`, ветка
 `feature/nsbm-multiscale-self-similarity` (последние изменения разработки, не `main`).
 Изменения изолированы от существующих научных экспериментов.
