@@ -50,6 +50,20 @@ python -m semmap_haken.text_colab \
 
 Use `--hf-revision <SHA>` only to intentionally change dataset version. An existing label will reject changes in SQLite contents or version; use a **new label** for new data. For local testing, `--database <path>` remains available.
 
+## Автоматическое подключение spaCy
+
+В первой кодовой ячейке ноутбука установлено `SPACY_MODEL = "en_core_web_sm"`.
+В отдельной ячейке **после установки semgraphex и перед скачиванием данных/запуском**
+выполняется `pip install 'spacy>=3.7,<4'`; если модель отсутствует, выполняется
+`python -m spacy download en_core_web_sm`. Затем ноутбук проверяет
+`nlp("Cats are running.")[0].lemma_ == "cat"` и передаёт модель в CLI через
+`--spacy-model`. Больше ничего вручную вставлять не нужно.
+
+Если лемматизация не нужна, укажите `SPACY_MODEL = None`, установка пропустится.
+**При изменении SPACY_MODEL задайте новую EXPERIMENT_LABEL**: токенизация и
+сопоставление понятий могут измениться, а RESUME не должен смешивать результаты.
+Модель только английская, как и текущий адаптер данных.
+
 ## Durable checkpoints, parallelism and reproducibility
 
 - Independent worker processes (`spawn`) each read the SQLite DB in `mode=ro`; CPU workers are capped using available RAM and CPU cores; DuckDB operates on local SSD with one thread per worker by default.
