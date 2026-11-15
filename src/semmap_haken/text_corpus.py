@@ -6,7 +6,7 @@ existing numerical core remains usable without the optional text installation.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, fields
 import hashlib
 from importlib.metadata import version
@@ -282,7 +282,8 @@ def _build_document(task):
             shutil.rmtree(staging)
 
 
-def build_corpus(documents: list[Document], options: Options, *, resume=False):
+def build_corpus(documents: list[Document], options: Options, *, resume=False,
+                 on_document_completed=None):
     """One coordinator, independent spawn workers, immutable per-document outputs."""
     options.validate()
     _validate_documents(documents)
@@ -329,14 +330,26 @@ def build_corpus(documents: list[Document], options: Options, *, resume=False):
         (root / 'COMPLETED').unlink(missing_ok=True)
         (root / 'documents').mkdir(exist_ok=True)
         tasks = [(doc, options, resume) for doc in sorted(documents, key=lambda d: d.doc_id)]
+        reports = []
         if options.workers == 1:
-            reports = [_build_document(task) for task in tasks]
+            for task in tasks:
+                report = _build_document(task)
+                if on_document_completed is not None:
+                    on_document_completed(report)
+                reports.append(report)
         else:
             with ProcessPoolExecutor(max_workers=min(options.workers, len(tasks)),
                                      mp_context=multiprocessing.get_context('spawn'),
                                      initializer=_worker_setup,
                                      initargs=(options.threads_per_worker,)) as pool:
-                reports = list(pool.map(_build_document, tasks, chunksize=1))
+                futures = {pool.submit(_build_document, task): task[0].doc_id
+                           for task in tasks}
+                for future in as_completed(futures):
+                    report = future.result()
+                    if on_document_completed is not None:
+                        on_document_completed(report)
+                    reports.append(report)
+        reports.sort(key=lambda report: report['identity']['doc_id'])
         if (source_stat != (database.stat().st_size, database.stat().st_mtime_ns)
                 or (wal.exists() and wal.stat().st_size)):
             raise ValueError('ConceptNet database changed during the run; corpus not published')
