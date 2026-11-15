@@ -1,0 +1,16 @@
+# All paths are relative to THIS config file, not the current directory.
+input: ../examples/text_corpus/corpus.jsonl
+database: ../data/cn.db
+output: ../tmp/runs/text-corpus-01
+language: en
+# ConceptNet Local is English-only. Source DB version is user-supplied, not inferred.
+database_version: 'user-supplied ConceptNet Local snapshot'
+workers: 4
+threads_per_worker: 1
+memory_limit: 1GB
+# Raise explicitly for long texts; exceeding this fails, never truncates.
+max_edges_per_document: 20000000
+relations: []
+# Optional contextual lemmatization, with the separately installed model:
+# spacy_model: en_core_web_sm
+spacy_model: null

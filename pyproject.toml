@@ -26,6 +26,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The text extra requires Python >=3.12 through conceptnet-local; core stays >=3.10.
+text = ["duckdb>=1.4.3,<2", "conceptnet-local==1.0.3"]
+text-lemma = ["spacy>=3.7,<4"]
 cuda = ["cupy-cuda12x>=13,<15"]
 gpu = ["torch>=2.1"]
 legacy = [
@@ -48,6 +51,7 @@ notebook = [
 ]
 
 [project.scripts]
+semmap-text-corpus = "semmap_haken.text_corpus:main"
 semmap-haken = "semmap_haken.cli:main"
 semmap-wishart = "semmap_haken.wishart_cli:main"
 semmap-wishart-colab = "semmap_haken.wishart_colab_cli:main"
