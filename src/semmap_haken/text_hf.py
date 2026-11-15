@@ -26,7 +26,7 @@ def inspect_database(path: str | Path) -> dict:
     if not source.is_file():
         raise FileNotFoundError(source)
     with source.open("rb") as f:
-        if f.read(16) != b"SQLite format 3\\x00":
+        if f.read(16) != b"SQLite format 3\x00":
             raise ValueError("Downloaded file is not SQLite")
     with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as conn:
         for table, wanted in REQUIRED_TABLES.items():
