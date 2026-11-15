@@ -161,7 +161,7 @@ class NormalizedConceptNet:
         self.cursor = self.connection.cursor()
         try:
             for table, columns in (
-                ("node_norm", {"node_pk", "node_url", "language"}),
+                ("node_norm", {"node_pk", "node_url"}),
                 ("rel_norm", {"rel_pk", "rel_url"}),
                 ("edge_norm", {"start_fk", "end_fk", "rel_fk", "weight"}),
             ):
