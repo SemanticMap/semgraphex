@@ -71,3 +71,22 @@ def test_incremental_checkpoint_and_restore(tmp_path):
     (remote / "documents" / key / "edges.parquet").write_bytes(b"damage")
     with pytest.raises(ValueError, match="Checksum mismatch"):
         restore_documents(tmp_path / "session3", remote)
+
+
+def test_notebook_installs_spacy_before_corpus_run():
+    """Notebook has a working optional spaCy setup, not a manual missing step."""
+    import ast
+    notebook_path = (Path(__file__).resolve().parents[1] / "notebooks" /
+                     "10_text_corpus_conceptnet_local_drive.ipynb")
+    nb = json.loads(notebook_path.read_text(encoding="utf-8"))
+    code = ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
+    for cell in code:
+        ast.parse(cell)
+    settings = next(i for i, cell in enumerate(code) if "SPACY_MODEL = " in cell)
+    install = next(i for i, cell in enumerate(code) if '"[text]"' in cell or 'str(repo)+"[text]"' in cell)
+    model_setup = next(i for i, cell in enumerate(code) if "spacy.load(SPACY_MODEL)" in cell)
+    run = next(i for i, cell in enumerate(code) if '"semmap_haken.text_colab"' in cell)
+    assert settings < install < model_setup < run
+    assert 'SPACY_MODEL = "en_core_web_sm"' in code[settings]
+    assert '"spacy", "download", SPACY_MODEL' in code[model_setup]
+    assert '"--spacy-model", SPACY_MODEL' in code[run]
