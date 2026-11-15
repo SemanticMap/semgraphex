@@ -18,15 +18,17 @@ from semmap_haken.graph_build import load_prepared_graph
 from semmap_haken.text_hf import REVISION, inspect_database, download_database
 
 
-@pytest.fixture
-def normalized_db(tmp_path):
+@pytest.fixture(params=[True, False], ids=["with-language", "without-language"])
+def normalized_db(tmp_path, request):
+    """Both observed HF layouts must work with no data or semantics loss."""
     p = tmp_path / "conceptnet_normalized.db"
+    has_language = request.param
     with sqlite3.connect(p) as con:
         con.executescript("""
           CREATE TABLE node_norm (
             node_pk INTEGER PRIMARY KEY,
-            node_url TEXT UNIQUE NOT NULL,
-            language TEXT NOT NULL
+            node_url TEXT UNIQUE NOT NULL
+            %s
           );
           CREATE TABLE rel_norm (
             rel_pk INTEGER PRIMARY KEY, rel_url TEXT UNIQUE NOT NULL
@@ -37,14 +39,19 @@ def normalized_db(tmp_path):
           );
           CREATE INDEX src_ix ON edge_norm(start_fk);
           CREATE INDEX dst_ix ON edge_norm(end_fk);
-        """)
-        con.executemany("INSERT INTO node_norm VALUES (?,?,?)", [
+        """ % (", language TEXT NOT NULL" if has_language else ""))
+        nodes = [
           (1, "http://conceptnet.io/c/en/cat", "en"),
           (2, "http://conceptnet.io/c/en/animal", "en"),
           (3, "http://conceptnet.io/c/en/dog", "en"),
           (4, "http://conceptnet.io/c/en/the", "en"),
           (5, "http://conceptnet.io/c/ru/кот", "ru"),
-        ])
+        ]
+        con.executemany(
+            "INSERT INTO node_norm VALUES (%s)" %
+            (",".join("?" for _ in range(3 if has_language else 2))),
+            nodes if has_language else [n[:2] for n in nodes]
+        )
         con.executemany("INSERT INTO rel_norm VALUES (?,?)", [
           (1, "http://conceptnet.io/r/IsA"),
           (2, "http://conceptnet.io/r/RelatedTo"),
@@ -61,6 +68,7 @@ def test_schema_detection_and_exact_mapping(normalized_db):
     d = inspect_database(normalized_db)
     assert d["format"] == "hf-normalized-5.5"
     assert "src_ix" in d["edge_indices"]
+    assert d["node_language_column"] in (True, False)
     initial = sha256(normalized_db)
     with open_conceptnet(normalized_db) as cn:
         assert isinstance(cn, NormalizedConceptNet)
