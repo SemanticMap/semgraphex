@@ -1,0 +1,36 @@
+name: Text corpus ConceptNet Local
+on:
+  push:
+    branches: [feature/text-corpus-conceptnet-local]
+  pull_request:
+    paths:
+      - 'src/semmap_haken/text_*.py'
+      - 'tests/test_text_corpus*.py'
+      - 'pyproject.toml'
+      - '.github/workflows/text-corpus.yml'
+permissions:
+  contents: read
+concurrency:
+  group: text-corpus-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e '.[text,dev]'
+      - run: python -m nltk.downloader stopwords
+      - name: Verify real optional dependencies (no skipped integration suite)
+        run: python -c 'import conceptnet_local, duckdb'
+      - run: python -m pytest -q tests/test_text_corpus_words.py tests/test_text_corpus.py
