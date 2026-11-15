@@ -7,7 +7,8 @@ import zipfile
 import pytest
 
 from semmap_haken.text_colab import (
-    checkpoint_document, prepare_zip, restore_documents, safe_label
+    checkpoint_document, prepare_zip, restore_documents, safe_label,
+    validate_fresh_experiment_folder
 )
 from semmap_haken.text_corpus import sha256
 
@@ -90,3 +91,36 @@ def test_notebook_installs_spacy_before_corpus_run():
     assert 'SPACY_MODEL = "en_core_web_sm"' in code[settings]
     assert '"spacy", "download", SPACY_MODEL' in code[model_setup]
     assert '"--spacy-model", SPACY_MODEL' in code[run]
+
+
+def test_resume_accepts_own_progress_file_before_run_contract(tmp_path):
+    """Failure before first checkpoint must not poison the next NEW/RESUME."""
+    destination = tmp_path / "text-corpus-example"
+    (destination / "documents").mkdir(parents=True)
+    (destination / "experiment.json").write_text('{"schema": 1}', encoding="utf-8")
+    (destination / "progress.json").write_text(
+        '{"state": "interrupted"}', encoding="utf-8"
+    )
+    validate_fresh_experiment_folder(destination)
+    # Killed FUSE staging is ignored, not treated as a valid checkpoint.
+    (destination / "documents" / ".partial-stopped").mkdir()
+    validate_fresh_experiment_folder(destination)
+
+
+def test_resume_rejects_orphan_documents_without_run_contract(tmp_path):
+    destination = tmp_path / "text-corpus-example"
+    (destination / "documents" / "a-completed-file").mkdir(parents=True)
+    (destination / "experiment.json").write_text("{}", encoding="utf-8")
+    (destination / "progress.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="no run.json"):
+        validate_fresh_experiment_folder(destination)
+    assert (destination / "documents" / "a-completed-file").exists()
+
+
+def test_resume_rejects_unknown_metadata_without_run_contract(tmp_path):
+    destination = tmp_path / "text-corpus-example"
+    destination.mkdir()
+    (destination / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="unexpected files"):
+        validate_fresh_experiment_folder(destination)
+    assert (destination / "manifest.json").exists()
