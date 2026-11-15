@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 
-from .text_conceptnet import ConceptNetLocal, words
+from .text_conceptnet import open_conceptnet, words
 
 SCHEMA_VERSION = 1
 OCCURRENCE_SCHEMA = '''doc_id VARCHAR, occurrence_id BIGINT, surface VARCHAR,
@@ -203,7 +203,7 @@ def _build_document(task):
             import spacy
             nlp = spacy.load(options.spacy_model, disable=['ner', 'parser'])
         tokens = words(doc.text, nlp)
-        with ConceptNetLocal(options.database, doc.language) as cn:
+        with open_conceptnet(options.database, doc.language) as cn:
             occurrences = []
             for index, word in enumerate(tokens):
                 uri, status = cn.map_word(word)
@@ -287,7 +287,7 @@ def build_corpus(documents: list[Document], options: Options, *, resume=False,
     """One coordinator, independent spawn workers, immutable per-document outputs."""
     options.validate()
     _validate_documents(documents)
-    with ConceptNetLocal(options.database):
+    with open_conceptnet(options.database):
         pass  # Fail on missing dependencies/resources/schema before creating run output.
     options = Options(**{**asdict(options), 'database': str(Path(options.database).resolve()),
                          'output': str(Path(options.output).resolve())})
@@ -323,8 +323,10 @@ def build_corpus(documents: list[Document], options: Options, *, resume=False,
                              'git_commit': revision, 'python': sys.version,
                              'distance_definition': 'abs(target.char_start-source.char_start)',
                              'offset_unit': 'Unicode code point, zero-based, original UTF-8 text',
-                             'provenance': 'ConceptNet Local exposes id/start/end/rel/weight only; '
-                                           'dataset/sources/license not available through this API',
+                             'provenance': 'SQLite ConceptNet Local or HF normalized. The HF database has '
+                                           'no original assertion ID, dataset, sources or license; '
+                                           'hf55:edge_norm:<rowid> is synthetic, stable only within '
+                                           'the pinned unchanged database snapshot.',
                              'interpretation': 'Co-occurring concepts connected in ConceptNet; '
                                                'not relations asserted by the text'})
         (root / 'COMPLETED').unlink(missing_ok=True)
