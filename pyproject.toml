@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # The text extra requires Python >=3.12 through conceptnet-local; core stays >=3.10.
-text = ["duckdb>=1.4.3,<2", "conceptnet-local==1.0.3"]
+text = ["duckdb>=1.4.3,<2", "conceptnet-local==1.0.3", "huggingface_hub>=0.32,<3"]
 text-lemma = ["spacy>=3.7,<4"]
 cuda = ["cupy-cuda12x>=13,<15"]
 gpu = ["torch>=2.1"]
