@@ -1,47 +1,74 @@
-# Colab: ZIP → ConceptNet Local → DuckDB/Parquet → Google Drive
+# Colab: Txt.zip → Hugging Face ConceptNet normalized → DuckDB/Parquet → Drive
 
-Notebook: `notebooks/10_text_corpus_conceptnet_local_drive.ipynb`.
+Notebook: `notebooks/10_text_corpus_conceptnet_local_drive.ipynb`. 
+Open it directly: https://colab.research.google.com/github/SemanticMap/semgraphex/blob/feature/text-corpus-colab-drive-resume/notebooks/10_text_corpus_conceptnet_local_drive.ipynb
 
-## Google Drive contracts (fixed)
+## Fixed sources and result folder
 
-- Input ZIP ID: `1I8dYdI4eLVmlhZjNewxl63EGgJKLmDqR`, verified title `Txt.zip`, 244,637,041 bytes.
-- Output folder ID: `1C7r8A0L0afrfq_8KTebOBM4BJqbZjXM4` (existing `colab` folder).
-- Output experiment directory: `text-corpus-<EXPERIMENT_LABEL>` underneath that folder.
-- Existing input is untouched. New label means a new isolated experiment.
-- **ConceptNet Local SQLite database file is NOT in the supplied links.** The notebook requires its Google Drive file ID or explicit mounted path. It never downloads a random/incompatible DB.
-- ConceptNet Local is English-only; Cyrillic-heavy corpora are stopped before graph construction, rather than silently labelled English.
+- TXT source: Google Drive `1I8dYdI4eLVmlhZjNewxl63EGgJKLmDqR`, `Txt.zip` (244,637,041 bytes, metadata inspected).
+- Checkpoints/result parent: `1C7r8A0L0afrfq_8KTebOBM4BJqbZjXM4` (Google Drive `colab`).
+- ConceptNet data source: https://huggingface.co/datasets/cstr/conceptnet-normalized-multi
+- File: `conceptnet_normalized.db` (about 1.78 GB), **pinned** dataset revision `4d3fd17e80543e88d9823e2f4fe47901dcf9a4e6`.
+- `huggingface_hub.hf_hub_download(repo_type="dataset", revision=..., cache_dir="/content/semmap-hf-cache")` downloads directly to Colab host. A cached snapshot is reused in the same live runtime, and the hub client supports caching/retry.
+- Experiment directory: `text-corpus-<EXPERIMENT_LABEL>` under the given Drive parent.
 
-## Instructions
+## Important schema correction
 
-1. Open the notebook through Colab, choose T4 or L4 GPU in Runtime settings (text extraction uses CPU; GPU only helps downstream).
-2. Set `EXPERIMENT_LABEL` (safe ASCII characters). Keep it unchanged for future RESUME.
-3. Set `CONCEPTNET_DB_DRIVE_FILE_ID` or `CONCEPTNET_DB_PATH` to a prebuilt **ConceptNet Local** SQLite database (schema: tables `concepts`, `relations`, required indexed neighbours).
-4. Set `MAX_DOCS=100` for the first bounded pilot, or `None` to process all `.txt` members. Only UTF-8 `.txt` is ingested in this version. Other ZIP contents are not processed.
-5. Run all cells. Authorize Google Drive. Text archive and SQLite are copied to Colab's local disk. The runner auto-selects worker count from CPUs/available memory.
-6. Observe `progress.json` and per-document Parquet/manifest folders. After a disconnect simply reconnect and run all with the same label. Completed outputs are checked by SHA-256, restored, and skipped.
+`cstr/conceptnet-normalized-multi` is **not** the SQLite format for the Python package `conceptnet-local`:
+- ConceptNet Local: `concepts`, `relations` with URI strings;
+- Hugging Face normalized: `node_norm(node_pk,node_url,language)`, `rel_norm(rel_pk,rel_url)`, `edge_norm(start_fk,end_fk,rel_fk,weight)`.
 
-## Technical checkpoints
+`text_conceptnet.open_conceptnet()` detects the schema and chooses either the legacy adapter or `NormalizedConceptNet`. The HF adapter resolves URLs to integer node IDs, uses a small process-local TEMP table of concepts and a join against `edge_norm`, retains edge direction, relation and the source weights. It never writes to the HF SQLite file (all main DB connections use `mode=ro`).
 
-`build_corpus(..., on_document_completed=callback)` now reports each completed process task to the coordinator immediately using `as_completed`. The callback publishes a document's files to a temporary sibling folder on Drive, rechecks the data and manifest, then renames the complete folder. A separate `progress.json` is updated after each completed document. `COMPLETED` at corpus root is published only when all documents were verified.
+The HF table does **not** expose the original edge assertion identifier or ConceptNet attribution fields (`dataset/sources/license`). Output `assertion_id` for HF is a **synthetic** identifier `hf55:edge_norm:<SQLite rowid>`; rowid is meaningful only for the immutable downloaded snapshot (recorded as SHA-256). Document graphs must not claim that it is an original assertion ID.
 
-Each run writes `experiment.json` with archive and SQLite SHA-256, selection policy and semantic settings. Changes to archive, SQLite, corpus selection or mapping settings for an existing label cause a clear error. A new label creates a new result without overwriting old experiments. `run.json` tracks package/code versions, and original `text_corpus` RESUME guards remain enabled.
+This specific dataset filters edges to languages `en/fr/it/de/es/ar/fa/grc/he/la/hbo` (and some cross-language edges) — **no full Russian-to-Russian graph**. The current text matcher still handles **English only**, and fails early on documents containing substantial Cyrillic.
 
-The whole corpus must still fit within the reading strategy of `read_documents` (texts loaded in RAM). Runner enforces a default 4GB cap on total **selected uncompressed** TXT bytes, plus 64MB per TXT. Larger datasets require a streaming iteration rewrite, not an unreported truncation. On the example notebook `MAX_DOCS=100` intentionally selects the lexicographically first 100 TXT entries. Values beyond the configured maximum stop with errors (no inferred graph edges are dropped).
+## Run from Colab
 
-For full reproducibility the processed original ZIP is identified by its file SHA, not only its Drive ID, and Unicode offsets are preserved in the original text.
+1. Select Runtime T4 or L4 and Python 3.12+. (The text-construction phase uses CPU; GPU accelerates only later graph algorithms.)
+2. In the notebook config cell, choose an experiment label. `MAX_DOCS=100` runs a bounded pilot of first 100 TXT files; `None` processes all TXT files in the archive.
+3. Run all. Authenticate Google Drive when prompted. The notebook:
+   - resolves the provided Drive IDs to mounted file/folder paths;
+   - checks Colab CPU/RAM/SSD/GPU;
+   - fetches latest branch code and installs `.[text]`, including `huggingface_hub`;
+   - downloads the pinned normalized SQLite file to **local** `/content/semmap-hf-cache`;
+   - validates tables/columns and reads the English node sample;
+   - runs `semmap_haken.text_colab` with `--database` and an explicit dataset revision label.
+4. Watch `text-corpus-<label>/progress.json` on Drive. After an interruption, **Run all with the same label**. All previously published document checkpoints are hashed and restored. No manual SQLite path is needed.
 
-## Known limits
+A headless CLI alternative, if mounting Drive already done:
 
-- Full 244MB ZIP file's content has not been inspected in this environment; Drive metadata verified, file bytes not downloaded.
-- No production ConceptNet Local SQLite was provided or discovered, so the actual 20–100 document run cannot be claimed complete.
-- Google Drive FUSE cannot guarantee the same atomic semantics as local POSIX disks. Files are copied to named staging directories and verified twice, but recovery validation is the authoritative correctness check.
-- No claim that GPU accelerates SQL/ConceptNet matching; T4/L4 availability is diagnosed, not used in this stage.
-- A document lost before its per-document checkpoint finishes is reprocessed on resume.
-- If the notebook is run twice simultaneously with the same label, checkpoints may conflict. Run a single coordinator per experiment label.
-- The original `text_corpus.py` interface does not support arbitrary multilingual ConceptNet URIs; an independent multilingual adapter is required for Russian texts.
+```bash
+python -m semmap_haken.text_colab \
+  --archive "/content/drive/MyDrive/<path>/Txt.zip" \
+  --hf-db \
+  --drive-parent "/content/drive/MyDrive/<output-parent>" \
+  --label "semmap-text-hf55-01" \
+  --workers 4
+```
 
-## Validation
+Use `--hf-revision <SHA>` only to intentionally change dataset version. An existing label will reject changes in SQLite contents or version; use a **new label** for new data. For local testing, `--database <path>` remains available.
 
-Execute `python -m pytest -q tests/test_text_corpus_words.py tests/test_text_corpus.py tests/test_text_colab.py`.
+## Durable checkpoints, parallelism and reproducibility
 
-New tests cover ZIP order/traversal/size limits and checkpoint copying, restoration, SHA failure. Real full-corpus Colab run remains an independent test.
+- Independent worker processes (`spawn`) each read the SQLite DB in `mode=ro`; CPU workers are capped using available RAM and CPU cores; DuckDB operates on local SSD with one thread per worker by default.
+- The coordinator receives each finished task immediately (`as_completed`) and publishes the entire completed document to its Drive `documents/<sha256(doc_id)>` directory. Includes Parquet, source text, manifest and SHA-256; no silently truncated edges.
+- `progress.json` is written after every completed document. `experiment.json` includes SHA-256 of ZIP and SQLite and selected TXT list policy; `run.json` includes code/package versions. Root `COMPLETED` appears only after all results pass verification.
+- `RESUME` copies only valid remote document outputs back to the local scratch directory and skips them. A document interrupted before publication is reprocessed.
+- **Important:** a new Colab VM generally loses the local Hugging Face cache and must download the ~1.78 GB SQLite again; document checkpoints on Drive persist. For near-instant startup across Colab sessions a separate, user-approved persistent cache of the DB would be needed.
+- FUSE mount atomicity is not guaranteed. The runner stages and validates files before publishing markers; recovery validation is authoritative.
+- ZIP parsing requires UTF-8 TXT and rejects directory traversal, malformed code points, overly large uncompressed files, and mixed unsupported-language inputs.
+
+## Verification
+
+```bash
+python -m pip install -e '.[text,dev]'
+python -m nltk.downloader stopwords
+python -m pytest -q tests/test_text_corpus_words.py tests/test_text_corpus.py tests/test_text_colab.py tests/test_text_hf.py
+```
+
+HF download tests mock `huggingface_hub.hf_hub_download` and use a tiny SQLite `node_norm/edge_norm/rel_norm` fixture. Full 1.78 GB database download and the real TXT corpus in Google Colab have **not** been executed in CI; this must be validated in a real user Colab runtime. Performance and coverage are not claimed without real benchmarks.
+
+HF dataset card: https://huggingface.co/datasets/cstr/conceptnet-normalized-multi
+Hub download API: https://huggingface.co/docs/huggingface_hub/en/package_reference/file_download
