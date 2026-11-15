@@ -29,8 +29,21 @@ def words(text: str, nlp=None) -> list[Word]:
     Without it, every Unicode letter/number word is kept, including stopwords.
     """
     if nlp is not None:
-        return [Word(t.idx, t.idx + len(t.text), t.text, t.lemma_ or None)
-                for t in nlp(text) if any(c.isalnum() for c in t.text)]
+        # spaCy rejects strings longer than nlp.max_length (E088). Passing a
+        # multi-million-character novel as one Doc may also exhaust Colab RAM.
+        # Use short, independent chunks cut only at whitespace boundaries.
+        # Keep the absolute offsets of the original unmodified document.
+        result = []
+        for offset, chunk in _spacy_chunks(text, nlp):
+            for token in nlp(chunk):
+                if not any(c.isalnum() for c in token.text):
+                    continue
+                start = offset + token.idx
+                end = start + len(token.text)
+                if text[start:end] != token.text:
+                    raise RuntimeError("spaCy chunk offset does not match source")
+                result.append(Word(start, end, token.text, token.lemma_ or None))
+        return result
     result = []
     i = 0
     while i < len(text):
@@ -48,6 +61,47 @@ def words(text: str, nlp=None) -> list[Word]:
                 break
         result.append(Word(start, i, text[start:i]))
     return result
+
+
+def _spacy_chunks(text: str, nlp, *, target_chars: int = 100_000):
+    """Yield (original code-point start, <=max_length chunk) without word cuts.
+
+    Breaks preferentially at sentence/paragraph boundaries and otherwise at
+    whitespace. No token or lemma is silently dropped, and absolute offsets
+    are preserved. Parser/NER remain disabled by the caller's spaCy pipeline.
+    """
+    if target_chars < 2:
+        raise ValueError("spaCy target chunk length must be >= 2")
+    max_length = int(getattr(nlp, "max_length", 1_000_000))
+    if max_length < 2:
+        raise ValueError("spaCy nlp.max_length must be >= 2")
+    budget = min(target_chars, max_length - 1)
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + budget)
+        if end < len(text) and not text[end - 1].isspace():
+            # Prefer paragraph or sentence boundaries in the last half of
+            # the chunk, reducing the context lost for POS/lemmatization.
+            best = -1
+            for sep in ("\\n\\n", "\\n", ". ", "! ", "? "):
+                pos = text.rfind(sep, start + budget // 2, end)
+                if pos >= 0:
+                    best = max(best, pos + len(sep))
+            if best > start:
+                end = best
+            else:
+                for pos in range(end - 1, start - 1, -1):
+                    if text[pos].isspace():
+                        end = pos + 1
+                        break
+                else:
+                    raise ValueError(
+                        "A document contains a run longer than the spaCy "
+                        f"chunk limit ({budget} characters) with no whitespace. "
+                        "Cannot split safely without changing token offsets."
+                    )
+        yield start, text[start:end]
+        start = end
 
 
 def concept_uri(term: str) -> str:
