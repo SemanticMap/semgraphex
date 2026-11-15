@@ -140,7 +140,9 @@ def test_clean_notebook_has_subprocess_import_and_no_monkeypatches():
     assert "SPACY_MODEL = \"en_core_web_sm\"" in all_code
     assert "semmap_haken.text_colab" in all_code
     assert '"--hf-db"' in all_code
-    assert 'subprocess.run(cmd, check=True, cwd=repo)' in all_code
+    assert 'subprocess.Popen(cmd, cwd=repo, stdout=subprocess.PIPE' in all_code
+    assert 'stderr=subprocess.STDOUT' in all_code
+    assert 'progress.json' in all_code
     assert 'from semmap_haken.text_hf import download_database' in all_code
     for suspect in (
         "patched_inspect_database", "patched_init", "patched_iterdir",
