@@ -83,7 +83,7 @@ def _spacy_chunks(text: str, nlp, *, target_chars: int = 100_000):
             # Prefer paragraph or sentence boundaries in the last half of
             # the chunk, reducing the context lost for POS/lemmatization.
             best = -1
-            for sep in ("\\n\\n", "\\n", ". ", "! ", "? "):
+            for sep in ("\n\n", "\n", ". ", "! ", "? "):
                 pos = text.rfind(sep, start + budget // 2, end)
                 if pos >= 0:
                     best = max(best, pos + len(sep))
