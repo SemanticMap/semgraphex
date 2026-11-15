@@ -124,3 +124,30 @@ def test_resume_rejects_unknown_metadata_without_run_contract(tmp_path):
     with pytest.raises(ValueError, match="unexpected files"):
         validate_fresh_experiment_folder(destination)
     assert (destination / "manifest.json").exists()
+
+
+def test_clean_notebook_has_subprocess_import_and_no_monkeypatches():
+    """All cells parse; the new notebook is idempotent across kernel reruns."""
+    import ast
+    path = (Path(__file__).resolve().parents[1] / "notebooks" /
+            "11_text_corpus_hf55_colab_clean.ipynb")
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    code = ["".join(c["source"]) for c in notebook["cells"]
+            if c["cell_type"] == "code"]
+    for source in code:
+        ast.parse(source)
+    all_code = "\n".join(code)
+    assert "SPACY_MODEL = \"en_core_web_sm\"" in all_code
+    assert "semmap_haken.text_colab" in all_code
+    assert '"--hf-db"' in all_code
+    assert 'subprocess.run(cmd, check=True, cwd=repo)' in all_code
+    assert 'from semmap_haken.text_hf import download_database' in all_code
+    for suspect in (
+        "patched_inspect_database", "patched_init", "patched_iterdir",
+        "custom_execute", "_is_patched_for_schema", "_is_patched_for_resume",
+        "Path.iterdir =", "sqlite3.connect =", "sys.path.insert",
+    ):
+        assert suspect not in all_code
+    # Install inside the same Python executable invoked for processing.
+    assert 'sys.executable, "-m", "pip", "install"' in all_code
+    assert 'sys.executable, "-u", "-m", "semmap_haken.text_colab"' in all_code
