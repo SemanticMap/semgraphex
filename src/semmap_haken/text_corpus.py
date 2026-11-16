@@ -497,7 +497,22 @@ def open_corpus(directory: str | Path, *, verify: bool = True):
     db = _connect()
     try:
         for table in ('occurrences', 'edges', 'concept_edges'):
-            paths = ','.join(_literal(str(folder / (table + '.parquet'))) for folder in folders)
+            path_list = []
+            for folder in folders:
+                legacy = folder / (table + '.parquet')
+                if legacy.is_file():
+                    path_list.append(legacy)
+                elif table == 'edges':
+                    # One logical graph can use many Parquet *source partitions*,
+                    # each joined against all target words (cross-part edges).
+                    parts = sorted(folder.glob('edges_part_*.parquet'))
+                    if not parts:
+                        raise FileNotFoundError(
+                            f'No edge Parquet file(s) for document: {folder}')
+                    path_list.extend(parts)
+                else:
+                    raise FileNotFoundError(legacy)
+            paths = ','.join(_literal(str(p)) for p in path_list)
             db.execute(f'CREATE VIEW {table} AS SELECT * FROM read_parquet([{paths}])')
         db.execute('CREATE TABLE documents (doc_id VARCHAR, language VARCHAR, topic VARCHAR, '
                    'word_count BIGINT, mapped_words BIGINT, edge_count BIGINT)')
