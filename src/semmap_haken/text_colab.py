@@ -368,7 +368,8 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         persist_progress(force=not was_done)
         if not was_done:
             print(f"[checkpoint] {len(done_ids)}/{total_documents}: "
-                  f"{doc_id} edges={report['edge_count']}", flush=True)
+                  f"{doc_id} — 100% (опубликован), "
+                  f"edges={report['edge_count']}", flush=True)
 
     # Copy immutable run contract as soon as the first worker has created it.
     # We initialize via the package's build_corpus, and callback sees run.json.
