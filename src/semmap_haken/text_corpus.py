@@ -468,6 +468,12 @@ def build_corpus(documents: list[Document], options: Options, *, resume=False,
         manifest = {'schema_version': SCHEMA_VERSION, 'documents': reports,
                     'word_count': sum(r['word_count'] for r in reports),
                     'edge_count': sum(r['edge_count'] for r in reports),
+                    'edge_count_total_expected': sum(
+                        r.get('edge_count_total_expected', r['edge_count'])
+                        for r in reports),
+                    'edges_omitted': sum(r.get('edges_omitted', 0) for r in reports),
+                    'truncated_document_count': sum(
+                        not r.get('graph_complete', True) for r in reports),
                     'run_sha256': sha256(run_path)}
         _json(root / 'manifest.json', manifest)
         (root / 'COMPLETED').write_text('complete\n', encoding='utf-8')
