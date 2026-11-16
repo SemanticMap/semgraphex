@@ -190,3 +190,44 @@ def test_bounded_prepared_export_from_partitioned_graph(database, tmp_path):
     graph = load_prepared_graph(result)
     assert graph.adjacency.shape == (4, 4)
     assert len(graph.node_ids) == 4
+
+
+def test_multifile_document_drive_checkpoint_and_recovery(database, tmp_path):
+    """Every edge part is checksummed/published/restored as ONE document."""
+    from semmap_haken.text_colab import checkpoint_document, restore_documents
+    opt = options(database, tmp_path / "stage", True)
+    run = build_corpus([Document("id", "cat animal cat animal cat")], opt)
+    report = run["documents"][0]
+    assert report["edge_part_count"] > 1
+    durable = tmp_path / "durable"
+    (durable / "documents").mkdir(parents=True)
+    assert checkpoint_document(Path(opt.output), durable, report)
+    assert not checkpoint_document(Path(opt.output), durable, report)
+    restored = tmp_path / "restored"
+    assert restore_documents(restored, durable) == 1
+    key = report["identity"]["key"]
+    parts = sorted((restored / "documents" / key).glob("edges_part_*.parquet"))
+    assert len(parts) == report["edge_part_count"]
+    from semmap_haken.text_corpus import _verify_document
+    assert _verify_document(restored / "documents" / key, report["identity"]) == report
+
+
+def test_cross_chunk_unicode_original_character_coordinates(database, tmp_path):
+    opt = options(database, tmp_path / "unicode", True)
+    text = "😀cat.\\r\\n" + ("dog. " * 12) + "animal"
+    build_corpus([Document("unicode", text)], opt)
+    con = open_corpus(opt.output)
+    try:
+        value = con.execute("""
+            SELECT e.distance_chars, e.signed_offset
+            FROM edges e
+            JOIN occurrences s ON s.doc_id=e.doc_id
+                AND s.occurrence_id=e.source_occurrence_id
+            JOIN occurrences t ON t.doc_id=e.doc_id
+                AND t.occurrence_id=e.target_occurrence_id
+            WHERE s.surface='cat' AND t.surface='animal'
+              AND e.relation_uri='/r/IsA'
+        """).fetchone()
+        assert value == (text.index("animal") - text.index("cat"),) * 2
+    finally:
+        con.close()
