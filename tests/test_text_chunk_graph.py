@@ -125,13 +125,71 @@ def test_oversized_single_source_splits_by_target(database, tmp_path):
         c.close()
 
 
-def test_graph_safety_cap_refuses_without_truncating(database, tmp_path):
-    opt = options(database, tmp_path / "guard", True)
+def test_graph_cap_notifies_and_continues_with_next_document(database, tmp_path, capsys):
     from dataclasses import replace
-    opt = replace(opt, max_total_edges_per_document=1)
-    with pytest.raises(ValueError, match="global disk-safety limit"):
-        build_corpus([Document("guard", "cat animal cat animal")], opt)
-    assert not (Path(opt.output) / "COMPLETED").exists()
+    opt = replace(
+        options(database, tmp_path / "guard", True),
+        max_total_edges_per_document=3,
+        edge_partition_rows=2,
+    )
+    docs = [
+        Document("large", "cat animal cat animal cat animal"),
+        Document("small", "dog dog"),
+    ]
+    summary = build_corpus(docs, opt)
+    captured = capsys.readouterr().out
+    assert "[WARNING]" in captured
+    assert "large" in captured
+    assert "пропущено" in captured
+    assert (Path(opt.output) / "COMPLETED").is_file()
+    assert summary["truncated_document_count"] == 1
+    assert summary["edges_omitted"] > 0
+    assert summary["edge_count"] == 3
+    large, small = summary["documents"]
+    assert large["identity"]["doc_id"] == "large"
+    assert large["edge_count"] == 3
+    assert large["graph_complete"] is False
+    assert large["edge_count_total_expected"] == (
+        large["edge_count"] + large["edges_omitted"]
+    )
+    assert large["edge_selection_policy"].startswith("first_N")
+    assert small["identity"]["doc_id"] == "small"
+    assert small["edge_count"] == 0
+    assert small["graph_complete"] is True
+    assert all_rows(opt.output)["edges"]
+    assert build_corpus(docs, opt, resume=True) == summary
+
+
+def test_capped_edges_are_exact_deterministic_prefix(database, tmp_path):
+    from dataclasses import replace
+    base = options(database, tmp_path / "full", True)
+    cap = replace(base, output=str(tmp_path / "capped"),
+                  max_total_edges_per_document=3)
+    doc = Document("document", "cat animal cat animal cat")
+    build_corpus([doc], base)
+    limited_report = build_corpus([doc], cap)
+    full_edges = all_rows(base.output)["edges"]
+    kept_edges = all_rows(cap.output)["edges"]
+    assert len(kept_edges) == 3
+    assert kept_edges == full_edges[:3]
+    assert len(full_edges) > len(kept_edges)
+    report = limited_report["documents"][0]
+    assert report["edges_omitted"] == len(full_edges) - len(kept_edges)
+    assert report["edge_count_total_expected"] == len(full_edges)
+    assert report["edge_cap"] == 3
+    assert not report["graph_complete"]
+    folder = next((Path(cap.output) / "documents").iterdir())
+    assert sum(1 for _ in folder.glob("edges_part_*.parquet")) >= 2
+
+
+def test_stricter_of_two_caps_used_without_abort(database, tmp_path):
+    from dataclasses import replace
+    opt = replace(options(database, tmp_path / "twocaps", True),
+                  max_edges_per_document=2, max_total_edges_per_document=20)
+    summary = build_corpus([Document("x", "cat animal cat animal")], opt)
+    assert summary["edge_count"] == 2
+    assert summary["documents"][0]["edge_cap"] == 2
+    assert summary["truncated_document_count"] == 1
 
 
 def test_empty_and_unmapped_chunked_documents_and_resume(database, tmp_path):
@@ -180,6 +238,20 @@ def test_legacy_and_chunked_docs_in_single_corpus_query(database, tmp_path):
         assert con.execute("SELECT count(*) FROM edges").fetchone()[0] == manifest["edge_count"]
     finally:
         con.close()
+
+
+def test_export_retains_capped_graph_warning(database, tmp_path):
+    from dataclasses import replace
+    opt = replace(options(database, tmp_path / "capped-export", True),
+                  max_total_edges_per_document=2)
+    corpus = build_corpus([Document("partial", "cat animal cat animal")], opt)
+    export_dir = tmp_path / "exported-partial"
+    report = export_prepared(opt.output, "partial", export_dir)
+    assert not report["source_graph_complete"]
+    assert report["source_graph_edges_omitted"] == corpus["edges_omitted"]
+    assert report["source_graph_edge_count_total_expected"] > 2
+    prepared = load_prepared_graph(export_dir)
+    assert not prepared.report["source_graph_complete"]
 
 
 def test_bounded_prepared_export_from_partitioned_graph(database, tmp_path):
