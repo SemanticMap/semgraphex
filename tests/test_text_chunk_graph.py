@@ -303,3 +303,43 @@ def test_cross_chunk_unicode_original_character_coordinates(database, tmp_path):
         assert value == (text.index("animal") - text.index("cat"),) * 2
     finally:
         con.close()
+
+
+def test_colab_checkpoint_progress_on_capped_graph_then_resume(database, tmp_path):
+    """End-to-end ZIP -> Drive-like folder: cap is not a fatal error."""
+    import json
+    import zipfile
+    from semmap_haken.text_colab import execute
+    archive = tmp_path / "corpus.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("a.txt", "cat animal cat animal")
+        z.writestr("b.txt", "dog dog")
+    parent = tmp_path / "drive"
+    parent.mkdir()
+    settings = dict(
+        archive=archive,
+        database=database,
+        drive_parent=parent,
+        label="capped-test",
+        workspace=tmp_path / "scratch",
+        workers=1,
+        threads_per_worker=1,
+        chunked_graph=True,
+        chunk_chars=20,
+        edge_partition_rows=2,
+        max_edges_per_document=None,
+        max_total_edges_per_document=2,
+    )
+    manifest = execute(**settings)
+    assert manifest["edge_count"] == 2
+    assert manifest["truncated_document_count"] == 1
+    folder = parent / "text-corpus-capped-test"
+    assert (folder / "COMPLETED").is_file()
+    progress = json.loads((folder / "progress.json").read_text())
+    assert progress["state"] == "complete"
+    assert progress["completed_percent"] == 100.0
+    assert progress["truncated_document_count"] == 1
+    assert progress["edges_omitted"] == manifest["edges_omitted"]
+    assert "a.txt" in progress["truncated_documents"]
+    assert len(list((folder / "documents").glob("*/COMPLETED"))) == 2
+    assert execute(**settings)["edge_count"] == 2
