@@ -158,3 +158,23 @@ def test_cli_and_relocated_corpus(database, tmp_path):
     db = open_corpus(relocated)
     assert db.execute('SELECT count(*) FROM edges').fetchone()[0] == 6
     db.close()
+
+
+def test_parallel_document_progress_events(database, tmp_path):
+    """With spawn workers, the coordinator receives progress and heartbeats."""
+    opt = options(database, tmp_path, name="with-progress", workers=2)
+    seen = []
+    completed = []
+    report = build_corpus(
+        [Document("a", "cat animal cat"), Document("b", "cat animal")],
+        opt, on_document_progress=lambda status: seen.append(status),
+        on_document_completed=lambda status: completed.append(status['identity']['doc_id']),
+    )
+    assert report["edge_count"] == 9
+    assert sorted(completed) == ["a", "b"]
+    stages = [s for s in seen if s is not None]
+    assert {s["doc_id"] for s in stages} == {"a", "b"}
+    assert all(0 <= s["percent"] <= 99 for s in stages)
+    assert all(s["percent_kind"] == "stage_estimate" for s in stages)
+    assert (Path(opt.output) / ".document-progress").is_dir()
+    assert (Path(opt.output) / "COMPLETED").is_file()

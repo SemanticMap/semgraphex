@@ -91,6 +91,14 @@ def export_prepared(corpus: str | Path, doc_id: str, output: str | Path, *,
     root = Path(corpus).resolve()
     corpus_manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
     entry = next(r for r in corpus_manifest['documents'] if r['identity']['doc_id'] == doc_id)
+    # Do not let downstream graph algorithms interpret a deliberately capped
+    # document's PreparedGraph as a complete ConceptNet occurrence graph.
+    report['source_graph_complete'] = entry.get('graph_complete', True)
+    report['source_graph_edges_omitted'] = entry.get('edges_omitted', 0)
+    report['source_graph_edge_count_total_expected'] = entry.get(
+        'edge_count_total_expected', entry['edge_count'])
+    report['source_graph_edge_selection_policy'] = entry.get(
+        'edge_selection_policy', 'all_direct_assertions')
     origin = root / 'documents' / entry['identity']['key']
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.text-export-', dir=destination.parent) as work:

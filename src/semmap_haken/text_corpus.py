@@ -6,7 +6,7 @@ existing numerical core remains usable without the optional text installation.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import asdict, dataclass, fields
 import hashlib
 from importlib.metadata import version
@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 
-from .text_conceptnet import ConceptNetLocal, words
+from .text_conceptnet import open_conceptnet, words
 
 SCHEMA_VERSION = 1
 OCCURRENCE_SCHEMA = '''doc_id VARCHAR, occurrence_id BIGINT, surface VARCHAR,
@@ -50,6 +50,10 @@ class Options:
     relations: tuple[str, ...] = ()
     spacy_model: str | None = None
     database_version: str = 'unspecified; see database_sha256'
+    chunked_graph: bool = False
+    chunk_chars: int = 100_000
+    edge_partition_rows: int = 1_000_000
+    max_total_edges_per_document: int | None = 150_000_000
 
     def validate(self):
         if sys.version_info < (3, 12):
@@ -61,6 +65,16 @@ class Options:
         if self.max_edges_per_document is not None and (
                 type(self.max_edges_per_document) is not int or self.max_edges_per_document < 1):
             raise ValueError('max_edges_per_document must be positive or null')
+        if not isinstance(self.chunked_graph, bool):
+            raise ValueError('chunked_graph must be a boolean')
+        if type(self.chunk_chars) is not int or self.chunk_chars < 2:
+            raise ValueError('chunk_chars must be an integer >= 2')
+        if type(self.edge_partition_rows) is not int or self.edge_partition_rows < 1:
+            raise ValueError('edge_partition_rows must be a positive integer')
+        if self.max_total_edges_per_document is not None and (
+                type(self.max_total_edges_per_document) is not int or
+                self.max_total_edges_per_document < 1):
+            raise ValueError('max_total_edges_per_document must be positive or null')
         if not Path(self.database).is_file():
             raise FileNotFoundError(self.database)
         if Path(self.output).resolve() == Path(self.database).resolve():
@@ -161,10 +175,14 @@ def _fingerprint(options, documents):
         packages['spacy'] = version('spacy')
         packages[options.spacy_model] = version(options.spacy_model)
     from . import text_conceptnet
+    relevant_source_files = [__file__, text_conceptnet.__file__]
+    if options.chunked_graph:
+        from . import text_chunk_graph
+        relevant_source_files.append(text_chunk_graph.__file__)
     return {'schema_version': SCHEMA_VERSION, 'options': semantic,
             'database_sha256': sha256(Path(options.database)), 'packages': packages,
             'code_sha256': {Path(p).name: sha256(Path(p))
-                            for p in (__file__, text_conceptnet.__file__)},
+                            for p in relevant_source_files},
             'documents': [_identity(d) for d in sorted(documents, key=lambda d: d.doc_id)]}
 
 
@@ -187,31 +205,75 @@ def _worker_setup(threads):
 
 
 def _build_document(task):
-    doc, options, resume = task
+    doc, options, resume, status_dir = task
     identity = _identity(doc)
     final = Path(options.output) / 'documents' / identity['key']
+    last_status = {'percent': -1, 'stage': None, 'timestamp': 0.0}
+
+    def progress(stage, percent, current=None, total=None):
+        """Publish a stage-based estimate; exact counts when available.
+
+        Each worker writes only its own small JSON file on the LOCAL SSD.
+        The coordinator polls these files and may mirror summaries to Drive.
+        Do not block the worker on Google Drive I/O.
+        """
+        if status_dir is None:
+            return
+        percent = max(0, min(int(percent), 99))  # Drive publish marks 100%
+        now = time.monotonic()
+        if (stage == last_status['stage'] and percent == last_status['percent']
+                and now - last_status['timestamp'] < 5):
+            return
+        status = {'doc_id': doc.doc_id, 'stage': stage, 'percent': percent,
+                  'percent_kind': 'stage_estimate',
+                  'current': current, 'total': total, 'updated_at': time.time()}
+        _json(Path(status_dir) / (identity['key'] + '.json'), status)
+        last_status.update({'stage': stage, 'percent': percent, 'timestamp': now})
+
     if final.exists():
         if not resume:
             raise FileExistsError(final)
-        return _verify_document(final, identity)
+        report = _verify_document(final, identity)
+        progress('already_completed', 99)
+        return report
     staging = Path(tempfile.mkdtemp(prefix='.pending-', dir=final.parent))
     started = time.perf_counter()
     db = None
     try:
+        progress('initializing', 0)
+        if options.chunked_graph:
+            from .text_chunk_graph import build_chunked_document
+            return build_chunked_document(
+                doc, options, staging, final, identity, progress, started)
         nlp = None
         if options.spacy_model:
             import spacy
             nlp = spacy.load(options.spacy_model, disable=['ner', 'parser'])
-        tokens = words(doc.text, nlp)
-        with ConceptNetLocal(options.database, doc.language) as cn:
+        progress('tokenizing', 0, 0, len(doc.text))
+        tokens = words(
+            doc.text, nlp,
+            on_progress=lambda done, total: progress(
+                'tokenizing', int(20 * done / max(total, 1)), done, total)
+            if status_dir is not None else None,
+        )
+        progress('mapping_concepts', 20, 0, len(tokens))
+        with open_conceptnet(options.database, doc.language) as cn:
             occurrences = []
+            interval = max(1, len(tokens) // 100)
             for index, word in enumerate(tokens):
                 uri, status = cn.map_word(word)
                 assert doc.text[word.start:word.end] == word.surface
                 occurrences.append((doc.doc_id, index, word.surface, word.lemma,
                                     word.start, word.end, uri, status))
+                if index % interval == 0 or index + 1 == len(tokens):
+                    progress('mapping_concepts',
+                             20 + int(40 * (index + 1) / max(len(tokens), 1)),
+                             index + 1, len(tokens))
             concepts = {row[6] for row in occurrences if row[6] is not None}
+            progress('querying_relations', 60, 0, len(concepts))
             assertions = cn.induced_assertions(concepts, options.relations)
+            progress('querying_relations', 68, len(concepts), len(concepts))
+        progress('preparing_tables', 69)
         db = _connect(options, staging / 'spill')
         db.execute('CREATE TABLE occurrences (' + OCCURRENCE_SCHEMA + ')')
         db.execute('CREATE TABLE assertions (' + ASSERTION_SCHEMA + ')')
@@ -219,6 +281,7 @@ def _build_document(task):
             db.executemany('INSERT INTO occurrences VALUES (?,?,?,?,?,?,?,?)', occurrences)
         if assertions:
             db.executemany('INSERT INTO assertions VALUES (?,?,?,?,?)', assertions)
+        progress('counting_edges', 73)
         # Count the Cartesian expansion using concept frequencies, not expanded edges.
         expected = int(db.execute('''
             WITH counts AS (SELECT concept_uri, count(*) AS n FROM occurrences
@@ -232,8 +295,11 @@ def _build_document(task):
             raise ValueError(f'{doc.doc_id}: {expected} occurrence edges exceed '
                              f'max_edges_per_document={options.max_edges_per_document}; '
                              'nothing truncated; raise the cap explicitly')
+        progress('writing_occurrences', 77, 0, len(tokens))
         _copy(db, 'SELECT * FROM occurrences ORDER BY occurrence_id', staging / 'occurrences.parquet')
+        progress('writing_assertions', 81, 0, len(assertions))
         _copy(db, 'SELECT * FROM assertions ORDER BY assertion_id', staging / 'assertions.parquet')
+        progress('writing_edges', 85, 0, expected)
         _copy(db, '''SELECT s.doc_id, s.occurrence_id AS source_occurrence_id,
                     t.occurrence_id AS target_occurrence_id, a.*,
                     abs(t.char_start-s.char_start) AS distance_chars,
@@ -245,10 +311,12 @@ def _build_document(task):
              WHERE s.occurrence_id <> t.occurrence_id
              ORDER BY source_occurrence_id, target_occurrence_id, assertion_id''',
               staging / 'edges.parquet')
+        progress('verifying_edges', 94, expected, expected)
         edges_path = _literal(str(staging / 'edges.parquet'))
         actual = db.execute(f'SELECT count(*) FROM read_parquet({edges_path})').fetchone()[0]
         if actual != expected:
             raise RuntimeError('Occurrence expansion count mismatch')
+        progress('writing_concept_edges', 95)
         _copy(db, f'''SELECT doc_id,source_concept,target_concept,relation_uri,
                    count(*) AS occurrence_pair_count,
                    count(DISTINCT assertion_id) AS assertion_count,
@@ -259,6 +327,7 @@ def _build_document(task):
             FROM read_parquet({edges_path})
             GROUP BY doc_id,source_concept,target_concept,relation_uri
             ORDER BY source_concept,target_concept,relation_uri''', staging / 'concept_edges.parquet')
+        progress('finalizing', 97)
         (staging / 'text.txt').write_bytes(doc.text.encode('utf-8'))
         mapped = sum(row[6] is not None for row in occurrences)
         result = {'identity': identity, 'source': doc.source, 'word_count': len(tokens),
@@ -274,7 +343,11 @@ def _build_document(task):
         _json(staging / 'manifest.json', result)
         (staging / 'COMPLETED').write_text('complete\n', encoding='utf-8')
         os.replace(staging, final)
+        progress('ready_for_checkpoint', 99)
         return result
+    except BaseException:
+        progress('failed', last_status['percent'])
+        raise
     finally:
         if db is not None:
             db.close()
@@ -282,11 +355,12 @@ def _build_document(task):
             shutil.rmtree(staging)
 
 
-def build_corpus(documents: list[Document], options: Options, *, resume=False):
+def build_corpus(documents: list[Document], options: Options, *, resume=False,
+                 on_document_completed=None, on_document_progress=None):
     """One coordinator, independent spawn workers, immutable per-document outputs."""
     options.validate()
     _validate_documents(documents)
-    with ConceptNetLocal(options.database):
+    with open_conceptnet(options.database):
         pass  # Fail on missing dependencies/resources/schema before creating run output.
     options = Options(**{**asdict(options), 'database': str(Path(options.database).resolve()),
                          'output': str(Path(options.output).resolve())})
@@ -322,27 +396,84 @@ def build_corpus(documents: list[Document], options: Options, *, resume=False):
                              'git_commit': revision, 'python': sys.version,
                              'distance_definition': 'abs(target.char_start-source.char_start)',
                              'offset_unit': 'Unicode code point, zero-based, original UTF-8 text',
-                             'provenance': 'ConceptNet Local exposes id/start/end/rel/weight only; '
-                                           'dataset/sources/license not available through this API',
+                             'provenance': 'SQLite ConceptNet Local or HF normalized. The HF database has '
+                                           'no original assertion ID, dataset, sources or license; '
+                                           'hf55:edge_norm:<rowid> is synthetic, stable only within '
+                                           'the pinned unchanged database snapshot.',
                              'interpretation': 'Co-occurring concepts connected in ConceptNet; '
                                                'not relations asserted by the text'})
         (root / 'COMPLETED').unlink(missing_ok=True)
         (root / 'documents').mkdir(exist_ok=True)
-        tasks = [(doc, options, resume) for doc in sorted(documents, key=lambda d: d.doc_id)]
-        if options.workers == 1:
-            reports = [_build_document(task) for task in tasks]
+        # These tiny files are runtime observations, NOT durable checkpoints.
+        # Only start this directory after run.json was validated/written.
+        status_dir = root / '.document-progress' if on_document_progress else None
+        if status_dir is not None:
+            if status_dir.exists():
+                shutil.rmtree(status_dir)
+            status_dir.mkdir()
+        tasks = [(doc, options, resume, str(status_dir) if status_dir else None)
+                 for doc in sorted(documents, key=lambda d: d.doc_id)]
+        reports = []
+        if options.workers == 1 and on_document_progress is None:
+            # Preserve cheap local sequential mode for callers not monitoring.
+            for task in tasks:
+                report = _build_document(task)
+                if on_document_completed is not None:
+                    on_document_completed(report)
+                reports.append(report)
         else:
+            # Even for one worker, a subprocess lets the coordinator poll real
+            # document progress during long spaCy/SQL phases.
             with ProcessPoolExecutor(max_workers=min(options.workers, len(tasks)),
                                      mp_context=multiprocessing.get_context('spawn'),
                                      initializer=_worker_setup,
                                      initargs=(options.threads_per_worker,)) as pool:
-                reports = list(pool.map(_build_document, tasks, chunksize=1))
+                futures = {pool.submit(_build_document, task): task[0].doc_id
+                           for task in tasks}
+                pending = set(futures)
+                last_status = {}
+
+                def poll_progress():
+                    if status_dir is None:
+                        return
+                    for path in status_dir.glob('*.json'):
+                        try:
+                            status = json.loads(path.read_text(encoding='utf-8'))
+                        except (ValueError, OSError):
+                            continue
+                        doc_id = status.get('doc_id')
+                        snapshot = (status.get('percent'), status.get('stage'),
+                                    status.get('current'), status.get('total'))
+                        if doc_id and last_status.get(doc_id) != snapshot:
+                            last_status[doc_id] = snapshot
+                            on_document_progress(status)
+                    # Periodic heartbeat also during a long single DuckDB query:
+                    # a stage may stay at 85% while it is computing.
+                    on_document_progress(None)
+
+                while pending:
+                    done, pending = wait(pending, timeout=2.0,
+                                         return_when=FIRST_COMPLETED)
+                    poll_progress()
+                    for future in done:
+                        report = future.result()
+                        if on_document_completed is not None:
+                            on_document_completed(report)
+                        reports.append(report)
+                poll_progress()
+        reports.sort(key=lambda report: report['identity']['doc_id'])
         if (source_stat != (database.stat().st_size, database.stat().st_mtime_ns)
                 or (wal.exists() and wal.stat().st_size)):
             raise ValueError('ConceptNet database changed during the run; corpus not published')
         manifest = {'schema_version': SCHEMA_VERSION, 'documents': reports,
                     'word_count': sum(r['word_count'] for r in reports),
                     'edge_count': sum(r['edge_count'] for r in reports),
+                    'edge_count_total_expected': sum(
+                        r.get('edge_count_total_expected', r['edge_count'])
+                        for r in reports),
+                    'edges_omitted': sum(r.get('edges_omitted', 0) for r in reports),
+                    'truncated_document_count': sum(
+                        not r.get('graph_complete', True) for r in reports),
                     'run_sha256': sha256(run_path)}
         _json(root / 'manifest.json', manifest)
         (root / 'COMPLETED').write_text('complete\n', encoding='utf-8')
@@ -372,7 +503,22 @@ def open_corpus(directory: str | Path, *, verify: bool = True):
     db = _connect()
     try:
         for table in ('occurrences', 'edges', 'concept_edges'):
-            paths = ','.join(_literal(str(folder / (table + '.parquet'))) for folder in folders)
+            path_list = []
+            for folder in folders:
+                legacy = folder / (table + '.parquet')
+                if legacy.is_file():
+                    path_list.append(legacy)
+                elif table == 'edges':
+                    # One logical graph can use many Parquet *source partitions*,
+                    # each joined against all target words (cross-part edges).
+                    parts = sorted(folder.glob('edges_part_*.parquet'))
+                    if not parts:
+                        raise FileNotFoundError(
+                            f'No edge Parquet file(s) for document: {folder}')
+                    path_list.extend(parts)
+                else:
+                    raise FileNotFoundError(legacy)
+            paths = ','.join(_literal(str(p)) for p in path_list)
             db.execute(f'CREATE VIEW {table} AS SELECT * FROM read_parquet([{paths}])')
         db.execute('CREATE TABLE documents (doc_id VARCHAR, language VARCHAR, topic VARCHAR, '
                    'word_count BIGINT, mapped_words BIGINT, edge_count BIGINT)')
