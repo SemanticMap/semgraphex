@@ -1,3 +1,62 @@
+## Длинные документы: последовательная обработка частями, единый граф
+
+Начиная с ветки `feature/text-corpus-colab-drive-resume`, обновлённый Colab
+использует `--chunked-graph`. Это решает ошибку
+`23306031 occurrence edges exceed max_edges_per_document=20000000`
+для документа `0000068_How_Scientists_Think_21_Experiments.txt` **без удаления рёбер**.
+
+1. Исходный текст режется на фрагменты до `chunk_chars=100000`
+   кодовых точек Unicode по границам слов. Фрагменты **последовательно**
+   проходят spaCy и привязку ConceptNet; каждая порция слов добавляется
+   в общую таблицу DuckDB `occurrences`. `occurrence_id` уникален во
+   всём документе, `char_start/char_end` остаются абсолютными.
+2. Только после получения всех вершин извлекаются все применимые
+   отношения ConceptNet для **всего документа**.
+3. Рёбра строятся по партиям **исходных** вхождений, но каждой партии
+   доступны **все целевые слова документа**, в том числе из других
+   текстовых фрагментов. Поэтому точный граф совпадает по вершинам,
+   направлению, типам отношений, расстояниям и множеству рёбер
+   с неразбитым построением.
+4. При `edge_partition_rows=1000000` DuckDB пишет последовательно
+   `edges_part_000000.parquet`, `edges_part_000001.parquet` и т.д.
+   Каждый файл имеет не более миллиона рёбер. В редком случае, когда
+   у одной исходной вершины рёбер больше лимита, дополнительно
+   разделяются диапазоны *целевых* вхождений.
+5. `open_corpus()` объединяет все части в один виртуальный
+   DuckDB-view `edges`. Отчёт `concept_edges.parquet` агрегирует
+   **все** рёбра, а экспорт `PreparedGraph` работает через тот же view.
+   Обычные старые `edges.parquet` продолжают поддерживаться.
+
+Флаги CLI для полного графа:
+
+```bash
+python -m semmap_haken.text_colab \
+  --archive /content/drive/MyDrive/SemanticMap/Txt.zip \
+  --hf-db --drive-parent /content/drive/MyDrive/SemanticMap/colab \
+  --label semmap-text-hf55-spacy-chunked-01 \
+  --chunked-graph --chunk-chars 100000 --edge-partition-rows 1000000 \
+  --max-edges-per-document 0 --max-total-edges-per-document 150000000 \
+  --max-docs 100 --spacy-model en_core_web_sm
+```
+
+`--max-edges-per-document 0` **отключает старый общий предел**
+20 млн рёбер, только в режиме `--chunked-graph`. Новый
+`max-total-edges-per-document` — независимый страховочный предел
+для защиты диска; при превышении будет явная ошибка, а не усечение.
+На промежуточных этапах прогресс `mapping_chunks` отображает реальное
+число уже обработанных символов текста, а `writing_edges` —
+реальное число рёбер, записанных в Parquet.
+
+**Восстановление:** контрольные суммы и `COMPLETED` публикуются
+на Google Drive после завершения **всего документа**, включая все
+`edges_part_*.parquet`. Если Colab прервался *внутри* большого документа,
+его незавершённые части локального SSD пересчитываются; завершённые и
+опубликованные документы восстанавливаются полностью. Изменение
+алгоритма/параметров требует **новой метки эксперимента**. Старые
+каталоги результатов не удаляются. Для восстановления внутри
+незавершённого документа потребовался бы отдельный устойчивый
+checkpoint по частям, который пока не реализован.
+
 ## Прогресс выполнения (документы и проценты)
 
 Во время вычислений с несколькими `--workers` координатор каждые ~10 секунд
@@ -122,7 +181,7 @@ Use `--hf-revision <SHA>` only to intentionally change dataset version. An exist
 
 - Independent worker processes (`spawn`) each read the SQLite DB in `mode=ro`; CPU workers are capped using available RAM and CPU cores; DuckDB operates on local SSD with one thread per worker by default.
 - The coordinator receives each finished task immediately (`as_completed`) and publishes the entire completed document to its Drive `documents/<sha256(doc_id)>` directory. Includes Parquet, source text, manifest and SHA-256; no silently truncated edges.
-- `progress.json` is written after every completed document. `experiment.json` includes SHA-256 of ZIP and SQLite and selected TXT list policy; `run.json` includes code/package versions. Root `COMPLETED` appears only after all results pass verification.
+- `progress.json` is updated periodically (~10 seconds), plus after each completed document. `experiment.json` includes SHA-256 of ZIP and SQLite and selected TXT list policy; `run.json` includes code/package versions. Root `COMPLETED` appears only after all results pass verification.
 - `RESUME` copies only valid remote document outputs back to the local scratch directory and skips them. A document interrupted before publication is reprocessed.
 - **Important:** a new Colab VM generally loses the local Hugging Face cache and must download the ~1.78 GB SQLite again; document checkpoints on Drive persist. For near-instant startup across Colab sessions a separate, user-approved persistent cache of the DB would be needed.
 - FUSE mount atomicity is not guaranteed. The runner stages and validates files before publishing markers; recovery validation is authoritative.
@@ -133,7 +192,7 @@ Use `--hf-revision <SHA>` only to intentionally change dataset version. An exist
 ```bash
 python -m pip install -e '.[text,dev]'
 python -m nltk.downloader stopwords
-python -m pytest -q tests/test_text_corpus_words.py tests/test_text_corpus.py tests/test_text_colab.py tests/test_text_hf.py
+python -m pytest -q tests/test_text_corpus_words.py tests/test_text_corpus.py tests/test_text_colab.py tests/test_text_hf.py tests/test_text_spacy_chunks.py tests/test_text_chunk_graph.py
 ```
 
 HF download tests mock `huggingface_hub.hf_hub_download` and use a tiny SQLite `node_norm/edge_norm/rel_norm` fixture. Full 1.78 GB database download and the real TXT corpus in Google Colab have **not** been executed in CI; this must be validated in a real user Colab runtime. Performance and coverage are not claimed without real benchmarks.
