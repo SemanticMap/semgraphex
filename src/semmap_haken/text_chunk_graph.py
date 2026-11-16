@@ -1,8 +1,10 @@
-"""Sequential text chunks, one complete document occurrence graph.
+"""Sequential text chunks, one document occurrence graph (possibly capped).
 
-A chunk is an *execution/storage partition*, not a graph boundary. All source
-chunks are joined to ALL target occurrences, preserving cross-chunk assertions.
-Parquet edge parts are one logical relation, unioned by open_corpus().
+A chunk is an execution/storage partition, not a graph boundary: source chunks
+join to ALL target occurrences. If a configured graph edge cap is exceeded,
+write a deterministic partial graph with explicit missing-edge metadata and
+continue with the next document; never mislabel the result as complete.
+Parquet parts form one logical relation through open_corpus().
 """
 from __future__ import annotations
 
@@ -124,7 +126,7 @@ def edge_partitions(connection, total_occurrences, budget):
     if type(budget) is not int or budget < 1:
         raise ValueError("edge_partition_rows must be positive")
     source = _source_degrees(connection)
-    parts, oversized = [], []
+    parts = []
     start = None
     last = None
     count = 0
@@ -142,7 +144,10 @@ def edge_partitions(connection, total_occurrences, budget):
                 if start is not None:
                     parts.append((start, last + 1, 0, total_occurrences, count))
                     start, count = None, 0
-                oversized.append((source_id, degree))
+                # The result cursor is still open, so defer this SQL query.
+                # Keep its place in the source-ID order, rather than appending
+                # it after all other sources (important for deterministic caps).
+                parts.append(("oversized", source_id, degree))
                 continue
             if start is not None and count + degree > budget:
                 parts.append((start, last + 1, 0, total_occurrences, count))
@@ -153,16 +158,44 @@ def edge_partitions(connection, total_occurrences, budget):
             count += degree
     if start is not None:
         parts.append((start, last + 1, 0, total_occurrences, count))
-    # Query for exceptional high-degree source occurrences after the first
-    # result cursor is exhausted. Each fallback part is still fully bounded.
-    for source_id, degree in oversized:
-        windows = _target_windows(connection, source_id, budget)
-        if sum(p[4] for p in windows) != degree:
-            raise RuntimeError("Oversized source target partitions lost edges")
-        parts.extend(windows)
-    if sum(p[4] for p in parts) != total:
+
+    ordered = []
+    for item in parts:
+        if item[0] == "oversized":
+            _, source_id, degree = item
+            windows = _target_windows(connection, source_id, budget)
+            if sum(p[4] for p in windows) != degree:
+                raise RuntimeError("Oversized source target partitions lost edges")
+            ordered.extend(windows)
+        else:
+            ordered.append(item)
+    if sum(p[4] for p in ordered) != total:
         raise RuntimeError("Source degree partition count mismatch")
-    return parts, total
+    return ordered, total
+
+
+def limited_edge_partitions(partitions, cap):
+    """Select a deterministic graph-edge prefix, retaining exact row bounds.
+
+    Each return tuple has the original bounds/count plus the number of rows
+    to write (<= predicted). Only the FINAL selected part may need LIMIT.
+    The complete ordered sequence of partitions is produced first, so the
+    selection is stable by source occurrence, target occurrence, assertion ID.
+    """
+    if cap is not None and (type(cap) is not int or cap < 1):
+        raise ValueError("Graph edge cap must be positive or None")
+    remaining = cap
+    selected = []
+    for part in partitions:
+        if remaining == 0:
+            break
+        predicted = part[4]
+        taken = predicted if remaining is None else min(predicted, remaining)
+        if taken:
+            selected.append((*part, taken))
+            if remaining is not None:
+                remaining -= taken
+    return selected
 
 
 def build_chunked_document(doc, options, staging, final, identity,
@@ -218,20 +251,28 @@ def build_chunked_document(doc, options, staging, final, identity,
         progress("counting_edges", 68)
         partitions, expected = edge_partitions(
             connection, observed, options.edge_partition_rows)
-        if options.max_edges_per_document is not None and (
-                expected > options.max_edges_per_document):
-            raise ValueError(
-                f"{doc.doc_id}: {expected} edges exceed explicitly configured "
-                f"max_edges_per_document={options.max_edges_per_document}; "
-                "set it to null to enable complete partitioned output"
+        active_caps = [
+            value for value in (options.max_edges_per_document,
+                                options.max_total_edges_per_document)
+            if value is not None
+        ]
+        edge_cap = min(active_caps) if active_caps else None
+        planned_edges = min(expected, edge_cap) if edge_cap is not None else expected
+        omitted_edges = expected - planned_edges
+        graph_complete = omitted_edges == 0
+        if not graph_complete:
+            print(
+                f"[WARNING] {doc.doc_id}: ограничение графа {edge_cap:,} рёбер; "
+                f"найдено {expected:,}, будет сохранено {planned_edges:,}, "
+                f"пропущено {omitted_edges:,}. Документ продолжит обработку; "
+                "результат помечен graph_complete=false.",
+                flush=True,
             )
-        if (options.max_total_edges_per_document is not None and
-                expected > options.max_total_edges_per_document):
-            raise ValueError(
-                f"{doc.doc_id}: {expected} edges exceed global disk-safety limit "
-                f"max_total_edges_per_document="
-                f"{options.max_total_edges_per_document}; no edges truncated"
-            )
+        # The source/target row ordering is deterministic, even across
+        # high-degree source partitions. No skipping or reordering is hidden.
+        selected_partitions = limited_edge_partitions(partitions, edge_cap)
+        if expected == 0:
+            selected_partitions = [(0, observed, 0, observed, 0, 0)]
 
         progress("writing_occurrences", 72, observed, observed)
         _copy(connection, "SELECT * FROM occurrences ORDER BY occurrence_id",
@@ -244,29 +285,30 @@ def build_chunked_document(doc, options, staging, final, identity,
         # write multiple edge_part_*.parquet files into the SAME graph folder.
         # Neither source nor target occurrences are restricted to the same
         # *text* chunk, so cross-chunk links are included.
-        if expected == 0:
-            partitions = [(0, observed, 0, observed, 0)]
-        multipart = len(partitions) > 1
+        multipart = len(selected_partitions) > 1
         written = 0
         edge_files = []
-        for index, (sl, sr, tl, tr, predicted) in enumerate(partitions):
+        for index, (sl, sr, tl, tr, predicted, taken) in enumerate(selected_partitions):
             name = (f"edges_part_{index:06d}.parquet" if multipart
                     else "edges.parquet")
             path = staging / name
-            _copy(connection, _edge_sql(sl, sr, tl, tr), path)
+            query = _edge_sql(sl, sr, tl, tr)
+            if taken < predicted:
+                query += f"\nLIMIT {taken}"
+            _copy(connection, query, path)
             file_expr = _literal(str(path))
             actual = int(connection.execute(
                 f"SELECT count(*) FROM read_parquet({file_expr})").fetchone()[0])
-            if actual != predicted:
+            if actual != taken:
                 raise RuntimeError(
-                    f"Edge part {index}: {actual} rows, expected {predicted}")
+                    f"Edge part {index}: {actual} rows, expected {taken}")
             written += actual
             edge_files.append(path)
-            progress("writing_edges", 76 + int(19 * written / max(expected, 1)),
-                     written, expected)
-        if written != expected:
+            progress("writing_edges", 76 + int(19 * written / max(planned_edges, 1)),
+                     written, planned_edges)
+        if written != planned_edges:
             raise RuntimeError(
-                f"Lost/duplicate cross-chunk edges: {written} != {expected}")
+                f"Partitioned graph edge count mismatch: {written} != {planned_edges}")
 
         paths_sql = "[" + ",".join(_literal(str(p)) for p in edge_files) + "]"
         progress("writing_concept_edges", 96)
@@ -292,9 +334,20 @@ def build_chunked_document(doc, options, staging, final, identity,
             "unmapped_words": observed - mapped,
             "coverage": mapped / observed if observed else 0.0,
             "concept_count": len(concepts),
-            "assertion_count": len(assertions), "edge_count": expected,
+            "assertion_count": len(assertions), "edge_count": written,
+            "edge_count_total_expected": expected,
+            "edges_omitted": omitted_edges,
+            "edge_cap": edge_cap,
+            "graph_complete": graph_complete,
+            "edge_selection_policy": (
+                "all_direct_assertions" if graph_complete else
+                "first_N_by_source_occurrence_then_target_then_assertion_id"
+            ),
             "chunk_count": chunk_count, "edge_part_count": len(edge_files),
-            "graph_representation": "one_doc_all_pairs_partitioned",
+            "graph_representation": (
+                "one_doc_all_pairs_partitioned" if graph_complete else
+                "one_doc_capped_graph_partitioned"
+            ),
             "elapsed_seconds": time.perf_counter() - started,
             "checksums": checksums,
         }
@@ -304,7 +357,7 @@ def build_chunked_document(doc, options, staging, final, identity,
         _json(staging / "manifest.json", report)
         (staging / "COMPLETED").write_text("complete\n", encoding="utf-8")
         os.replace(staging, final)
-        progress("ready_for_checkpoint", 99, expected, expected)
+        progress("ready_for_checkpoint", 99, written, planned_edges)
         return report
     finally:
         if connection is not None:
