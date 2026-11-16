@@ -139,6 +139,7 @@ def test_clean_notebook_has_subprocess_import_and_no_monkeypatches():
     all_code = "\n".join(code)
     assert "SPACY_MODEL = \"en_core_web_sm\"" in all_code
     assert "semmap_haken.text_colab" in all_code
+    assert all_code.count('"semmap_haken.text_colab"') == 1  # no duplicate run
     assert '"--hf-db"' in all_code
     assert 'subprocess.Popen(cmd, cwd=repo, stdout=subprocess.PIPE' in all_code
     assert 'stderr=subprocess.STDOUT' in all_code
