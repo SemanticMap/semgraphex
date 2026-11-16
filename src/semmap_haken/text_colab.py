@@ -170,6 +170,7 @@ def validate_fresh_experiment_folder(drive_root: Path):
 
 _STAGES_RU = {
     'initializing': 'запуск',
+    'mapping_chunks': 'разбор и привязка частей текста',
     'tokenizing': 'разбор и лемматизация',
     'mapping_concepts': 'поиск понятий ConceptNet',
     'querying_relations': 'поиск отношений ConceptNet',
@@ -249,7 +250,11 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
             max_docs: int | None = None, max_doc_bytes: int = 64_000_000,
             max_total_bytes: int = 4_000_000_000,
             spacy_model: str | None = None,
-            database_version: str = 'user-supplied'):
+            database_version: str = 'user-supplied',
+            chunked_graph: bool = False,
+            chunk_chars: int = 100_000,
+            edge_partition_rows: int = 1_000_000,
+            max_total_edges_per_document: int | None = 150_000_000):
     label = safe_label(label)
     source = Path(archive).resolve(strict=True)
     database = Path(database).resolve(strict=True)
@@ -286,6 +291,9 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         "document_language": "en",
         "spacy_model": spacy_model,
         "max_edges_per_document": max_edges_per_document,
+        "chunked_graph": chunked_graph, "chunk_chars": chunk_chars,
+        "edge_partition_rows": edge_partition_rows,
+        "max_total_edges_per_document": max_total_edges_per_document,
         "data_model": "all direct ConceptNet-connected word occurrences, absolute start offsets"
     }
     descriptor_path = drive_root / "experiment.json"
@@ -314,7 +322,11 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
                       memory_limit=memory_limit,
                       max_edges_per_document=max_edges_per_document,
                       spacy_model=spacy_model,
-                      database_version=database_version)
+                      database_version=database_version,
+                      chunked_graph=chunked_graph,
+                      chunk_chars=chunk_chars,
+                      edge_partition_rows=edge_partition_rows,
+                      max_total_edges_per_document=max_total_edges_per_document)
     start = time.monotonic()
     total_documents = len(documents)
     # Restored documents count as completed BEFORE the first new computation.
@@ -429,10 +441,25 @@ def main(argv=None):
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--threads-per-worker", type=int, default=1)
     p.add_argument("--memory-limit", default="1GB")
-    p.add_argument("--max-edges-per-document", type=int, default=20_000_000)
+    p.add_argument("--max-edges-per-document", type=int, default=20_000_000,
+                   help="Hard total cap; 0 disables it when chunked graph is enabled")
+    p.add_argument("--chunked-graph", action="store_true",
+                   help="Process each text sequentially by chunks; store one full graph")
+    p.add_argument("--chunk-chars", type=int, default=100_000,
+                   help="Text chunk size, retaining absolute original offsets")
+    p.add_argument("--edge-partition-rows", type=int, default=1_000_000,
+                   help="Maximum number of edges in any output Parquet part")
+    p.add_argument("--max-total-edges-per-document", type=int, default=150_000_000,
+                   help="Independent whole-graph disk safety cap, never truncates")
     p.add_argument("--max-docs", type=int)
     p.add_argument("--spacy-model")
     a = p.parse_args(argv)
+    if a.max_edges_per_document == 0 and not a.chunked_graph:
+        p.error("--max-edges-per-document 0 requires --chunked-graph")
+    if a.max_edges_per_document < 0:
+        p.error("--max-edges-per-document cannot be negative")
+    max_document_edges = (None if a.max_edges_per_document == 0
+                          else a.max_edges_per_document)
     if a.hf_db and a.database:
         p.error("Choose either --hf-db or --database, not both")
     if not a.hf_db and not a.database:
@@ -450,9 +477,12 @@ def main(argv=None):
                      workspace=a.workspace, workers=a.workers,
                      threads_per_worker=a.threads_per_worker,
                      memory_limit=a.memory_limit,
-                     max_edges_per_document=a.max_edges_per_document,
+                     max_edges_per_document=max_document_edges,
                      max_docs=a.max_docs, spacy_model=a.spacy_model,
-                     database_version=dbversion)
+                     database_version=dbversion,
+                     chunked_graph=a.chunked_graph, chunk_chars=a.chunk_chars,
+                     edge_partition_rows=a.edge_partition_rows,
+                     max_total_edges_per_document=a.max_total_edges_per_document)
     print(json.dumps({"documents": len(result["documents"]),
                       "edges": result["edge_count"]}, sort_keys=True))
 
