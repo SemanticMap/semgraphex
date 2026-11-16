@@ -168,6 +168,57 @@ def validate_fresh_experiment_folder(drive_root: Path):
                 + str(child))
 
 
+_STAGES_RU = {
+    'initializing': 'запуск',
+    'tokenizing': 'разбор и лемматизация',
+    'mapping_concepts': 'поиск понятий ConceptNet',
+    'querying_relations': 'поиск отношений ConceptNet',
+    'preparing_tables': 'подготовка DuckDB',
+    'counting_edges': 'подсчёт рёбер',
+    'writing_occurrences': 'запись слов в Parquet',
+    'writing_assertions': 'запись отношений',
+    'writing_edges': 'запись рёбер в Parquet',
+    'verifying_edges': 'проверка рёбер',
+    'writing_concept_edges': 'агрегация понятий',
+    'finalizing': 'проверка и сохранение',
+    'ready_for_checkpoint': 'копирование в Drive',
+    'already_completed': 'восстановлен',
+    'failed': 'ошибка',
+}
+
+
+def corpus_progress_snapshot(total, done_ids, active_documents,
+                             *, state='running'):
+    """Exact document count; *estimated* percent by stage for active documents."""
+    completed = len(done_ids)
+    if total < 0 or completed > total:
+        raise ValueError('Invalid corpus document progress counters')
+    active = []
+    for doc_id, status in sorted(active_documents.items()):
+        if doc_id in done_ids:
+            continue
+        active.append({
+            'doc_id': doc_id,
+            'percent': int(status['percent']),
+            'stage': status['stage'],
+            'stage_label': _STAGES_RU.get(status['stage'], status['stage']),
+            'current': status.get('current'),
+            'total': status.get('total'),
+            'percent_kind': 'stage_estimate',
+        })
+    return {
+        'state': state,
+        'completed': completed, 'total': total,
+        'completed_percent': round(100 * completed / total, 1) if total else 100.0,
+        'active_documents': active,
+        'percent_explanation': ('Active document percent is a weighted stage '
+                                'estimate, not elapsed time or an exact SQL '
+                                'execution percentage; current/total are exact '
+                                'for tokenization and word mapping.'),
+        'updated_at': utcnow(),
+    }
+
+
 def restore_documents(local_root: Path, drive_root: Path):
     remote = drive_root / "documents"
     if not remote.exists():
@@ -265,21 +316,59 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
                       spacy_model=spacy_model,
                       database_version=database_version)
     start = time.monotonic()
+    total_documents = len(documents)
+    # Restored documents count as completed BEFORE the first new computation.
+    from .text_corpus import _identity
+    done_ids = {
+        doc.doc_id for doc in documents
+        if (local_root / 'documents' / _identity(doc)['key'] / 'COMPLETED').is_file()
+    }
+    active_documents = {}
     published = 0
-    completed = 0
+    last_persisted = 0.0
+
+    def persist_progress(*, force=False):
+        nonlocal last_persisted
+        now = time.monotonic()
+        if not force and now - last_persisted < 10.0:
+            return
+        snapshot = corpus_progress_snapshot(
+            total_documents, done_ids, active_documents)
+        snapshot['published_new_this_session'] = published
+        snapshot['elapsed_seconds'] = round(now - start, 1)
+        save_json(drive_root / 'progress.json', snapshot)
+        last_persisted = now
+        segments = []
+        for status in snapshot['active_documents']:
+            item = (f"{status['doc_id']}: {status['percent']}% "
+                    f"({status['stage_label']}")
+            if status['current'] is not None and status['total']:
+                item += f", {status['current']}/{status['total']}"
+            segments.append(item + ')')
+        activity = ' | '.join(segments) if segments else 'нет активных документов'
+        print(f"[progress] Документы: {snapshot['completed']}/{total_documents} "
+              f"({snapshot['completed_percent']:.1f}%) | {activity}",
+              flush=True)
+
+    def on_progress(status):
+        # status=None is a heartbeat sent while DuckDB is running a long
+        # single SQL statement with no measurable intra-query percentage.
+        if status is not None and status['doc_id'] not in done_ids:
+            active_documents[status['doc_id']] = status
+        persist_progress()
+
     def on_done(report):
-        nonlocal published, completed
-        completed += 1
+        nonlocal published
+        doc_id = report['identity']['doc_id']
+        was_done = doc_id in done_ids
         if checkpoint_document(local_root, drive_root, report):
             published += 1
-        save_json(drive_root / "progress.json", {
-            "completed": completed, "total": len(documents),
-            "published_new_this_session": published,
-            "last_doc_id": report["identity"]["doc_id"],
-            "updated_at": utcnow(), "state": "running"
-        })
-        print(f"[checkpoint] {completed}/{len(documents)}: "
-              f"{report['identity']['doc_id']} edges={report['edge_count']}", flush=True)
+        done_ids.add(doc_id)
+        active_documents.pop(doc_id, None)
+        persist_progress(force=not was_done)
+        if not was_done:
+            print(f"[checkpoint] {len(done_ids)}/{total_documents}: "
+                  f"{doc_id} edges={report['edge_count']}", flush=True)
 
     # Copy immutable run contract as soon as the first worker has created it.
     # We initialize via the package's build_corpus, and callback sees run.json.
@@ -290,8 +379,10 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         on_done(report)
 
     try:
+        persist_progress(force=True)
         manifest = build_corpus(documents, options, resume=resume,
-                                on_document_completed=callback)
+                                on_document_completed=callback,
+                                on_document_progress=on_progress)
         shutil.copy2(local_root / "run.json", drive_root / "run.json")
         for filename in ("manifest.json",):
             shutil.copy2(local_root / filename, drive_root / filename)
@@ -303,19 +394,22 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
             validate_remote(drive_root / "documents" / report["identity"]["key"],
                             report["identity"])
         shutil.copy2(local_root / "COMPLETED", drive_root / "COMPLETED")
-        save_json(drive_root / "progress.json", {
-            "state": "complete", "completed": len(documents),
-            "total": len(documents), "updated_at": utcnow(),
-            "elapsed_seconds": round(time.monotonic() - start, 2),
-            "word_count": manifest["word_count"], "edge_count": manifest["edge_count"]
+        finished = corpus_progress_snapshot(total_documents, done_ids, {},
+                                            state='complete')
+        finished.update({
+            'elapsed_seconds': round(time.monotonic() - start, 2),
+            'word_count': manifest['word_count'], 'edge_count': manifest['edge_count'],
         })
+        save_json(drive_root / 'progress.json', finished)
         print("[complete]", drive_root)
         return manifest
     except BaseException as exc:
-        save_json(drive_root / "progress.json", {
-            "state": "interrupted", "completed_this_session": completed,
-            "updated_at": utcnow(), "error_type": type(exc).__name__,
-            "error": str(exc)[:1000]})
+        failed = corpus_progress_snapshot(total_documents, done_ids,
+                                          active_documents, state='interrupted')
+        failed.update({'completed_this_session': published,
+                       'error_type': type(exc).__name__,
+                       'error': str(exc)[:1000]})
+        save_json(drive_root / 'progress.json', failed)
         raise
 
 
