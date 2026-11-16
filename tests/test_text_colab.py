@@ -8,7 +8,7 @@ import pytest
 
 from semmap_haken.text_colab import (
     checkpoint_document, prepare_zip, restore_documents, safe_label,
-    validate_fresh_experiment_folder
+    validate_fresh_experiment_folder, corpus_progress_snapshot
 )
 from semmap_haken.text_corpus import sha256
 
@@ -153,3 +153,26 @@ def test_clean_notebook_has_subprocess_import_and_no_monkeypatches():
     # Install inside the same Python executable invoked for processing.
     assert 'sys.executable, "-m", "pip", "install"' in all_code
     assert 'sys.executable, "-u", "-m", "semmap_haken.text_colab"' in all_code
+
+
+def test_progress_snapshot_counts_completed_and_reports_active_stage_estimate():
+    docs = {"first"}
+    active = {
+        "second": {"percent": 42, "stage": "mapping_concepts",
+                   "current": 420, "total": 1000},
+        "third": {"percent": 85, "stage": "writing_edges",
+                  "current": 0, "total": 120_000},
+        "first": {"percent": 99, "stage": "already_completed"},
+    }
+    snapshot = corpus_progress_snapshot(4, docs, active)
+    assert snapshot["completed"] == 1
+    assert snapshot["total"] == 4
+    assert snapshot["completed_percent"] == 25.0
+    assert [d["doc_id"] for d in snapshot["active_documents"]] == [
+        "second", "third"
+    ]
+    assert snapshot["active_documents"][0]["percent"] == 42
+    assert snapshot["active_documents"][0]["current"] == 420
+    assert snapshot["active_documents"][1]["stage"] == "writing_edges"
+    assert "estimate" in snapshot["percent_explanation"]
+    assert corpus_progress_snapshot(0, set(), {})["completed_percent"] == 100.0
