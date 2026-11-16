@@ -22,7 +22,7 @@ class Word:
     lemma: str | None = None
 
 
-def words(text: str, nlp=None) -> list[Word]:
+def words(text: str, nlp=None, on_progress=None) -> list[Word]:
     """Code-point offsets, [start,end); hyphens split, internal apostrophes stay.
 
     An explicitly selected spaCy model supplies its own tokenization and lemmas.
@@ -43,9 +43,12 @@ def words(text: str, nlp=None) -> list[Word]:
                 if text[start:end] != token.text:
                     raise RuntimeError("spaCy chunk offset does not match source")
                 result.append(Word(start, end, token.text, token.lemma_ or None))
+            if on_progress is not None:
+                on_progress(offset + len(chunk), len(text))
         return result
     result = []
     i = 0
+    next_progress = 100_000
     while i < len(text):
         if not text[i].isalnum():
             i += 1
@@ -60,6 +63,11 @@ def words(text: str, nlp=None) -> list[Word]:
             else:
                 break
         result.append(Word(start, i, text[start:i]))
+        if on_progress is not None and i >= next_progress:
+            on_progress(i, len(text))
+            next_progress = i + 100_000
+    if on_progress is not None:
+        on_progress(len(text), len(text))
     return result
 
 
