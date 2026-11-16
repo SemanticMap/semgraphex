@@ -425,6 +425,9 @@ def build_corpus(documents: list[Document], options: Options, *, resume=False,
                         if doc_id and last_status.get(doc_id) != snapshot:
                             last_status[doc_id] = snapshot
                             on_document_progress(status)
+                    # Periodic heartbeat also during a long single DuckDB query:
+                    # a stage may stay at 85% while it is computing.
+                    on_document_progress(None)
 
                 while pending:
                     done, pending = wait(pending, timeout=2.0,
