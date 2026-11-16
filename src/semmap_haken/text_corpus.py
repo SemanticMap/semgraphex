@@ -50,6 +50,10 @@ class Options:
     relations: tuple[str, ...] = ()
     spacy_model: str | None = None
     database_version: str = 'unspecified; see database_sha256'
+    chunked_graph: bool = False
+    chunk_chars: int = 100_000
+    edge_partition_rows: int = 1_000_000
+    max_total_edges_per_document: int | None = 150_000_000
 
     def validate(self):
         if sys.version_info < (3, 12):
@@ -61,6 +65,16 @@ class Options:
         if self.max_edges_per_document is not None and (
                 type(self.max_edges_per_document) is not int or self.max_edges_per_document < 1):
             raise ValueError('max_edges_per_document must be positive or null')
+        if not isinstance(self.chunked_graph, bool):
+            raise ValueError('chunked_graph must be a boolean')
+        if type(self.chunk_chars) is not int or self.chunk_chars < 2:
+            raise ValueError('chunk_chars must be an integer >= 2')
+        if type(self.edge_partition_rows) is not int or self.edge_partition_rows < 1:
+            raise ValueError('edge_partition_rows must be a positive integer')
+        if self.max_total_edges_per_document is not None and (
+                type(self.max_total_edges_per_document) is not int or
+                self.max_total_edges_per_document < 1):
+            raise ValueError('max_total_edges_per_document must be positive or null')
         if not Path(self.database).is_file():
             raise FileNotFoundError(self.database)
         if Path(self.output).resolve() == Path(self.database).resolve():
@@ -161,10 +175,14 @@ def _fingerprint(options, documents):
         packages['spacy'] = version('spacy')
         packages[options.spacy_model] = version(options.spacy_model)
     from . import text_conceptnet
+    relevant_source_files = [__file__, text_conceptnet.__file__]
+    if options.chunked_graph:
+        from . import text_chunk_graph
+        relevant_source_files.append(text_chunk_graph.__file__)
     return {'schema_version': SCHEMA_VERSION, 'options': semantic,
             'database_sha256': sha256(Path(options.database)), 'packages': packages,
             'code_sha256': {Path(p).name: sha256(Path(p))
-                            for p in (__file__, text_conceptnet.__file__)},
+                            for p in relevant_source_files},
             'documents': [_identity(d) for d in sorted(documents, key=lambda d: d.doc_id)]}
 
 
@@ -223,6 +241,10 @@ def _build_document(task):
     db = None
     try:
         progress('initializing', 0)
+        if options.chunked_graph:
+            from .text_chunk_graph import build_chunked_document
+            return build_chunked_document(
+                doc, options, staging, final, identity, progress, started)
         nlp = None
         if options.spacy_model:
             import spacy
