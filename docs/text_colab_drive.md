@@ -1,9 +1,41 @@
+## Ограничение графа без прерывания эксперимента
+
+Для длинных документов количество рёбер может быть больше доступного бюджета.
+При `MAX_TOTAL_EDGES_PER_DOC = 150_000_000` сохраняется до 150 млн рёбер
+на **один** документ. Если связей больше, алгоритм публикует ограниченный
+граф в обычном формате Parquet и продолжает обработку остальных документов.
+
+Пример уведомления:
+```text
+[WARNING] article.txt: ограничение графа 150,000,000 рёбер; найдено 167,000,000, будет сохранено 150,000,000, пропущено 17,000,000. Документ продолжит обработку; результат помечен graph_complete=false.
+```
+
+В `documents/<id>/manifest.json` фиксируются `graph_complete`,
+`edge_count_total_expected`, `edge_count`, `edges_omitted`,
+`edge_cap`, `edge_selection_policy`.
+В `manifest.json` корпуса и `progress.json` дополнительно доступны
+`truncated_document_count` и `edges_omitted`.
+В экспортированных `PreparedGraph` сохраняется признак
+`source_graph_complete=false`.
+
+Текст и все вершины сохраняются; ограничиваются только рёбра. Применяется
+детерминированный префикс рёбер в порядке исходного слова, целевого слова
+и идентификатора утверждения. Это не репрезентативная случайная выборка;
+для статистического исследования результаты неполных графов необходимо
+анализировать отдельно.
+
+**Режим без лимита:** `--max-total-edges-per-document 0` не поддерживается:
+для неограниченного графа используйте `max_total_edges_per_document: null`
+в Python API, после оценки свободного места. Colab по умолчанию
+использует предел 150 млн. Он не отключает иные ошибки ввода-вывода,
+повреждений данных или нехватки памяти.
+
 ## Длинные документы: последовательная обработка частями, единый граф
 
 Начиная с ветки `feature/text-corpus-colab-drive-resume`, обновлённый Colab
 использует `--chunked-graph`. Это решает ошибку
 `23306031 occurrence edges exceed max_edges_per_document=20000000`
-для документа `0000068_How_Scientists_Think_21_Experiments.txt` **без удаления рёбер**.
+для документа `0000068_How_Scientists_Think_21_Experiments.txt` **без остановки обработки**. Пока граф не достиг заданного предела, сохраняются все рёбра; при превышении применяется явно документированная обрезка.
 
 1. Исходный текст режется на фрагменты до `chunk_chars=100000`
    кодовых точек Unicode по границам слов. Фрагменты **последовательно**
@@ -24,7 +56,7 @@
    разделяются диапазоны *целевых* вхождений.
 5. `open_corpus()` объединяет все части в один виртуальный
    DuckDB-view `edges`. Отчёт `concept_edges.parquet` агрегирует
-   **все** рёбра, а экспорт `PreparedGraph` работает через тот же view.
+   все **сохранённые** рёбра (если граф ограничен, только их), а экспорт `PreparedGraph` работает через тот же view и получает признак неполноты графа.
    Обычные старые `edges.parquet` продолжают поддерживаться.
 
 Флаги CLI для полного графа:
@@ -41,15 +73,14 @@ python -m semmap_haken.text_colab \
 
 `--max-edges-per-document 0` **отключает старый общий предел**
 20 млн рёбер, только в режиме `--chunked-graph`. Новый
-`max-total-edges-per-document` — независимый страховочный предел
-для защиты диска; при превышении будет явная ошибка, а не усечение.
+`max-total-edges-per-document` — независимый предел сохраняемых рёбер (по умолчанию 150 млн). При превышении программа **не падает**: записывает первые N рёбер в детерминированном порядке `source_occurrence_id, target_occurrence_id, assertion_id`, сообщает число пропущенных связей и продолжает обработку следующего документа. Это **не случайная выборка**; научные выводы по ограниченным графам могут быть смещены. Другой явно заданный `max-edges-per-document` (если не 0) также действует как ограничение; применяется меньшая из двух величин.
 На промежуточных этапах прогресс `mapping_chunks` отображает реальное
 число уже обработанных символов текста, а `writing_edges` —
 реальное число рёбер, записанных в Parquet.
 
 **Восстановление:** контрольные суммы и `COMPLETED` публикуются
 на Google Drive после завершения **всего документа**, включая все
-`edges_part_*.parquet`. Если Colab прервался *внутри* большого документа,
+`edges_part_*.parquet` (даже если записано только N рёбер из большего исходного графа). Метаданные `graph_complete=false`, `edge_count_total_expected`, `edges_omitted`, `edge_cap` и `edge_selection_policy` сохраняют информацию о неполноте. Если Colab прервался *внутри* большого документа,
 его незавершённые части локального SSD пересчитываются; завершённые и
 опубликованные документы восстанавливаются полностью. Изменение
 алгоритма/параметров требует **новой метки эксперимента**. Старые
@@ -180,7 +211,7 @@ Use `--hf-revision <SHA>` only to intentionally change dataset version. An exist
 ## Durable checkpoints, parallelism and reproducibility
 
 - Independent worker processes (`spawn`) each read the SQLite DB in `mode=ro`; CPU workers are capped using available RAM and CPU cores; DuckDB operates on local SSD with one thread per worker by default.
-- The coordinator receives each finished task immediately (`as_completed`) and publishes the entire completed document to its Drive `documents/<sha256(doc_id)>` directory. Includes Parquet, source text, manifest and SHA-256; no silently truncated edges.
+- The coordinator publishes each finished document and its SHA-256 checksums to Drive. With a configured cap, a graph can deliberately contain fewer edges: it is explicitly marked `graph_complete=false`, and the exact omitted-edge count is saved in document, corpus and progress manifests.
 - `progress.json` is updated periodically (~10 seconds), plus after each completed document. `experiment.json` includes SHA-256 of ZIP and SQLite and selected TXT list policy; `run.json` includes code/package versions. Root `COMPLETED` appears only after all results pass verification.
 - `RESUME` copies only valid remote document outputs back to the local scratch directory and skips them. A document interrupted before publication is reprocessed.
 - **Important:** a new Colab VM generally loses the local Hugging Face cache and must download the ~1.78 GB SQLite again; document checkpoints on Drive persist. For near-instant startup across Colab sessions a separate, user-approved persistent cache of the DB would be needed.
