@@ -9,6 +9,7 @@ on:
       - 'tests/test_text_colab.py'
       - 'tests/test_text_hf.py'
       - 'tests/test_text_spacy_chunks.py'
+      - 'tests/test_text_chunk_graph.py'
       - 'notebooks/10_text_corpus_conceptnet_local_drive.ipynb'
       - 'notebooks/11_text_corpus_hf55_colab_clean.ipynb'
       - 'pyproject.toml'
@@ -41,4 +42,4 @@ jobs:
       - run: python -m json.tool notebooks/10_text_corpus_conceptnet_local_drive.ipynb > /dev/null
       - run: python -m json.tool notebooks/11_text_corpus_hf55_colab_clean.ipynb > /dev/null
       - run: python -m compileall -q src/semmap_haken/text_conceptnet.py src/semmap_haken/text_hf.py src/semmap_haken/text_corpus.py src/semmap_haken/text_colab.py
-      - run: python -m pytest -q tests/test_text_corpus_words.py tests/test_text_corpus.py tests/test_text_colab.py tests/test_text_hf.py tests/test_text_spacy_chunks.py
+      - run: python -m pytest -q tests/test_text_corpus_words.py tests/test_text_corpus.py tests/test_text_colab.py tests/test_text_hf.py tests/test_text_spacy_chunks.py tests/test_text_chunk_graph.py
