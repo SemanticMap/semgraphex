@@ -302,7 +302,7 @@ def build_chunked_document(doc, options, staging, final, identity,
         connection = None
         shutil.rmtree(staging / "spill", ignore_errors=True)
         _json(staging / "manifest.json", report)
-        (staging / "COMPLETED").write_text("complete\\n", encoding="utf-8")
+        (staging / "COMPLETED").write_text("complete\n", encoding="utf-8")
         os.replace(staging, final)
         progress("ready_for_checkpoint", 99, expected, expected)
         return report
