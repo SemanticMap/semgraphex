@@ -336,6 +336,7 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         if (local_root / 'documents' / _identity(doc)['key'] / 'COMPLETED').is_file()
     }
     active_documents = {}
+    truncated_documents = {}
     published = 0
     last_persisted = 0.0
 
@@ -347,6 +348,9 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         snapshot = corpus_progress_snapshot(
             total_documents, done_ids, active_documents)
         snapshot['published_new_this_session'] = published
+        snapshot['truncated_document_count'] = len(truncated_documents)
+        snapshot['truncated_documents'] = truncated_documents
+        snapshot['edges_omitted'] = sum(truncated_documents.values())
         snapshot['elapsed_seconds'] = round(now - start, 1)
         save_json(drive_root / 'progress.json', snapshot)
         last_persisted = now
@@ -376,12 +380,16 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         if checkpoint_document(local_root, drive_root, report):
             published += 1
         done_ids.add(doc_id)
+        if not report.get('graph_complete', True):
+            truncated_documents[doc_id] = report['edges_omitted']
         active_documents.pop(doc_id, None)
         persist_progress(force=not was_done)
         if not was_done:
+            detail = (f", WARNING: пропущено {report['edges_omitted']:,} рёбер"
+                      if not report.get('graph_complete', True) else "")
             print(f"[checkpoint] {len(done_ids)}/{total_documents}: "
                   f"{doc_id} — 100% (опубликован), "
-                  f"edges={report['edge_count']}", flush=True)
+                  f"edges={report['edge_count']}{detail}", flush=True)
 
     # Copy immutable run contract as soon as the first worker has created it.
     # We initialize via the package's build_corpus, and callback sees run.json.
@@ -412,6 +420,10 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         finished.update({
             'elapsed_seconds': round(time.monotonic() - start, 2),
             'word_count': manifest['word_count'], 'edge_count': manifest['edge_count'],
+            'edge_count_total_expected': manifest['edge_count_total_expected'],
+            'edges_omitted': manifest['edges_omitted'],
+            'truncated_document_count': manifest['truncated_document_count'],
+            'truncated_documents': truncated_documents,
         })
         save_json(drive_root / 'progress.json', finished)
         print("[complete]", drive_root)
@@ -420,6 +432,9 @@ def execute(archive: str | Path, database: str | Path, drive_parent: str | Path,
         failed = corpus_progress_snapshot(total_documents, done_ids,
                                           active_documents, state='interrupted')
         failed.update({'completed_this_session': published,
+                       'edges_omitted': sum(truncated_documents.values()),
+                       'truncated_document_count': len(truncated_documents),
+                       'truncated_documents': truncated_documents,
                        'error_type': type(exc).__name__,
                        'error': str(exc)[:1000]})
         save_json(drive_root / 'progress.json', failed)
