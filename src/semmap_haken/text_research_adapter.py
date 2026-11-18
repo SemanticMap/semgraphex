@@ -136,7 +136,7 @@ def load_typed_text_graph(
                            if max_distance_chars is None else None)
             weight_kind = ("1/(1+shuffled_character_distance)"
                            if position_shuffle_seed is not None else
-                           "1/(1+absolute_character_distance)"
+                           "1/(1+absolute_character_distance)")
         if n > max_vertices:
             raise ValueError(
                 f"Research view has {n} nodes > max_vertices={max_vertices}; "
