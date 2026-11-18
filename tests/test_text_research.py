@@ -284,3 +284,11 @@ def test_text_h1_runner_receives_complete_graph_and_grouped_split(corpus, tmp_pa
     assert len(seen["groups"]) == 6
     assert seen["source"]["stored_graph_state"] == "capped"
     assert seen["source"]["implicit_full_graph_reconstructed"] is True
+
+
+def test_h1_rejects_ineffective_position_shuffle_without_distance_window(corpus, tmp_path):
+    from semmap_haken.text_h1 import run_text_h1
+    with pytest.raises(ValueError, match="distance window"):
+        run_text_h1(corpus, "main", tmp_path / "blocked",
+                    projection="occurrence", position_shuffle_seed=42)
+    assert not (tmp_path / "blocked").exists()
