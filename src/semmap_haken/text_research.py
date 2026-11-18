@@ -7,6 +7,7 @@ all-pairs edge relation is materialized unless the caller explicitly asks.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -42,6 +43,9 @@ def audit_corpus(corpus: str | Path, *, verify: bool = True,
     for entry in rows:
         identity = entry["identity"]
         row_id, key = identity["doc_id"], identity["key"]
+        if (not isinstance(row_id, str) or not row_id or
+                key != hashlib.sha256(row_id.encode("utf-8")).hexdigest()):
+            raise ValueError("Invalid or unsafe document key in corpus manifest")
         if row_id in seen_ids or key in seen_keys:
             raise ValueError("Duplicate document identity in corpus manifest")
         seen_ids.add(row_id)
