@@ -267,20 +267,43 @@ def _best_fit(tasks: list[dict], task_paths: list[Path]) -> tuple[dict, list[lis
     return info, partitions
 
 
-def _identity_manifest(graph: TypedGraph, config: H1Config) -> dict[str, object]:
-    return {
+def _identity_manifest(graph: TypedGraph, config: H1Config,
+                       group_keys: tuple[str, ...] | None = None,
+                       source_contract: dict | None = None
+                       ) -> dict[str, object]:
+    result = {
         "schema": "h1-runnable-v1",
         "graph_sha256": _sha_bytes(graph),
         "implementation_sha256": _implementation_fingerprint(),
         "git_revision": _git_revision(),
         "config": asdict(config),
     }
+    if source_contract is not None:
+        if not isinstance(source_contract, dict):
+            raise ValueError("Source contract must be a JSON-serializable dict")
+        result["source_contract"] = source_contract
+        result["source_contract_sha256"] = hashlib.sha256(
+            json.dumps(source_contract, sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+    if group_keys is not None:
+        if (len(group_keys) != graph.edge_count or
+                any(not isinstance(x, str) or not x for x in group_keys)):
+            raise ValueError("Invalid H1 split grouping metadata")
+        result["split_group_sha256"] = hashlib.sha256(
+            json.dumps(group_keys, ensure_ascii=False,
+                       separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        result["split_group_policy"] = "external concept pair family"
+    return result
 
 
 def run_h1(
     graph: TypedGraph, output: Path | str, *, config: H1Config,
     resume: bool = False,
     fit_fn: Callable | None = None, flat_sampler: Callable | None = None,
+    group_keys: tuple[str, ...] | None = None,
+    source_contract: dict | None = None,
 ) -> dict[str, object]:
     """Execute H1 with two conditional null controls and restart checkpointing.
 
@@ -289,7 +312,8 @@ def run_h1(
     solely for small deterministic runner tests (forced synchronous execution).
     """
     output = Path(output)
-    manifest = _identity_manifest(graph, config)
+    manifest = _identity_manifest(graph, config, group_keys=group_keys,
+                                  source_contract=source_contract)
     manifest_path = output / "manifest.json"
     if resume:
         if not manifest_path.exists():
@@ -305,7 +329,8 @@ def run_h1(
         output.mkdir(parents=True, exist_ok=True)
         _json_atomic(manifest_path, manifest)
     split = split_graph(graph, seed=config.seed, train_fraction=config.train_fraction,
-                        validation_fraction=config.validation_fraction)
+                        validation_fraction=config.validation_fraction,
+                        group_keys=group_keys)
     if split.test.edge_count == 0:
         raise ValueError("no held-out test edges: need a larger source graph")
     _save_graph(split.train, output / "data" / "train")

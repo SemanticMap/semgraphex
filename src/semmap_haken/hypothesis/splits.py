@@ -19,21 +19,31 @@ class GraphSplit:
 def split_graph(
     graph: TypedGraph, *, seed: int, train_fraction: float = .8,
     validation_fraction: float = .1,
+    group_keys: tuple[str, ...] | None = None,
 ) -> GraphSplit:
-    """Keep parallel statements and reciprocals within one split.
+    """Keep parallel, reciprocal AND group-key-related edges in one split.
 
-    Relations with fewer than three distinct undirected endpoint pairs remain
-    entirely in training; their prediction quality cannot be estimated.
-    Vertex/relation dictionaries are kept identical across all three splits.
+    Optional group_keys are external families (e.g. text ConceptNet assertion
+    concept-pair group across many repeated word occurrences). They MUST be
+    constructed without held-out labels. Splits are stratified by relation,
+    preserve full node/relation dictionaries, and never split one family.
     """
     if not 0 < train_fraction < 1 or not 0 <= validation_fraction < 1 - train_fraction:
         raise ValueError("need 0 < train_fraction < 1 and 0 <= validation_fraction < 1-train_fraction")
+    if group_keys is not None and (
+            len(group_keys) != graph.edge_count or
+            any(not isinstance(x, str) or not x for x in group_keys)):
+        raise ValueError("group_keys must contain one nonempty string per edge")
     rng = np.random.default_rng(seed)
-    groups: dict[tuple[int, int, int], list[int]] = {}
+    groups: dict[tuple, list[int]] = {}
     for i, (u, v, r) in enumerate(zip(graph.source, graph.target, graph.relation)):
+        # Generic ConceptNet splits use the node pair. Text occurrence graphs
+        # must group by original *concept* pair to stop source assertion reuse.
         x, y = sorted((int(u), int(v)))
-        groups.setdefault((int(r), x, y), []).append(i)
-    by_rel: dict[int, list[tuple[int, int, int]]] = {}
+        key = ((int(r), group_keys[i]) if group_keys is not None
+               else (int(r), x, y))
+        groups.setdefault(key, []).append(i)
+    by_rel: dict[int, list[tuple]] = {}
     for key in sorted(groups):
         by_rel.setdefault(key[0], []).append(key)
     mask = np.zeros(graph.edge_count, dtype=np.int8)
