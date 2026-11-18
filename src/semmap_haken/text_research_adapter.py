@@ -33,6 +33,7 @@ class TypedTextGraph:
     distance_chars: tuple[int | None, ...]
     holdout_groups: tuple[str, ...]
     weight_semantics: str
+    position_shuffle_seed: int | None = None
 
     @property
     def provenance_complete(self) -> bool:
@@ -42,6 +43,7 @@ class TypedTextGraph:
         return {
             "doc_id": self.doc_id, "projection": self.projection,
             "distance_limit": self.distance_limit,
+            "position_shuffle_seed": self.position_shuffle_seed,
             "stored_graph_state": self.stored_graph_state,
             "reconstructed_from": ["occurrences.parquet", "assertions.parquet"],
             "typed_vertices": self.graph.vertex_count,
@@ -60,6 +62,7 @@ def load_typed_text_graph(
     max_distance_chars: int | None = None,
     max_vertices: int = 10_000,
     max_edges: int = 200_000,
+    position_shuffle_seed: int | None = None,
 ) -> TypedTextGraph:
     """Return exact H1 TypedGraph plus source attribution for a bounded view.
 
@@ -80,8 +83,14 @@ def load_typed_text_graph(
         raise ValueError("max_distance_chars must be nonnegative or None")
     if projection == "concept" and max_distance_chars is not None:
         raise ValueError("Distance window is defined only for occurrence vertices")
+    if position_shuffle_seed is not None and type(position_shuffle_seed) is not int:
+        raise ValueError("position_shuffle_seed must be an integer or None")
+    if projection == "concept" and position_shuffle_seed is not None:
+        raise ValueError("Position shuffling affects only occurrence projection")
 
-    with open_research_views(corpus, doc_id) as view:
+    with open_research_views(
+        corpus, doc_id, seed=position_shuffle_seed if position_shuffle_seed is not None else 42
+    ) as view:
         db = view.db
         if projection == "concept":
             n = db.execute(
@@ -112,18 +121,22 @@ def load_typed_text_graph(
             where = ""
             if max_distance_chars is not None:
                 where = f"WHERE distance_chars <= {max_distance_chars}"
+            selected_source = ("research_shuffled_edges" if position_shuffle_seed is not None
+                               else "research_expanded_edges")
             edge_query = (
                 "SELECT source_occurrence_id, target_occurrence_id, "
                 "relation_uri, proximity_weight, assertion_id, "
                 "source_occurrence_id, target_occurrence_id, distance_chars, "
                 "source_concept, target_concept "
-                f"FROM research_expanded_edges {where} "
+                f"FROM {selected_source} {where} "
                 "ORDER BY source_occurrence_id, target_occurrence_id, "
                 "assertion_id"
             )
             known_edges = (view.full_edge_count()
                            if max_distance_chars is None else None)
-            weight_kind = "1/(1+absolute_character_distance)"
+            weight_kind = ("1/(1+shuffled_character_distance)"
+                           if position_shuffle_seed is not None else
+                           "1/(1+absolute_character_distance)"
         if n > max_vertices:
             raise ValueError(
                 f"Research view has {n} nodes > max_vertices={max_vertices}; "
@@ -195,5 +208,5 @@ def load_typed_text_graph(
             view.audit_row["state"], tuple(origin_ids),
             tuple(source_concepts), tuple(target_concepts),
             tuple(source_occ), tuple(target_occ), tuple(distances),
-            tuple(holdout), weight_kind,
+            tuple(holdout), weight_kind, position_shuffle_seed,
         )
