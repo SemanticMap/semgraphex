@@ -195,3 +195,92 @@ def test_single_document_verification_does_not_hash_unrelated_150m_edge_files(co
     assert targeted["integrity"] == "selected_document_sha256_verified"
     with open_research_views(corpus, "main") as selected:
         assert selected.full_edge_count() == 6
+
+
+
+def test_h1_grouped_split_never_separates_repeated_assertion_families(corpus):
+    from semmap_haken.hypothesis.splits import split_graph
+    data = load_typed_text_graph(corpus, "main", projection="occurrence",
+                                 max_vertices=10, max_edges=10)
+    assert len(data.holdout_groups) == data.graph.edge_count
+    split = split_graph(data.graph, seed=37, group_keys=data.holdout_groups,
+                        train_fraction=.5, validation_fraction=.0)
+    families = dict(zip(data.graph.assertion_ids, data.holdout_groups))
+    tr = {families[i] for i in split.train.assertion_ids}
+    va = {families[i] for i in split.validation.assertion_ids}
+    te = {families[i] for i in split.test.assertion_ids}
+    assert tr.isdisjoint(va) and tr.isdisjoint(te) and va.isdisjoint(te)
+    assert split.train.edge_count + split.validation.edge_count + split.test.edge_count == 6
+    assert sum(split.group_counts.values()) == len(set(data.holdout_groups))
+    # All duplicate cat→animal occurrences of the same assertion stay together.
+    pairs = [(aid, grp) for aid, grp in zip(data.source_assertion_ids, data.holdout_groups)]
+    from collections import defaultdict
+    indices = defaultdict(set)
+    for selected, which in ((split.train, "train"), (split.test, "test"),
+                             (split.validation, "validation")):
+        for item in selected.assertion_ids:
+            indices[families[item]].add(which)
+    assert all(len(v) == 1 for v in indices.values())
+
+
+def test_text_position_null_preserves_unweighted_edges_and_changes_only_distances(corpus):
+    a = load_typed_text_graph(corpus, "main", projection="occurrence",
+                              max_vertices=10, max_edges=10)
+    b = load_typed_text_graph(corpus, "main", projection="occurrence",
+                              position_shuffle_seed=5,
+                              max_vertices=10, max_edges=10)
+    c = load_typed_text_graph(corpus, "main", projection="occurrence",
+                              position_shuffle_seed=5,
+                              max_vertices=10, max_edges=10)
+    assert a.graph.assertion_ids == b.graph.assertion_ids
+    assert a.source_assertion_ids == b.source_assertion_ids
+    assert a.holdout_groups == b.holdout_groups
+    assert (a.graph.source == b.graph.source).all()
+    assert (a.graph.target == b.graph.target).all()
+    assert (a.graph.relation == b.graph.relation).all()
+    assert b.distance_chars == c.distance_chars
+    assert b.position_shuffle_seed == 5
+    with pytest.raises(ValueError, match="only occurrence"):
+        load_typed_text_graph(corpus, "main", projection="concept",
+                              position_shuffle_seed=10)
+
+
+def test_h1_resume_fingerprints_split_families_and_source_provenance(corpus):
+    from semmap_haken.hypothesis.runner import _identity_manifest, H1Config
+    g = load_typed_text_graph(corpus, "main", projection="occurrence",
+                              max_vertices=10, max_edges=10)
+    config = H1Config(restarts=1, null_replicates=0, bootstrap_repetitions=20)
+    base = _identity_manifest(g.graph, config, group_keys=g.holdout_groups,
+                              source_contract={"doc_id": "main", "schema": "text-v1"})
+    changed = _identity_manifest(
+        g.graph, config, group_keys=g.holdout_groups,
+        source_contract={"doc_id": "another", "schema": "text-v1"})
+    different_groups = _identity_manifest(
+        g.graph, config, group_keys=tuple(x + "_other" for x in g.holdout_groups),
+        source_contract={"doc_id": "main", "schema": "text-v1"})
+    assert base["source_contract_sha256"] != changed["source_contract_sha256"]
+    assert base["split_group_sha256"] != different_groups["split_group_sha256"]
+    with pytest.raises(ValueError, match="group"):
+        _identity_manifest(g.graph, config, group_keys=("bad",))
+
+
+def test_text_h1_runner_receives_complete_graph_and_grouped_split(corpus, tmp_path, monkeypatch):
+    from semmap_haken import text_h1
+    seen = {}
+
+    def fake_runner(graph, output, *, config, resume, group_keys,
+                    source_contract, fit_fn, flat_sampler):
+        seen.update({"graph": graph, "groups": group_keys,
+                     "source": source_contract, "resume": resume})
+        return {"status": "inconclusive", "decision": {"status": "inconclusive"}}
+
+    monkeypatch.setattr(text_h1, "run_h1", fake_runner)
+    result = text_h1.run_text_h1(
+        corpus, "main", tmp_path / "h1",
+        projection="occurrence", max_vertices=10, max_edges=10,
+    )
+    assert result["status"] == "inconclusive"
+    assert seen["graph"].edge_count == 6  # 3 were archived; 6 are implicit
+    assert len(seen["groups"]) == 6
+    assert seen["source"]["stored_graph_state"] == "capped"
+    assert seen["source"]["implicit_full_graph_reconstructed"] is True
