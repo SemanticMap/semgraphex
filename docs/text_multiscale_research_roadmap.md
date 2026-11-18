@@ -1,5 +1,32 @@
 # Text corpora → multiscale semantic-network research (dissertation v5)
 
+> **P1 slice 1 implemented in follow-on PR #28 (not the whole P1):** optional
+> group-key train/val/test split in the existing H1 runner; a source-aware
+> RESUME contract; an observed/shuffled text-distance control; and a thin
+> `semmap_haken.text_h1` CLI. Independent text-only edge extraction,
+> cross-corpus validation, and the full P1 null experiment remain open.
+
+First bounded text/ConceptNet H1 run after completing the P0 audit:
+
+```bash
+python -m semmap_haken.text_h1 \
+    --corpus /content/local-corpus \
+    --doc-id 'Txt/example.txt' \
+    --output /content/research-h1-example \
+    --projection concept --max-vertices 10000 --max-edges 200000 \
+    --restarts 10 --nulls 99 --workers auto
+```
+
+The H1 fitter uses graph-tool on **CPU/OpenMP**; CUDA is not a model fitting
+backend. Distance-sensitive occurrence H1 requires
+`--projection occurrence --max-distance-chars 500`.
+Position shuffling requires a distance limit because the current H1 nSBM
+does not model edge weights: shuffling without a window is an ineffective
+topological null, which the CLI now rejects. NEW/RESUME manifests are
+bound to the origin corpus and the grouping scheme, so changes cannot
+silently reuse old fits.
+
+
 This work starts from
 `feature/text-corpus-colab-drive-resume` at
 `f4203587b24d0d23bafa0cd6067244f70caab3bb`, without modifying
