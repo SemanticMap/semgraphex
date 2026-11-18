@@ -268,7 +268,8 @@ def _best_fit(tasks: list[dict], task_paths: list[Path]) -> tuple[dict, list[lis
 
 
 def _identity_manifest(graph: TypedGraph, config: H1Config,
-                       group_keys: tuple[str, ...] | None = None
+                       group_keys: tuple[str, ...] | None = None,
+                       source_contract: dict | None = None
                        ) -> dict[str, object]:
     result = {
         "schema": "h1-runnable-v1",
@@ -277,6 +278,14 @@ def _identity_manifest(graph: TypedGraph, config: H1Config,
         "git_revision": _git_revision(),
         "config": asdict(config),
     }
+    if source_contract is not None:
+        if not isinstance(source_contract, dict):
+            raise ValueError("Source contract must be a JSON-serializable dict")
+        result["source_contract"] = source_contract
+        result["source_contract_sha256"] = hashlib.sha256(
+            json.dumps(source_contract, sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
     if group_keys is not None:
         if (len(group_keys) != graph.edge_count or
                 any(not isinstance(x, str) or not x for x in group_keys)):
@@ -294,6 +303,7 @@ def run_h1(
     resume: bool = False,
     fit_fn: Callable | None = None, flat_sampler: Callable | None = None,
     group_keys: tuple[str, ...] | None = None,
+    source_contract: dict | None = None,
 ) -> dict[str, object]:
     """Execute H1 with two conditional null controls and restart checkpointing.
 
@@ -302,7 +312,8 @@ def run_h1(
     solely for small deterministic runner tests (forced synchronous execution).
     """
     output = Path(output)
-    manifest = _identity_manifest(graph, config, group_keys=group_keys)
+    manifest = _identity_manifest(graph, config, group_keys=group_keys,
+                                  source_contract=source_contract)
     manifest_path = output / "manifest.json"
     if resume:
         if not manifest_path.exists():
