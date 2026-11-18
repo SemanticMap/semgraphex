@@ -179,3 +179,19 @@ def test_legacy_missing_proof_is_unknown_not_full(corpus):
     revised = audit_corpus(corpus)
     assert revised["unknown_documents"] == 1
     assert revised["primary_h1_eligible_count"] == 0
+
+
+def test_single_document_verification_does_not_hash_unrelated_150m_edge_files(corpus):
+    docs = audit_corpus(corpus)["documents"]
+    other = next(d for d in docs if d["doc_id"] == "other")
+    (corpus / "documents" / other["key"] / "text.txt").write_text("altered")
+    # Whole corpus must reject the tampering, while a separate verified
+    # research view on 'main' can be opened without scanning other documents.
+    with pytest.raises(ValueError, match="Checksum"):
+        audit_corpus(corpus)
+    targeted = audit_corpus(corpus, doc_id="main")
+    assert targeted["total_documents"] == 1
+    assert targeted["corpus_document_count"] == 2
+    assert targeted["integrity"] == "selected_document_sha256_verified"
+    with open_research_views(corpus, "main") as selected:
+        assert selected.full_edge_count() == 6
