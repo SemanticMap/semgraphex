@@ -14,7 +14,8 @@ from pathlib import Path
 from .text_corpus import _literal, _verify_document, sha256
 
 
-def audit_corpus(corpus: str | Path, *, verify: bool = True) -> dict:
+def audit_corpus(corpus: str | Path, *, verify: bool = True,
+                 doc_id: str | None = None) -> dict:
     """Admit only integrity-checked, demonstrably full graphs to primary H1.
 
     Capped documents remain suitable for reconstructing the full *implicit*
@@ -32,15 +33,22 @@ def audit_corpus(corpus: str | Path, *, verify: bool = True) -> dict:
     rows = manifest.get("documents")
     if not isinstance(rows, list) or not rows:
         raise ValueError("Corpus has no published documents")
+    # Inspect all *manifest identities* cheaply even for a single-document
+    # audit. Hashing enormous edge Parquet parts of OTHER documents is neither
+    # necessary nor affordable when creating just one research view.
+    selected_id = doc_id
     seen_ids, seen_keys = set(), set()
     results = []
     for entry in rows:
         identity = entry["identity"]
-        doc_id, key = identity["doc_id"], identity["key"]
-        if doc_id in seen_ids or key in seen_keys:
+        row_id, key = identity["doc_id"], identity["key"]
+        if row_id in seen_ids or key in seen_keys:
             raise ValueError("Duplicate document identity in corpus manifest")
-        seen_ids.add(doc_id)
+        seen_ids.add(row_id)
         seen_keys.add(key)
+        if selected_id is not None and row_id != selected_id:
+            continue
+        doc_id = row_id
         folder = root / "documents" / key
         local = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
         if local != entry:
@@ -74,11 +82,18 @@ def audit_corpus(corpus: str | Path, *, verify: bool = True) -> dict:
             "omitted_edges": omitted, "primary_h1_eligible": verify and state == "full",
             "implicit_reconstruction_available": verify,
         })
-    if sum(x["stored_edges"] for x in results) != manifest["edge_count"]:
+    if selected_id is not None and not results:
+        raise ValueError(f"Unknown document ID: {selected_id!r}")
+    # Validate whole-manifest arithmetic without touching all other files.
+    if sum(r["edge_count"] for r in rows) != manifest["edge_count"]:
         raise ValueError("Corpus edge count disagrees with document manifests")
     return {
         "schema": "text-research-audit-v1",
-        "root": str(root), "integrity": "sha256_verified" if verify else "unchecked",
+        "root": str(root),
+        "integrity": ("sha256_verified" if selected_id is None
+                      else "selected_document_sha256_verified") if verify else "unchecked",
+        "corpus_document_count": len(rows),
+        "selected_document_id": selected_id,
         "run_sha256": manifest["run_sha256"],
         "total_documents": len(results),
         "full_documents": sum(x["state"] == "full" for x in results),
@@ -144,7 +159,7 @@ def open_research_views(corpus: str | Path, doc_id: str, *,
         raise ValueError("seed must be an integer")
     if not verify:
         raise ValueError("Research projections require checksum verification")
-    audit = audit_corpus(corpus, verify=True)
+    audit = audit_corpus(corpus, verify=True, doc_id=doc_id)
     match = [row for row in audit["documents"] if row["doc_id"] == doc_id]
     if len(match) != 1:
         raise ValueError(f"Unknown document ID: {doc_id!r}")
