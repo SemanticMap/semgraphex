@@ -33,6 +33,11 @@ def run_text_h1(
     Position-shuffled controls share their ConceptNet-induced unweighted
     topology; only distance-dependent weights/window edges can change.
     """
+    if position_shuffle_seed is not None and max_distance_chars is None:
+        raise ValueError(
+            "Position shuffle without a distance window changes only weights; "
+            "the current H1 nSBM ignores edge weights. Set max_distance_chars."
+        )
     audit = audit_corpus(corpus, doc_id=doc_id)
     row = audit["documents"][0]
     typed = load_typed_text_graph(
